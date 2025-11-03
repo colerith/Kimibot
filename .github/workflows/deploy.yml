@@ -1,0 +1,2 @@
+env:
+  BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
