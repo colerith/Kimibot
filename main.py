@@ -3,6 +3,7 @@ from discord.ext import commands
 import os
 # from keep_alive import keep_alive  # Not needed for Reserved VM deployment
 
+load_dotenv()
 # 从环境变量读取 Bot Token（由 Replit Secrets 管理）
 BOT_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
 
