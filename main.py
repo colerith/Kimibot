@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 import os
+from dotenv import load_dotenv
 # from keep_alive import keep_alive  # Not needed for Reserved VM deployment
 
 load_dotenv()
