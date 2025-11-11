@@ -203,7 +203,7 @@ class TicketActionView(discord.ui.View):
             await interaction.response.send_message("呜哇！本大王没有权限修改身份组！", ephemeral=True)
             return
 
-        embed = discord.Embed(title="# 🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩，进群问题也是填写你的【工单编号】就可以惹！\n## 对审核过程没有异议，同意并且阅读完全部东西后@当前审核员/任何超级小蛋来进行归档~身份组已经添加", color=STYLE["KIMI_YELLOW"])
+        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩，进群问题也是填写你的【工单编号】就可以惹！\n## 对审核过程没有异议，同意并且阅读完全部东西后请点击下方按钮~身份组已经添加", color=STYLE["KIMI_YELLOW"])
         embed.set_image(url="https://files.catbox.moe/2tytko.jpg")
         embed.set_footer(text="宝宝如果已申请/不打算加群/没有别的问题了，请点击下方对应按钮")
         await interaction.channel.send(f"恭喜 {creator.mention} 通过审核！", embed=embed, view=ArchiveRequestView(reviewer=interaction.user))
@@ -252,18 +252,29 @@ class TicketPanelView(discord.ui.View):
 
     @discord.ui.button(label="🥚 创建审核工单", style=discord.ButtonStyle.primary, custom_id="create_ticket_panel_button")
     async def create_ticket_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
+        # --- 新增：时间检查 ---
+        now = datetime.datetime.now(QUOTA["TIMEZONE"])
+        if not (8 <= now.hour < 23):
+            await interaction.response.send_message("呜...现在是审核员的休息时间 (08:00 - 23:00)，请在开放时间内再来申请哦！", ephemeral=True)
+            return
+        # --- 结束新增部分 ---
+
         user_roles = [role.id for role in interaction.user.roles]
         if IDS["VERIFICATION_ROLE_ID"] not in user_roles and IDS["SUPER_EGG_ROLE_ID"] not in user_roles:
             await interaction.response.send_message(f"呜...只有【新兵蛋子】或【超级小蛋】才能创建审核工单哦！", ephemeral=True)
             return
+        
         await interaction.response.defer(ephemeral=True)
         data = self.cog.load_quota_data()
+        
         if data["daily_quota_left"] <= 0:
             await interaction.followup.send("呜...今天的新蛋审核名额已经用完惹，请明天再来吧！", ephemeral=True)
             return
+            
         data["daily_quota_left"] -= 1
         self.cog.save_quota_data(data)
         await self.cog.update_ticket_panel()
+        
         try:
             first_review_category = interaction.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
             if not first_review_category or not isinstance(first_review_category, discord.CategoryChannel):
@@ -333,19 +344,33 @@ class Tickets(commands.Cog):
         if not panel_channel: 
             print("错误：找不到工单面板频道，无法更新！")
             return
+        
         data = self.load_quota_data()
-        today_str = datetime.datetime.now(QUOTA["TIMEZONE"]).strftime('%Y-%m-%d')
+        now = datetime.datetime.now(QUOTA["TIMEZONE"])
+        today_str = now.strftime('%Y-%m-%d')
+        current_hour = now.hour
         quota_left = data.get("daily_quota_left", 0)
+        
         embed = discord.Embed(title="🥚 新蛋身份审核", color=STYLE["KIMI_YELLOW"])
         description = "点击下方按钮，系统将为您自动开设单独的审核频道...\n\n"
+        description += f"**-` 审核开放时间: 每日 08:00 - 23:00 `**\n" # <-- 新增：明确告知开放时间
         description += f"**-` {today_str} `**\n"
         daily_limit = QUOTA["DAILY_TICKET_LIMIT"]
         description += f"**-` 今日剩余名额: {quota_left}/{daily_limit} `**"
+        
         embed.description = description
         view = TicketPanelView(self)
+
+        # 核心修改：检查名额和时间
         if quota_left <= 0:
             view.children[0].disabled = True
             view.children[0].label = "今日名额已满"
+        # 新增判断：如果时间不在 8点 到 22点 (23点前) 之间
+        elif not (8 <= current_hour < 23):
+            view.children[0].disabled = True
+            view.children[0].label = "当前为休息时间"
+            embed.description += "\n\n**当前为审核员休息时间，暂时无法创建工单哦~**"
+
         try:
             async for message in panel_channel.history(limit=5):
                 if message.author == self.bot.user and message.embeds and "新蛋身份审核" in message.embeds[0].title:
