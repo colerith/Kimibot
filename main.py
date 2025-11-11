@@ -6,6 +6,8 @@ import os
 # 从环境变量读取 Bot Token（由 Replit Secrets 管理）
 BOT_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
 
+print(f"从.env文件中读取到的Token是: '{BOT_TOKEN}'")
+
 # --- 机器人本体创建 ---
 # 确保所有需要的 Intents 都已开启
 intents = discord.Intents.default()
