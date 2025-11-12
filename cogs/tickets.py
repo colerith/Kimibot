@@ -329,6 +329,7 @@ class Tickets(commands.Cog):
         print("唷呐！工单模块的永久视图已成功注册！")
         self.reset_daily_quota.start()
         self.check_inactive_tickets.start()
+        self.close_tickets_at_night.start()
 
     @staticmethod
     def load_quota_data():
@@ -390,6 +391,13 @@ class Tickets(commands.Cog):
             data["daily_quota_left"] = QUOTA["DAILY_TICKET_LIMIT"]
             self.save_quota_data(data)
             await self.update_ticket_panel()
+    
+    @tasks.loop(time=datetime.time(hour=23, minute=0, tzinfo=QUOTA["TIMEZONE"]))
+    async def close_tickets_at_night(self):
+        """每晚23点准时运行，更新工单面板为关闭状态。"""
+        await self.bot.wait_until_ready()
+        print(f"[{datetime.datetime.now()}] 到达晚上23点，更新工单面板为关闭状态...")
+        await self.update_ticket_panel()
 
     @tasks.loop(hours=1) 
     async def check_inactive_tickets(self):
