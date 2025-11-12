@@ -1,5 +1,7 @@
 import pytz
 import os
+import datetime
+
 
 # --- 身份组和频道ID配置 ---
 IDS = {
@@ -19,7 +21,7 @@ IDS = {
 # --- 额度配置 ---
 QUOTA = {
     "DAILY_TICKET_LIMIT": 60,
-    "TIMEZONE": pytz.timezone('Asia/Shanghai'),
+    "TIMEZONE": datetime.timezone(datetime.timedelta(hours=8)),
     "QUOTA_FILE_PATH": 'quota_data.json'
 }
 
