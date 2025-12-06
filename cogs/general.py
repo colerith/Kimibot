@@ -101,11 +101,23 @@ class AnnouncementModal(discord.ui.Modal):
 
 
 # 许愿池系统
-class WishModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="📝 填写你的愿望")
-        self.add_item(discord.ui.InputText(label="新功能建议", placeholder="请在这里详细描述你希望拥有的新功能或改进建议嘛~！", style=discord.InputTextStyle.paragraph, min_length=10, max_length=2000, required=True))
-        self.add_item(discord.ui.InputText(label="是否匿名？(填 是/否)", placeholder="默认匿名。如果想让服主知道是你，就填“否”哦！", style=discord.InputTextStyle.short, required=False, max_length=1))
+
+# 弹窗1：用于填写详细愿望的通用弹窗
+class DetailedWishModal(discord.ui.Modal):
+    def __init__(self, wish_type: str):
+        self.wish_type = wish_type
+        super().__init__(title=f"📝 许愿: {self.wish_type}")
+        self.add_item(discord.ui.InputText(
+            label=f"详细描述你的愿望 ({self.wish_type})",
+            placeholder=f"请在这里详细描述你关于【{self.wish_type}】的愿望或建议嘛~！",
+            style=discord.InputTextStyle.paragraph,
+            min_length=10, max_length=2000, required=True
+        ))
+        self.add_item(discord.ui.InputText(
+            label="是否匿名？(填 是/否)",
+            placeholder="默认匿名。如果想让服主知道是你，就填“否”哦！",
+            style=discord.InputTextStyle.short, required=False, max_length=1
+        ))
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -120,13 +132,13 @@ class WishModal(discord.ui.Modal):
             return
 
         wish_id = random.randint(100000, 999999)
-        thread = await interaction.channel.create_thread(name=f"💌-{wish_id}", type=discord.ChannelType.private_thread, invitable=False)
+        thread = await interaction.channel.create_thread(name=f"💌-{self.wish_type}-{wish_id}", type=discord.ChannelType.private_thread, invitable=False)
 
         await thread.add_user(interaction.user)
         if owner:
             await thread.add_user(owner)
 
-        embed = discord.Embed(title=f"💌 收到了一个新愿望！(编号: {wish_id})", description=f"```{wish_content}```", color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
+        embed = discord.Embed(title=f"💌 收到了一个新愿望！({self.wish_type})", description=f"```{wish_content}```", color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
         embed.add_field(name="处理状态", value="⏳ 待受理", inline=False)
 
         if is_anonymous:
@@ -135,16 +147,82 @@ class WishModal(discord.ui.Modal):
             embed.set_author(name=f"来自 {interaction.user.display_name} 的愿望", icon_url=interaction.user.display_avatar.url)
 
         await thread.send(embed=embed, view=WishActionView())
-        await interaction.followup.send(f"你的愿望已经悄悄地发送给服主惹！快去 {thread.mention} 里看看吧！", ephemeral=True)
+        await interaction.followup.send(f"你的【{self.wish_type}】愿望已经悄悄地发送给服主惹！快去 {thread.mention} 里看看吧！", ephemeral=True)
 
+# 视图1：当用户选择“预设新功能”后，展示【极光】和【象牙塔】按钮
+class PresetFeatureView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180) # 3分钟内不操作按钮会自动消失
+
+    async def create_preset_wish(self, interaction: discord.Interaction, feature_name: str):
+        """通用函数，用于创建预设功能的愿望帖子"""
+        await interaction.response.defer(ephemeral=True)
+        try:
+            owner = await interaction.client.fetch_user(SERVER_OWNER_ID)
+        except discord.NotFound:
+            await interaction.followup.send("呜...找不到服主大人！愿望无法送达！", ephemeral=True)
+            return
+
+        wish_id = random.randint(100000, 999999)
+        thread_name = f"💌-预设功能-{feature_name}-{wish_id}"
+        thread = await interaction.channel.create_thread(name=thread_name, type=discord.ChannelType.private_thread, invitable=False)
+
+        await thread.add_user(interaction.user)
+        if owner: await thread.add_user(owner)
+        
+        wish_content = f"我希望社区能够实装预设新功能：**{feature_name}**！"
+
+        embed = discord.Embed(title=f"💌 收到了一个新愿望！(预设功能)", description=f"```{wish_content}```", color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
+        embed.add_field(name="处理状态", value="⏳ 待受理", inline=False)
+        # 预设功能默认不匿名
+        embed.set_author(name=f"来自 {interaction.user.display_name} 的愿望", icon_url=interaction.user.display_avatar.url)
+
+        await thread.send(embed=embed, view=WishActionView())
+        await interaction.followup.send(f"你的【{feature_name}】愿望已经悄悄地发送给服主惹！快去 {thread.mention} 里看看吧！", ephemeral=True)
+        
+        # 禁用所有按钮并停止视图
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        self.stop()
+
+    @discord.ui.button(label="🌌 极光", style=discord.ButtonStyle.primary)
+    async def wish_aurora(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await self.create_preset_wish(interaction, "极光")
+
+    @discord.ui.button(label="🏛️ 象牙塔", style=discord.ButtonStyle.secondary)
+    async def wish_ivory_tower(self, button: discord.ui.Button, interaction: discord.Interaction):
+        await self.create_preset_wish(interaction, "象牙塔")
+
+# 下拉菜单：许愿的主选择菜单
+class WishSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="预设新功能", description="许愿【极光】或【象牙塔】功能", emoji="💡", value="preset_feature"),
+            discord.SelectOption(label="角色卡", description="许愿一张新的角色卡", emoji="🎭", value="角色卡"),
+            discord.SelectOption(label="社区美化", description="许愿新的图标、表情或美化素材", emoji="🎨", value="社区美化"),
+            discord.SelectOption(label="社区建设", description="对社区发展提出建议", emoji="🏗️", value="社区建设"),
+            discord.SelectOption(label="其他", description="许一个天马行空的愿望", emoji="💭", value="其他"),
+        ]
+        super().__init__(placeholder="👇 请选择你的愿望类型...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        if choice == "preset_feature":
+            # 如果选择预设功能，发送带有两个按钮的新消息
+            await interaction.response.send_message("请选择你想要的预设功能：", view=PresetFeatureView(), ephemeral=True)
+        else:
+            # 其他选项则弹出对应的填写框
+            modal = DetailedWishModal(wish_type=choice)
+            await interaction.response.send_modal(modal)
+
+# 视图2：包含下拉菜单的主许愿面板
 class WishPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(WishSelect()) # 将下拉菜单添加到视图中
 
-    @discord.ui.button(label="💖 点我许愿", style=discord.ButtonStyle.primary, custom_id="make_a_wish_button", emoji="✨")
-    async def wish_button_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_modal(WishModal())
-
+# 视图3：服主在愿望帖内的操作按钮（这个类保持不变）
 class WishActionView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -241,7 +319,12 @@ class General(commands.Cog):
         if not channel:
             print("错误：找不到许愿池频道！")
             return
-        embed = discord.Embed(title="✨ 极光新功能许愿", description="点击下方按钮可以许愿极光的新版功能哦！", color=STYLE["KIMI_YELLOW"])
+        # 修改这里的描述，引导用户使用下拉菜单
+        embed = discord.Embed(
+            title="✨ 奇米大王的许愿池", 
+            description="有什么想要的新功能、角色卡、或者对社区的建议吗？\n\n**点击下方的菜单选择你的愿望类型，然后告诉本大王吧！**", 
+            color=STYLE["KIMI_YELLOW"]
+        )
         panel_message = await channel.send(embed=embed, view=WishPanelView())
         self.wish_panel_message_id = panel_message.id
 
@@ -301,9 +384,15 @@ class General(commands.Cog):
         mention_role: Option(discord.Role, "要@的身份组", required=False) = None, 
         image1: Option(discord.Attachment, "图片附件1", required=False) = None, 
         image2: Option(discord.Attachment, "图片附件2", required=False) = None,
-        image3: Option(discord.Attachment, "图片附件3", required=False) = None
+        image3: Option(discord.Attachment, "图片附件3", required=False) = None,
+        image4: Option(discord.Attachment, "图片附件4", required=False) = None,
+        image5: Option(discord.Attachment, "图片附件5", required=False) = None,
+        image6: Option(discord.Attachment, "图片附件6", required=False) = None,
+        image7: Option(discord.Attachment, "图片附件7", required=False) = None,
+        image8: Option(discord.Attachment, "图片附件8", required=False) = None,
+        image9: Option(discord.Attachment, "图片附件9", required=False) = None
     ):
-        attachments = [img for img in [image1, image2, image3] if img]
+        attachments = [img for img in [image1, image2, image3, image4, image5, image6, image7, image8, image9] if img]
         modal = AnnouncementModal(channel, mention_role, attachments)
         await ctx.send_modal(modal)
 
