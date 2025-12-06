@@ -200,7 +200,7 @@ class WishSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="预设新功能", description="许愿【极光】或【象牙塔】功能", emoji="💡", value="preset_feature"),
             discord.SelectOption(label="角色卡", description="许愿一张新的角色卡", emoji="🎭", value="角色卡"),
-            discord.SelectOption(label="社区美化", description="许愿新的图标、表情或美化素材", emoji="🎨", value="社区美化"),
+            discord.SelectOption(label="主题美化", description="许愿好看的酒馆主题美化", emoji="🎨", value="主题美化"),
             discord.SelectOption(label="社区建设", description="对社区发展提出建议", emoji="🏗️", value="社区建设"),
             discord.SelectOption(label="其他", description="许一个天马行空的愿望", emoji="💭", value="其他"),
         ]
