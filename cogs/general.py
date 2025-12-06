@@ -274,9 +274,9 @@ class General(commands.Cog):
         self.bot.add_view(WishPanelView())
         self.bot.add_view(WishActionView())
         print("唷呐！通用功能模块的永久视图已成功注册！")
+        asyncio.create_task(self.setup_persistent_wish_panel())
 
     # --- 事件监听器 (Listeners) ---
-
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         if member.bot:
@@ -312,6 +312,33 @@ class General(commands.Cog):
 
         await channel.send(embed=embed)
 
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """监听许愿频道的新消息，自动刷新面板到最底部。"""
+        # 1. 如果消息不是来自许愿频道，或者发消息的是机器人自己，就直接忽略
+        if message.channel.id != WISH_CHANNEL_ID or message.author == self.bot.user:
+            return
+
+        # 2. 确认我们有一个旧面板的ID可以删除
+        if self.wish_panel_message_id:
+            try:
+                # 获取频道对象
+                channel = self.bot.get_channel(WISH_CHANNEL_ID)
+                if not channel: return
+                
+                # 根据ID找到旧的面板消息并删除它
+                old_panel_message = await channel.fetch_message(self.wish_panel_message_id)
+                await old_panel_message.delete()
+            except discord.NotFound:
+                # 如果消息已经被手动删了，就忽略错误
+                print("旧的许愿面板消息找不到了，可能已被删除。")
+            except discord.Forbidden:
+                print("错误：本大王没有权限删除许愿频道的消息！")
+            except Exception as e:
+                print(f"删除旧许愿面板时发生未知错误: {e}")
+
+        # 3. 无论之前是否成功删除，都重新发送一个新的面板
+        await self.post_wish_panel()
 
     # --- 许愿池相关辅助函数 ---
     async def post_wish_panel(self):
@@ -319,33 +346,41 @@ class General(commands.Cog):
         if not channel:
             print("错误：找不到许愿池频道！")
             return
-        # 修改这里的描述，引导用户使用下拉菜单
         embed = discord.Embed(
-            title="✨ 奇米大王的许愿池", 
-            description="有什么想要的新功能、角色卡、或者对社区的建议吗？\n\n**点击下方的菜单选择你的愿望类型，然后告诉本大王吧！**", 
+            title="✨ 奇米大王的许愿池",
+            description="有什么想要的新功能、角色卡、或者对社区的建议吗？\n\n**点击下方的菜单选择你的愿望类型，然后告诉本大王吧！**",
             color=STYLE["KIMI_YELLOW"]
         )
+        # 发送新的面板，并把它的ID存到变量里
         panel_message = await channel.send(embed=embed, view=WishPanelView())
         self.wish_panel_message_id = panel_message.id
 
-    async def check_and_post_wish_panel(self):
-        """检查并发送许愿池面板，应在机器人准备就绪后调用。"""
+    # 新的启动设置函数
+    async def setup_persistent_wish_panel(self):
+        """机器人启动时运行，清理所有旧面板并发送一个新的。"""
+        await self.bot.wait_until_ready() # 确保机器人已完全连接
         channel = self.bot.get_channel(WISH_CHANNEL_ID)
         if not channel:
+            print("错误：找不到许愿池频道，无法设置持久化面板！")
             return
+
         try:
-            async for last_message in channel.history(limit=1):
-                if last_message.author == self.bot.user and last_message.embeds and "极光新功能许愿" in last_message.embeds[0].title:
-                    self.wish_panel_message_id = last_message.id
-                    print("许愿池面板已存在，无需重复发送。")
-                    return
-            await self.post_wish_panel()
-            print("已成功发送许愿池面板。")
+            # 遍历频道历史记录，删除所有由机器人自己发送的、且包含特定标题的旧面板
+            async for message in channel.history(limit=100):
+                if message.author == self.bot.user and message.embeds:
+                    if "奇米大王的许愿池" in message.embeds[0].title:
+                        await message.delete()
+            
+            print("已清理所有旧的许愿面板。")
 
         except discord.Forbidden:
-            print(f"呜...本大王没有权限读取频道 {channel.name}！")
+            print(f"呜...本大王没有权限清理频道 {channel.name} 的旧面板！")
         except Exception as e:
-            print(f"检查许愿池面板时发生错误: {e}")
+            print(f"清理旧许愿面板时发生错误: {e}")
+
+        # 清理完毕后，发送一个全新的面板
+        await self.post_wish_panel()
+        print("已成功发送全新的许愿面板到频道底部。")
 
     # --- 斜杠命令 (Slash Commands) ---
 
