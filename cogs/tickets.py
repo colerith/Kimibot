@@ -83,13 +83,32 @@ class ArchiveRequestView(discord.ui.View):
     async def applied(self, button, interaction): 
         await self.button_callback(interaction, "已申请加群")
 
-    @discord.ui.button(label="不打算加群", style=discord.ButtonStyle.secondary, custom_id="req_archive_2")
-    async def not_applied(self, button, interaction): 
-        await self.button_callback(interaction, "不打算加群")
-
-    @discord.ui.button(label="没有别的问题了", style=discord.ButtonStyle.secondary, custom_id="req_archive_3")
+    @discord.ui.button(label="不打算加群，没有别的问题了", style=discord.ButtonStyle.secondary, custom_id="req_archive_2")
     async def no_problem(self, button, interaction): 
-        await self.button_callback(interaction, "没有别的问题了")
+        await self.button_callback(interaction, "不打算加群，没有别的问题了")
+
+# 视图：用户提交完材料后，点击按钮呼叫审核员
+class NotifyReviewerView(discord.ui.View):
+    def __init__(self, reviewer_id: int):
+        super().__init__(timeout=None)
+        self.reviewer_id = reviewer_id
+
+    @discord.ui.button(label="✅ 材料已备齐，呼叫审核员", style=discord.ButtonStyle.primary, custom_id="notify_reviewer_button")
+    async def notify_reviewer(self, button: discord.ui.Button, interaction: discord.Interaction):
+        # 只有工单创建者才能点击这个按钮
+        ticket_info = get_ticket_info(interaction.channel)
+        creator_id = ticket_info.get("创建者ID")
+        if str(interaction.user.id) != creator_id:
+            await interaction.response.send_message("呜...只有创建这个工单的饱饱才能呼叫审核员哦！", ephemeral=True)
+            return
+            
+        # 禁用按钮，防止重复点击
+        button.disabled = True
+        button.label = "✅ 已呼叫审核员"
+        await interaction.message.edit(view=self)
+
+        # 发送提及消息并给用户一个确认
+        await interaction.response.send_message(f"<@{self.reviewer_id}> 小饱饱的材料准备好啦，快来看看吧！")
 
 # 视图2：管理员在工单内的主要操作按钮面板
 class TicketActionView(discord.ui.View):
@@ -109,20 +128,41 @@ class TicketActionView(discord.ui.View):
         info = get_ticket_info(interaction.channel)
         creator_name = info.get('创建者', '未知')
         ticket_id = info.get('工单ID', '未知')
+        creator_id = info.get('创建者ID', '未知') # <-- 新增：获取创建者ID
         reviewer_name = interaction.user.name
 
         new_topic = f"{interaction.channel.topic} | ReviewerID: {interaction.user.id} | ReviewerName: {reviewer_name}"
         new_name = f"一审中-{ticket_id}-{creator_name}-{reviewer_name}"
         await interaction.channel.edit(name=new_name, topic=new_topic)
 
+        # --- 第一条消息：审核要求 ---
         embed = discord.Embed(title="🔮 LOFI-加载中社区审核要求 【一审】", description="**⚠️ 请在审核时准备好以下材料**", color=STYLE["KIMI_YELLOW"])
         embed.add_field(name="一、成年证明（二选一）", value="1. 身份证**其余信息打码**，只露出身份证的__出生年月日__+__身份证号里出生年月日__部分\n2. 支付宝点击**我的-头像-我的档案-个人信息**，截图露出**生日**部分，其余信息打码", inline=False)
-        embed.add_field(name="二、使用自建、非商业酒馆证明", value="准备好以下内容，让它们**同屏/同一张图显示**，如果在手机上显示不清/空间不够同屏，可以进行录屏：\n1. 你的酒馆后台（手机Termux、电脑Powershell/cmd、云酒馆1panel/宝塔/抱脸等）\n2. 一个超过100楼以上的女性向卡聊天记录，需要露出楼层编号和卡\n3. 在输入框内输入你的Discord id，格式为`Discord id：id数字`。\n> Discord id 获取方法:\n> 在设置里打开开发者模式-在聊天点击自己的头像-个人界面右上角三个点有一个复制id\n4. 当前你所在的工单审核页面", inline=False)
+        embed.add_field(name="二、使用自建、非商业酒馆证明", value="准备好以下内容，让它们**同屏/同一张图显示**，如果在手机上显示不清/空间不够同屏，可以进行录屏：\n1. 你的酒馆后台（手机Termux、电脑Powershell/cmd、云酒馆1panel/宝塔/抱脸等）\n2. 一个超过100楼以上的女性向卡聊天记录，需要露出楼层编号和卡\n3. 在输入框内输入你的Discord id，格式为`Discord id：id数字`。\n> Discord id 获取方法:\n> 在设置里打开开发者模式-在聊天点击自己的头像-个人界面右上角有一个复制id\n4. 当前你所在的工单审核页面", inline=False)
         embed.add_field(name="三、小红书关注电波系", value="截图对电波系的关注😋需要有点赞留痕，可以直接给置顶帖子点赞", inline=False)
         embed.add_field(name="四、女性证明", value="在工单内发送语音，按照以下格式清晰朗读，审核编号是当前你所在工单频道名称里的6位数字：\n> 现在是xxxx年xx月xx日xx点xx分，我的审核编号是xxxxxx，我确保我是成年女性，并且已仔细阅读过社区守则，保证绝不违反，我会为自己的行为负责\n\n完成以上所有材料提交后，审核员会将你移至二审，届时你将进行自助答题验证~", inline=False)
         embed.set_footer(text="🚫 禁止对外泄露任何审核条件或试卷题目，违者直接做永久封禁处理")
         embed.set_image(url="https://files.catbox.moe/r269hz.png")
         await interaction.channel.send(f"你好呀！审核员 {interaction.user.mention} 已经接单惹，请按下面的要求提交材料哦~", embed=embed)
+
+        # --- ↓↓↓ 核心修改：发送第二条提醒消息和按钮 ↓↓↓ ---
+        
+        # 1. 准备提醒消息的Embed
+        reminder_description = (
+            f"宝宝准备好所有材料后发送在本频道即可 ，尽量在12小时内提交哦！超时需要重新申请工单。\n\n"
+            f"你的审核编号为 `{ticket_id}`\n"
+            f"你的Discord id为 `{creator_id}`\n\n"
+            f"准备好所有材料后点击下方按钮艾特审核员。"
+        )
+        reminder_embed = discord.Embed(description=reminder_description, color=STYLE["KIMI_YELLOW"])
+
+        # 2. 创建包含审核员ID的视图实例
+        notify_view = NotifyReviewerView(reviewer_id=interaction.user.id)
+
+        # 3. 发送提醒消息
+        await interaction.channel.send(embed=reminder_embed, view=notify_view)
+
+        # --- 结束修改 ---
 
         button.disabled = True
         await interaction.response.edit_message(view=self)
@@ -325,7 +365,8 @@ class Tickets(commands.Cog):
     async def on_ready(self):
         self.bot.add_view(TicketActionView())
         self.bot.add_view(TicketPanelView(self))
-        self.bot.add_view(ArchiveRequestView())  # 注册过审归档按钮视图
+        self.bot.add_view(ArchiveRequestView())
+        self.bot.add_view(NotifyReviewerView(reviewer_id=0)) 
         print("唷呐！工单模块的永久视图已成功注册！")
         self.reset_daily_quota.start()
         self.check_inactive_tickets.start()
