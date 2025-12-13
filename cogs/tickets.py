@@ -292,12 +292,11 @@ class TicketPanelView(discord.ui.View):
 
     @discord.ui.button(label="🥚 创建审核工单", style=discord.ButtonStyle.primary, custom_id="create_ticket_panel_button")
     async def create_ticket_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
-        # --- 新增：时间检查 ---
+        # --- 时间检查 ---
         now = datetime.datetime.now(QUOTA["TIMEZONE"])
         if not (8 <= now.hour < 23):
             await interaction.response.send_message("呜...现在是审核员的休息时间 (08:00 - 23:00)，请在开放时间内再来申请哦！", ephemeral=True)
             return
-        # --- 结束新增部分 ---
 
         user_roles = [role.id for role in interaction.user.roles]
         if IDS["VERIFICATION_ROLE_ID"] not in user_roles and IDS["SUPER_EGG_ROLE_ID"] not in user_roles:
@@ -305,6 +304,21 @@ class TicketPanelView(discord.ui.View):
             return
         
         await interaction.response.defer(ephemeral=True)
+
+        # --- 新增：检查用户是否已有工单 ---
+        first_review_category = interaction.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
+        second_review_category = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
+        
+        # 遍历一审和二审分类下的所有频道
+        categories_to_check = [cat for cat in [first_review_category, second_review_category] if cat]
+        for category in categories_to_check:
+            for channel in category.text_channels:
+                # 检查频道的 topic 是否包含该用户的ID
+                if channel.topic and f"创建者ID: {interaction.user.id}" in channel.topic:
+                    await interaction.followup.send(f"呜...你已经有一个正在处理的工单 {channel.mention} 惹！请不要重复创建哦~", ephemeral=True)
+                    return
+        # --- 结束检查 ---
+
         data = self.cog.load_quota_data()
         
         if data["daily_quota_left"] <= 0:
@@ -315,8 +329,8 @@ class TicketPanelView(discord.ui.View):
         self.cog.save_quota_data(data)
         await self.cog.update_ticket_panel()
         
+        ticket_channel = None # 先声明变量
         try:
-            first_review_category = interaction.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
             if not first_review_category or not isinstance(first_review_category, discord.CategoryChannel):
                 await interaction.followup.send("呜...找不到【一审】的频道分类！请服主检查配置！", ephemeral=True)
                 raise ValueError("一审频道分类配置错误")
@@ -344,6 +358,7 @@ class TicketPanelView(discord.ui.View):
             elif not isinstance(e, ValueError):
                 await interaction.followup.send(f"呜...创建工单时发生了未知错误，请联系服主查看后台日志！", ephemeral=True)
 
+            # 如果创建失败，把名额还回去
             data["daily_quota_left"] += 1
             self.cog.save_quota_data(data)
             await self.cog.update_ticket_panel()
@@ -352,7 +367,21 @@ class TicketPanelView(discord.ui.View):
         embed = discord.Embed(title=f"🎫 工单 #{ticket_id} 已创建", description=f"饱饱你好呀！请耐心等待管理员接手审核~", color=STYLE["KIMI_YELLOW"])
         super_egg_role_mention = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"]).mention
         await ticket_channel.send(content=f"{interaction.user.mention} {super_egg_role_mention}", embed=embed, view=TicketActionView())
-        await interaction.followup.send(f"好惹！你的审核频道 {ticket_channel.mention} 已经创建好惹！", ephemeral=True)
+        
+        # --- 新增：私信用户 ---
+        dm_message = (f"你好呀！你在 **{interaction.guild.name}** 服务器的审核工单已经创建成功惹！\n\n"
+                      f"➡️ **点击这里直接进入你的工单频道**: {ticket_channel.mention}\n\n"
+                      f"请尽快前往频道查看审核要求哦！")
+        dm_status_message = ""
+        try:
+            await interaction.user.send(dm_message)
+            dm_status_message = "\n\n本大王已经把工单链接私信给你惹，记得查看哦！"
+        except discord.Forbidden:
+            dm_status_message = "\n\n**注意**: 你的私信关闭了，本大王没法把链接发给你！记得收藏好这个频道哦！"
+        except Exception as e:
+            print(f"私信用户 {interaction.user.name} 时出错: {e}")
+
+        await interaction.followup.send(f"好惹！你的审核频道 {ticket_channel.mention} 已经创建好惹！{dm_status_message}", ephemeral=True)
 
 # ======================================================================================
 # --- 工单系统的核心 Cog ---
@@ -519,6 +548,50 @@ class Tickets(commands.Cog):
             await ctx.followup.send(f"呜...日志和私信都已处理，但我没有权限删除这个频道！请手动删除。\n{dm_status}", ephemeral=True)
             return
         await ctx.followup.send(f"操作成功！工单 `{ticket_id}-{creator_name}` 已作为超时处理并清除。\n{dm_status}", ephemeral=True)
+
+    # 在 timeout_archive 命令的下方添加
+
+    @ticket.command(name="删除并释放名额", description="（超级小蛋用）立即删除此工单，并将一个审核名额返还。")
+    @is_super_egg()
+    async def delete_and_refund(self, ctx: discord.ApplicationContext):
+        # 增加一个确认环节，防止误操作
+        confirm_view = discord.ui.View(timeout=30)
+        confirm_button = discord.ui.Button(label="确认删除并返还名额", style=discord.ButtonStyle.danger)
+        
+        async def confirm_callback(interaction: discord.Interaction):
+            # 权限二次检查
+            if interaction.user.id != ctx.author.id:
+                await interaction.response.send_message("呜...只有发起命令的管理员才能确认哦！", ephemeral=True)
+                return
+
+            await interaction.response.defer()
+            channel = interaction.channel
+            if not channel.topic or "工单ID" not in channel.topic:
+                await interaction.followup.send("呜...这里似乎不是一个有效的工单频道！", ephemeral=True)
+                return
+
+            # 返还名额
+            data = self.load_quota_data()
+            data["daily_quota_left"] += 1
+            self.save_quota_data(data)
+            await self.update_ticket_panel()
+
+            try:
+                await channel.delete(reason=f"管理员 {ctx.author.name} 删除并返还名额")
+                # 在日志或特定频道通知（可选）
+                log_channel = self.bot.get_channel(IDS.get("TICKET_LOG_CHANNEL_ID")) # 假设你的配置里有日志频道ID
+                if log_channel:
+                    await log_channel.send(f"✅ 管理员 **{ctx.author.name}** 删除了工单 `#{get_ticket_info(channel).get('工单ID', '未知')}` 并返还了一个名额。当前剩余名额: **{data['daily_quota_left']}**。")
+
+            except discord.Forbidden:
+                await ctx.author.send(f"呜哇！本大王没有权限删除频道 {channel.name}，但名额已经返还了！请手动删除该频道。")
+            except Exception as e:
+                await ctx.author.send(f"删除频道时发生错误: {e}，但名额已经返还了！请手动删除该频道。")
+
+        confirm_button.callback = confirm_callback
+        confirm_view.add_item(confirm_button)
+        
+        await ctx.respond("⚠️ **危险操作！**\n你确定要 **立即删除** 这个工单频道，并 **返还1个审核名额** 吗？此操作无法撤销！", view=confirm_view, ephemeral=True)
 
     # <--- 新增：备用指令 ---
     @ticket.command(name="发送一审指引", description="（超级小蛋用）手动在当前频道发送一审指引。")
