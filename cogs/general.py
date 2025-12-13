@@ -66,22 +66,20 @@ class AnnouncementModal(discord.ui.Modal):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         original_content = self.children[0].value
-        content_outside_embed = "" # 默认消息内容为空
-        description_for_embed = original_content # Embed描述就是公告内容
+        content_outside_embed = ""  # 默认消息内容为空
+        description_for_embed = original_content  # Embed描述就是公告内容
         allowed_mentions = discord.AllowedMentions.none()
 
         if self.mention_role:
             is_everyone_ping = (self.mention_role.id == interaction.guild.id)
-            super_egg_role = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
+            is_here_ping = ('@here' in self.mention_role.name) # 检查是否是 @here
 
-            # --- 核心修复在这里 ---
-            # 检查是否要 @everyone 并且用户有权限
-            if is_everyone_ping and super_egg_role and super_egg_role in interaction.user.roles:
-                # 将 @everyone 放在普通 content 里
-                content_outside_embed = "@everyone"
-                allowed_mentions = discord.AllowedMentions(everyone=True)
+            # 检查是否有权限 @everyone 或 @here
+            if (is_everyone_ping or is_here_ping) and interaction.user.guild_permissions.mention_everyone:
+                content_outside_embed = "@everyone" if is_everyone_ping else "@here"
+                allowed_mentions = discord.AllowedMentions(everyone=True) # everyone=True 同时也允许了 @here
             # 如果是普通的身份组提及
-            elif not is_everyone_ping:
+            elif not is_everyone_ping and not is_here_ping:
                 content_outside_embed = self.mention_role.mention
                 allowed_mentions = discord.AllowedMentions(roles=[self.mention_role])
             # 如果选择了@everyone但没有权限，则不会发出任何提及
@@ -91,13 +89,19 @@ class AnnouncementModal(discord.ui.Modal):
 
         files = []
         if self.attachments:
-            # 使用 f-string 动态生成附件URL，以便Discord正确显示
-            embed.set_image(url=f"attachment://{self.attachments[0].filename}")
+            # 确保附件URL是正确的格式
+            if len(self.attachments) > 0:
+                embed.set_image(url=f"attachment://{self.attachments[0].filename}")
             for attachment in self.attachments:
                 files.append(await attachment.to_file())
 
-        await self.channel.send(content=content_outside_embed, embed=embed, files=files, allowed_mentions=allowed_mentions)
-        await interaction.followup.send("公告发送成功惹！", ephemeral=True)
+        try:
+            await self.channel.send(content=content_outside_embed, embed=embed, files=files, allowed_mentions=allowed_mentions)
+            await interaction.followup.send("公告发送成功惹！", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send(f"呜...本大王没有权限在 {self.channel.mention} 发送消息或附件！", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"发送公告时发生未知错误: {e}", ephemeral=True)
 
 
 # 许愿池系统
@@ -200,7 +204,7 @@ class WishSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="预设新功能", description="许愿【极光】或【象牙塔】功能", emoji="💡", value="preset_feature"),
             discord.SelectOption(label="角色卡", description="许愿一张新的角色卡", emoji="🎭", value="角色卡"),
-            discord.SelectOption(label="主题美化", description="许愿好看的酒馆主题美化", emoji="🎨", value="主题美化"),
+            discord.SelectOption(label="社区美化", description="许愿新的图标、表情或美化素材", emoji="🎨", value="社区美化"),
             discord.SelectOption(label="社区建设", description="对社区发展提出建议", emoji="🏗️", value="社区建设"),
             discord.SelectOption(label="其他", description="许一个天马行空的愿望", emoji="💭", value="其他"),
         ]
