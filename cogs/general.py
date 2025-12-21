@@ -13,6 +13,8 @@ SERVER_OWNER_ID = 1353777207042113576        # 服务器主的ID
 WISH_CHANNEL_ID = 1417577014096957554        # 许愿池频道的ID
 VERIFICATION_ROLE_ID = 1417722528574738513   # 【新兵蛋子】(验证成功后发放)的身份组ID
 
+TZ_CN = datetime.timezone(datetime.timedelta(hours=8))
+
 # --- 外观配置 ---
 STYLE["KIMI_YELLOW"] = 0xFFD700
 KIMI_FOOTER_TEXT = "请遵守社区规则，一起做个乖饱饱嘛~！"
@@ -45,6 +47,12 @@ def parse_duration(duration_str: str) -> int:
     except (ValueError, IndexError):
         return 0
     return 0
+
+def generate_progress_bar(percent: float, length: int = 15) -> str:
+    """生成文本进度条"""
+    filled_length = int(length * percent // 100)
+    bar = '█' * filled_length + '░' * (length - filled_length)
+    return bar
 
 # --- 功能所需的视图和弹窗 (Views & Modals) ---
 
@@ -264,6 +272,104 @@ class WishActionView(discord.ui.View):
     async def done(self, button, interaction):
         await self.update_wish_status(interaction, "🎉 已实现！", close_thread=True)
 
+class PollView(discord.ui.View):
+    def __init__(self, question: str, options: list, end_time: datetime.datetime, creator_id: int):
+        super().__init__(timeout=None) # 设置为None，我们将手动处理超时
+        self.question = question
+        self.options = options # list of option strings
+        self.end_time = end_time
+        self.creator_id = creator_id
+        
+        # 存储投票数据: {user_id: option_index}
+        self.votes = {} 
+        
+        # 动态创建按钮
+        for index, option in enumerate(options):
+            button = discord.ui.Button(
+                label=f"{index + 1}. {option[:70]}", # 按钮文字限制长度
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"poll_btn_{index}"
+            )
+            button.callback = self.create_callback(index)
+            self.add_item(button)
+
+    def create_callback(self, index):
+        """为每个按钮创建独立的回调函数"""
+        async def callback(interaction: discord.Interaction):
+            # 1. 检查是否过期 (虽然有后台任务，但双重保险)
+            if datetime.datetime.now(TZ_CN) > self.end_time:
+                await interaction.response.send_message("⏳ 投票已经截止啦！不能再投了哦~", ephemeral=True)
+                await self.end_poll(interaction.message)
+                return
+
+            # 2. 处理投票逻辑 (单选：如果投过别的，先移除旧的)
+            user_id = interaction.user.id
+            current_choice = self.votes.get(user_id)
+
+            if current_choice == index:
+                # 如果点击已投的选项，视为取消投票
+                del self.votes[user_id]
+                msg = "🗑️ 你取消了投票。"
+            else:
+                # 记录新投票
+                self.votes[user_id] = index
+                msg = f"✅ 你投给了：**{self.options[index]}**"
+
+            # 3. 更新面板
+            embed = self.build_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+            await interaction.followup.send(msg, ephemeral=True)
+
+        return callback
+
+    def build_embed(self, is_ended=False):
+        """根据当前投票数据构建 Embed"""
+        total_votes = len(self.votes)
+        
+        # 统计每个选项的票数
+        counts = [0] * len(self.options)
+        for uid, opt_idx in self.votes.items():
+            if 0 <= opt_idx < len(self.options):
+                counts[opt_idx] += 1
+
+        description = ""
+        for i, option in enumerate(self.options):
+            count = counts[i]
+            percent = (count / total_votes * 100) if total_votes > 0 else 0.0
+            bar = generate_progress_bar(percent)
+            
+            # 格式：1. 选项名
+            # █░░░░░░ 20.0% (5票)
+            description += f"**{i+1}. {option}**\n`{bar}` **{percent:.1f}%** ({count}票)\n\n"
+
+        status_text = "🔴 已截止" if is_ended else "🟢 进行中"
+        color = 0x99AAB5 if is_ended else STYLE["KIMI_YELLOW"] # 截止变灰，进行中为黄色
+
+        embed = discord.Embed(title=f"📊 {self.question}", description=description, color=color)
+        embed.set_author(name=f"发起人 ID: {self.creator_id}")
+        
+        if is_ended:
+            embed.set_footer(text=f"投票已于 {self.end_time.strftime('%Y-%m-%d %H:%M')} (东八区) 结束 | 总票数: {total_votes}")
+        else:
+            embed.set_footer(text=f"截止时间: {self.end_time.strftime('%Y-%m-%d %H:%M:%S')} (东八区) | 点击下方按钮投票")
+        
+        return embed
+
+    async def end_poll(self, message: discord.Message):
+        """结束投票：禁用所有按钮并更新 Embed"""
+        for child in self.children:
+            child.disabled = True
+            child.style = discord.ButtonStyle.secondary # 变灰
+        
+        final_embed = self.build_embed(is_ended=True)
+        try:
+            await message.edit(embed=final_embed, view=self)
+        except discord.NotFound:
+            pass # 消息可能已被删除
+        except Exception as e:
+            print(f"结束投票时出错: {e}")
+        
+        self.stop()
 
 # --- 通用功能的 Cog ---
 class General(commands.Cog):
@@ -476,60 +582,93 @@ class General(commands.Cog):
     # --- 投票命令组 ---
     vote = SlashCommandGroup("投票", "大家快来告诉本大王你的想法嘛！")
 
-    @vote.command(name="创建", description="发起一个超级可爱的投票！")
-    async def create_poll(self, ctx, 
-        question: str, 
-        option1: str, 
-        option2: str, 
-        option3: str = None, 
-        option4: str = None, 
-        option5: str = None
+    @vote.command(name="发起", description="创建一个支持多选项、自动截止的投票！")
+    async def start_vote(self, ctx: discord.ApplicationContext,
+        question: Option(str, "投票的问题是什么呢？", required=True),
+        options_text: Option(str, "选项列表 (用 | 竖线分隔，最多20个)", required=True),
+        duration: Option(str, "持续时间 (例如: 10m, 1h, 24h)", required=True)
     ):
+        # 1. 解析时间
+        seconds = parse_duration(duration)
+        if seconds <= 0:
+            await ctx.respond("呜...时间格式不对哦！请用 '10m', '1h' 这种格式捏！", ephemeral=True)
+            return
+        if seconds < 60:
+            await ctx.respond("投票时间太短啦！至少要1分钟哦！", ephemeral=True)
+            return
+
+        # 2. 解析选项
+        options = [opt.strip() for opt in options_text.split('|') if opt.strip()]
+        if len(options) < 2:
+            await ctx.respond("投票至少要有两个选项嘛！笨蛋！", ephemeral=True)
+            return
+        if len(options) > 20:
+            await ctx.respond("选项太多啦！本大王记不住，最多只能20个哦！", ephemeral=True)
+            return
+
         await ctx.defer()
-        options = [opt for opt in [option1, option2, option3, option4, option5] if opt]
-        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
-        description = "\n\n".join([f"{emojis[i]} {options[i]}" for i in range(len(options))])
+        # 3. 计算截止时间 (东八区)
+        now_cn = datetime.datetime.now(TZ_CN)
+        end_time = now_cn + datetime.timedelta(seconds=seconds)
 
-        embed = discord.Embed(title=f"📣 {question}", description=description, color=STYLE["KIMI_YELLOW"])
-        embed.set_footer(text="快来用表情符号投票告诉本大王你的想法嘛！")
+        # 4. 创建视图和 Embed
+        view = PollView(question, options, end_time, ctx.author.id)
+        embed = view.build_embed(is_ended=False)
 
-        poll_message = await ctx.followup.send(embed=embed)
-        for i in range(len(options)):
-            await poll_message.add_reaction(emojis[i])
+        # 5. 发送消息
+        message = await ctx.respond(embed=embed, view=view)
+        
+        # 获取原始消息对象 (respond 返回的是 InteractionWebhookMessage，有时需要 fetch 才能保证后续编辑)
+        if isinstance(message, discord.Interaction):
+             message = await message.original_response()
 
-    @vote.command(name="结束", description="本大王来宣布投票结果惹！")
-    async def end_poll(self, ctx, message_id: str):
+        # 6. 创建后台倒计时任务
+        self.bot.loop.create_task(self.poll_timer(view, message, seconds))
+
+    async def poll_timer(self, view: PollView, message: discord.Message, duration: int):
+        """后台计时器，等待时间结束后自动关闭投票"""
         try:
-            poll_message = await ctx.channel.fetch_message(int(message_id))
-        except (discord.NotFound, ValueError):
-            await ctx.respond("找不到这个投票消息捏，是不是ID错惹？", ephemeral=True)
+            await asyncio.sleep(duration)
+            # 时间到，执行结束逻辑
+            await view.end_poll(message)
+            
+            # 发送一条提醒消息 (可选)
+            
+        except Exception as e:
+            print(f"投票计时器出错: {e}")
+
+    @vote.command(name="提前结束", description="（管理员）强制结束正在进行的投票")
+    @is_super_egg()
+    async def force_end_vote(self, ctx: discord.ApplicationContext, message_id: str):
+        try:
+            message = await ctx.channel.fetch_message(int(message_id))
+        except:
+            await ctx.respond("呜...找不到这个消息ID，或者本大王在那个频道没有权限！", ephemeral=True)
             return
 
-        if not poll_message.embeds or not poll_message.author == self.bot.user:
-            await ctx.respond("这个不是本大王发起的投票唷！", ephemeral=True)
+        if not message.author == self.bot.user or not message.embeds:
+            await ctx.respond("这好像不是本大王发的投票消息哦！", ephemeral=True)
+            return
+        
+        embed = message.embeds[0]
+        if "已截止" in (embed.footer.text or ""):
+            await ctx.respond("这个投票已经结束了呀！", ephemeral=True)
             return
 
-        original_embed = poll_message.embeds[0]
-        question = original_embed.title.strip("📣 ")
+        # 禁用所有按钮
+        new_view = discord.ui.View.from_message(message)
+        for child in new_view.children:
+            child.disabled = True
+            child.style = discord.ButtonStyle.secondary
+        
+        # 更新 Embed 颜色和文字
+        embed.color = 0x99AAB5
+        embed.title = f"🔴 (管理员强制结束) {embed.title.strip('📊 ')}"
+        embed.set_footer(text=f"被管理员 {ctx.author.display_name} 强制截止")
 
-        results = []
-        for reaction in poll_message.reactions:
-            # 减去机器人自己的反应
-            count = reaction.count - 1
-            if count < 0: count = 0
-            results.append(f"{reaction.emoji} : {count} 票")
-
-        result_embed = discord.Embed(
-            title="📊 投票结果发表！",
-            description=f"**关于 “{question}” 的投票结果是...**\n\n" + "\n".join(results),
-            color=STYLE["KIMI_YELLOW"]
-        )
-        result_embed.set_footer(text="谢谢大家的参与唷！本大王爱你们~")
-        await ctx.respond(embed=result_embed)
-
-        # 移除投票按钮，表示结束
-        await poll_message.edit(view=None)
+        await message.edit(embed=embed, view=new_view)
+        await ctx.respond("好哒！本大王已经把这个投票强制关掉惹！😤", ephemeral=True)
 
 
 # 固定的setup函数，用于主文件加载Cog
