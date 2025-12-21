@@ -22,6 +22,10 @@ from cogs.quiz import QuizStartView
 # 指定的审核员ID (审核小蛋)
 SPECIFIC_REVIEWER_ID = 1452321798308888776
 
+# 超时设置 (小时)
+TIMEOUT_HOURS_ARCHIVE = 24  # 24小时未动归档
+TIMEOUT_HOURS_REMIND = 12   # 12小时未动提醒
+
 # ======================================================================================
 # --- 权限与工具函数 ---
 # ======================================================================================
@@ -387,7 +391,7 @@ class TicketPanelView(discord.ui.View):
         
         # 3. 发送提醒和呼叫按钮
         reminder_description = (
-            f"**尽量在12小时内提交哦！**超时需要重新申请工单。\n\n"
+            f"**尽量在24小时内提交哦！**超时需要重新申请工单。\n\n"
             f"你的审核编号为 `{ticket_id}`\n"
             f"你的Discord id为 `{interaction.user.id}`\n\n"
             f"准备好所有材料**并提交后**点击下方按钮艾特审核小蛋。"
@@ -496,62 +500,79 @@ class Tickets(commands.Cog):
         print(f"[{datetime.datetime.now()}] 到达晚上23点，更新工单面板为关闭状态...")
         await self.update_ticket_panel()
 
+    # --- 核心修改：超时检测与提醒 ---
     @tasks.loop(hours=1) 
     async def check_inactive_tickets(self):
         await self.bot.wait_until_ready()
         print(f"[{datetime.datetime.now()}] 幽灵管家开始巡逻检查沉睡的工单频道...")
         now = discord.utils.utcnow()
         archive_category = self.bot.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
-        if not archive_category or not isinstance(archive_category, discord.CategoryChannel):
-            print("错误：找不到归档频道分类，自动归档任务跳过。")
-            return
+        if not archive_category: return
+
         categories_to_check_ids = [IDS["FIRST_REVIEW_CHANNEL_ID"], IDS["SECOND_REVIEW_CHANNEL_ID"]]
-        
-        # 获取审核小蛋成员对象以设置归档权限
-        # 注意：在 loop 中无法直接获取 interaction，需通过 bot 获取 guild
-        # 这里假设机器人只在一个主要的 Guild 运行，或者从频道反推
         
         for category_id in categories_to_check_ids:
             category = self.bot.get_channel(category_id)
-            if not category or not isinstance(category, discord.CategoryChannel):
-                print(f"警告：找不到ID为 {category_id} 的频道分类，跳过检查。")
-                continue
+            if not category: continue
             
+            # 获取审核小蛋成员对象以设置归档权限
             guild = category.guild
             specific_reviewer = guild.get_member(SPECIFIC_REVIEWER_ID)
+            super_egg_role = guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
 
             for channel in category.text_channels:
                 if not ("待接单-" in channel.name or "一审中-" in channel.name or "二审中-" in channel.name):
                     continue
                 try:
+                    # 获取最后一条消息
                     last_message = await channel.fetch_message(channel.last_message_id) if channel.last_message_id else None
-                    last_activity_time = last_message.created_at if last_message else channel.created_at
-                    if (now - last_activity_time) > datetime.timedelta(hours=12):
-                        print(f"频道 '{channel.name}' 已沉睡超过12小时，准备归档...")
-                        info = get_ticket_info(channel)
-                        new_name = f"超时归档-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
-                        await channel.send("呜...这个频道超过12小时没有新消息惹，本大王先把它归档保管起来咯！")
-                        
-                        overwrites = {
-                            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                        }
-                        if specific_reviewer:
-                             overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True)
-                        
-                        # 保留原超级小蛋角色
-                        super_egg_role = guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
-                        if super_egg_role:
-                            overwrites[super_egg_role] = discord.PermissionOverwrite(read_messages=True)
+                    if not last_message: continue
 
-                        await channel.edit(
-                            name=new_name, 
-                            category=archive_category, 
-                            overwrites=overwrites,
-                            reason="12小时无消息自动归档"
-                        )
-                except discord.Forbidden: print(f"呜...本大王没有权限操作频道 '{channel.name}'！")
-                except discord.NotFound: print(f"警告：找不到频道 '{channel.name}' 的最后一条消息，跳过。")
-                except Exception as e: print(f"检查频道 '{channel.name}' 时发生未知错误: {e}")
+                    time_diff = now - last_message.created_at
+                    info = get_ticket_info(channel)
+                    creator_id = info.get('创建者ID')
+
+                    # 1. 检查是否超过 24 小时 (归档)
+                    if time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
+                        print(f"频道 '{channel.name}' 超过24小时无响应，执行归档...")
+                        new_name = f"超时归档-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
+                        await channel.send("呜...这个频道超过24小时没有动静惹，本大王先把它归档保管起来咯！")
+                        
+                        overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False)}
+                        if specific_reviewer: overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True)
+                        if super_egg_role: overwrites[super_egg_role] = discord.PermissionOverwrite(read_messages=True)
+
+                        await channel.edit(name=new_name, category=archive_category, overwrites=overwrites, reason="24小时超时自动归档")
+                        
+                        # 尝试私信通知
+                        if creator_id:
+                            try:
+                                member = await guild.fetch_member(int(creator_id))
+                                await member.send(f"你的工单 `{info.get('工单ID')}` 因超过24小时未活动已被归档。如需继续请重新创建工单哦！")
+                            except: pass
+
+                    # 2. 检查是否超过 12 小时 (提醒)
+                    elif time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND):
+                        # 只有当最后一条消息 *不是* 机器人的温馨提醒时，才发送提醒
+                        # 防止每小时重复轰炸
+                        is_reminder = (last_message.author == self.bot.user and "温馨提醒" in last_message.content)
+                        
+                        if not is_reminder:
+                            print(f"频道 '{channel.name}' 超过12小时无响应，发送提醒...")
+                            mention_str = ""
+                            if creator_id:
+                                mention_str = f"<@{creator_id}>"
+                                # 尝试私信
+                                try:
+                                    member = await guild.fetch_member(int(creator_id))
+                                    await member.send(f"👋 饱饱，你的审核工单 `{info.get('工单ID')}` 已经12小时没有变动了哦！如果材料准备好了请尽快提交，超过24小时会自动关闭工单哒！")
+                                except: pass
+                            
+                            embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已经沉睡超过 **12小时** 啦！\n请注意：**超过24小时无响应** 将会自动归档哦！\n如果需要审核，请尽快回复~", color=0xFFA500)
+                            await channel.send(content=mention_str, embed=embed)
+
+                except Exception as e:
+                    print(f"检查频道 '{channel.name}' 时发生错误: {e}")
 
     ticket = discord.SlashCommandGroup("ticket", "工单相关指令")
 
