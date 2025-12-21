@@ -26,16 +26,20 @@ SPECIFIC_REVIEWER_ID = 1452321798308888776
 # --- 权限与工具函数 ---
 # ======================================================================================
 
-def is_super_egg():
-    """权限检查：判断命令使用者是否为【超级小蛋】"""
+def is_reviewer_egg():
+    """权限检查：判断命令使用者是否为指定的【审核小蛋】"""
     async def predicate(ctx: discord.ApplicationContext) -> bool:
-        if not isinstance(ctx.author, discord.Member) or not hasattr(ctx.author, 'roles'):
-                await ctx.respond("呜...无法识别你的身份组信息！", ephemeral=True)
-                return False
-        super_egg_role = ctx.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
+        # 直接检查用户ID是否匹配
+        if ctx.author.id == SPECIFIC_REVIEWER_ID:
+            return True
+        
+        # 保留原来的管理员角色检查作为后备（可选，如果你希望管理员也能用）
+        # 如果只想让那一个人用，注释掉下面这几行
+        super_egg_role = ctx.guild.get_role(IDS.get("SUPER_EGG_ROLE_ID", 0))
         if super_egg_role and super_egg_role in ctx.author.roles:
             return True
-        await ctx.respond("呜...这个是【超级小蛋】专属嘟魔法，你还不能用捏！QAQ", ephemeral=True)
+            
+        await ctx.respond("呜...这个是【审核小蛋】专属嘟魔法，你还不能用捏！QAQ", ephemeral=True)
         return False
     return commands.check(predicate)
 
@@ -54,6 +58,7 @@ def get_ticket_info(channel: discord.TextChannel):
 # ======================================================================================
 # --- 工单系统的交互视图 (Views) ---
 # ======================================================================================
+
 # 视图1：当用户审核通过后，请求管理员归档的按钮
 class ArchiveRequestView(discord.ui.View):
     def __init__(self, reviewer: discord.Member = None):
@@ -79,10 +84,15 @@ class ArchiveRequestView(discord.ui.View):
         
         # 发送通知
         notify_text = f"📢 {interaction.user.mention} 选择了：**{choice}**\n\n"
-        if self.reviewer:
-            notify_text += f"{self.reviewer.mention}，这位小饱饱已经确认完毕，可以进行归档操作啦！"
-        else:
-            notify_text += f"<@&{IDS['SUPER_EGG_ROLE_ID']}>，这位小饱饱已经确认完毕，可以进行归档操作啦！"
+        
+        # 逻辑修改：优先通知审核小蛋
+        reviewer_mention = f"<@{SPECIFIC_REVIEWER_ID}>"
+        
+        # 如果有明确的当前审核员（且不是审核小蛋本人），也通知一下
+        if self.reviewer and self.reviewer.id != SPECIFIC_REVIEWER_ID:
+            reviewer_mention = f"{self.reviewer.mention} {reviewer_mention}"
+            
+        notify_text += f"{reviewer_mention}，这位小饱饱已经确认完毕，可以进行归档操作啦！"
         
         await interaction.channel.send(notify_text)
 
@@ -100,7 +110,7 @@ class NotifyReviewerView(discord.ui.View):
         super().__init__(timeout=None)
         self.reviewer_id = reviewer_id
 
-    @discord.ui.button(label="✅ 材料已备齐，呼叫审核员", style=discord.ButtonStyle.primary, custom_id="notify_reviewer_button")
+    @discord.ui.button(label="✅ 材料已备齐，呼叫审核小蛋", style=discord.ButtonStyle.primary, custom_id="notify_reviewer_button")
     async def notify_reviewer(self, button: discord.ui.Button, interaction: discord.Interaction):
         # 只有工单创建者才能点击这个按钮
         ticket_info = get_ticket_info(interaction.channel)
@@ -115,7 +125,7 @@ class NotifyReviewerView(discord.ui.View):
         await interaction.message.edit(view=self)
 
         # 发送提及消息并给用户一个确认
-        # 修改：这里使用了传入的 reviewer_id (即审核小蛋的ID)
+        # 这里的 reviewer_id 已经被外面传入为 SPECIFIC_REVIEWER_ID
         await interaction.response.send_message(f"<@{self.reviewer_id}> 小饱饱的材料准备好啦，快来看看吧！")
 
 # 视图2：管理员在工单内的主要操作按钮面板
@@ -124,14 +134,18 @@ class TicketActionView(discord.ui.View):
         super().__init__(timeout=None)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """检查点击按钮的是否为【超级小蛋】"""
+        """检查点击按钮的是否为【审核小蛋】"""
+        # 优先检查是否为指定的审核小蛋
+        if interaction.user.id == SPECIFIC_REVIEWER_ID:
+            return True
+            
+        # 后备检查：是否有管理员权限（防止审核小蛋不在时无法操作）
         super_egg_role = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
         if super_egg_role and super_egg_role in interaction.user.roles:
             return True
-        await interaction.response.send_message("呜...只有【超级小蛋】才能操作审核按钮哦！", ephemeral=True)
+            
+        await interaction.response.send_message("呜...只有【审核小蛋】才能操作审核按钮哦！", ephemeral=True)
         return False
-
-    # --- 修改：删除了“等待审核员接收” (claim_review1) 按钮，因为现在自动发送一审条件 ---
 
     @discord.ui.button(label="▶️ 进入二审", style=discord.ButtonStyle.primary, custom_id="ticket_review2")
     async def review2(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -150,7 +164,6 @@ class TicketActionView(discord.ui.View):
             creator = interaction.guild.get_member(creator_id)
             
             # 移动频道并改名
-            # 注意：因为跳过了接单步骤，可能没有 ReviewerName，这里处理一下
             reviewer_name = interaction.user.name
             new_name = f"二审中-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}-{reviewer_name}"
             
@@ -239,10 +252,22 @@ class TicketActionView(discord.ui.View):
             if is_approved: new_name = f"已过审-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
             else: new_name = f"未通过-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
 
+            # 获取审核小蛋的用户对象以设置权限
+            specific_reviewer = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
+            
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"]): discord.PermissionOverwrite(read_messages=True)
+                # 赋予指定的审核小蛋查看权限
             }
+            
+            # 如果能获取到成员对象，添加权限
+            if specific_reviewer:
+                overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True)
+            
+            # 保留原有的超级小蛋角色权限作为备份
+            super_egg_role = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
+            if super_egg_role:
+                 overwrites[super_egg_role] = discord.PermissionOverwrite(read_messages=True)
 
             await channel.edit(name=new_name, category=archive_category, overwrites=overwrites, reason="管理员手动归档")
             await interaction.followup.send("工单已成功归档并锁定！✨", ephemeral=True)
@@ -253,7 +278,7 @@ class TicketActionView(discord.ui.View):
             await channel.send(f"❌ **归档失败！** 发生未知错误: {e}")
 
 
-# 视图3：用户在主频道点击创建工单的面板 (重写为创建频道版本)
+# 视图3：用户在主频道点击创建工单的面板
 class TicketPanelView(discord.ui.View):
     def __init__(self, cog_instance):
         super().__init__(timeout=None)
@@ -268,28 +293,26 @@ class TicketPanelView(discord.ui.View):
             return
 
         user_roles = [role.id for role in interaction.user.roles]
-        if IDS["VERIFICATION_ROLE_ID"] not in user_roles and IDS["SUPER_EGG_ROLE_ID"] not in user_roles:
-            await interaction.response.send_message(f"呜...只有【新兵蛋子】或【超级小蛋】才能创建审核工单哦！", ephemeral=True)
+        # 允许 新兵蛋子(VERIFICATION) 或 指定的审核小蛋 或 超级小蛋角色 创建
+        is_specific_reviewer = interaction.user.id == SPECIFIC_REVIEWER_ID
+        if IDS["VERIFICATION_ROLE_ID"] not in user_roles and IDS["SUPER_EGG_ROLE_ID"] not in user_roles and not is_specific_reviewer:
+            await interaction.response.send_message(f"呜...只有【新兵蛋子】或【审核小蛋】才能创建审核工单哦！", ephemeral=True)
             return
         
         await interaction.response.defer(ephemeral=True)
 
-        # --- 新增：检查用户是否已有工单 ---
+        # --- 检查用户是否已有工单 ---
         first_review_category = interaction.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
         second_review_category = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
         
-        # 遍历一审和二审分类下的所有频道
         categories_to_check = [cat for cat in [first_review_category, second_review_category] if cat]
         for category in categories_to_check:
             for channel in category.text_channels:
-                # 检查频道的 topic 是否包含该用户的ID
                 if channel.topic and f"创建者ID: {interaction.user.id}" in channel.topic:
                     await interaction.followup.send(f"呜...你已经有一个正在处理的工单 {channel.mention} 惹！请不要重复创建哦~", ephemeral=True)
                     return
-        # --- 结束检查 ---
 
         data = self.cog.load_quota_data()
-        
         if data["daily_quota_left"] <= 0:
             await interaction.followup.send("呜...今天的新蛋审核名额已经用完惹，请明天再来吧！", ephemeral=True)
             return
@@ -298,7 +321,7 @@ class TicketPanelView(discord.ui.View):
         self.cog.save_quota_data(data)
         await self.cog.update_ticket_panel()
         
-        ticket_channel = None # 先声明变量
+        ticket_channel = None
         try:
             if not first_review_category or not isinstance(first_review_category, discord.CategoryChannel):
                 await interaction.followup.send("呜...找不到【一审】的频道分类！请服主检查配置！", ephemeral=True)
@@ -307,11 +330,22 @@ class TicketPanelView(discord.ui.View):
             ticket_id = random.randint(100000, 999999)
             channel_name = f"待接单-{ticket_id}-{interaction.user.name}"
 
+            # 获取指定的审核小蛋成员对象
+            specific_reviewer = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
+            
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"]): discord.PermissionOverwrite(read_messages=True, send_messages=True)
             }
+            
+            # 赋予审核小蛋权限
+            if specific_reviewer:
+                overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            
+            # (可选) 保留原超级小蛋角色权限，防止审核小蛋退群/误删导致无法管理
+            super_egg_role = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
+            if super_egg_role:
+                 overwrites[super_egg_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
             ticket_channel = await interaction.guild.create_text_channel(
                 name=channel_name,
@@ -327,27 +361,31 @@ class TicketPanelView(discord.ui.View):
             elif not isinstance(e, ValueError):
                 await interaction.followup.send(f"呜...创建工单时发生了未知错误，请联系服主查看后台日志！", ephemeral=True)
 
-            # 如果创建失败，把名额还回去
             data["daily_quota_left"] += 1
             self.cog.save_quota_data(data)
             await self.cog.update_ticket_panel()
             return
 
         embed = discord.Embed(title=f"🎫 工单 #{ticket_id} 已创建", description=f"饱饱你好呀！请按照审核要求提交相关材料哦~", color=STYLE["KIMI_YELLOW"])
-        super_egg_role_mention = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"]).mention
         
-        # --- 修改：创建频道后直接发送一审要求，不再等待接单 ---
+        # 欢迎消息中艾特指定的审核小蛋
+        mention_text = f"<@{SPECIFIC_REVIEWER_ID}>"
         
-        # 1. 准备一审要求 Embed
+        # 1. 发送初始欢迎和面板
+        await ticket_channel.send(content=f"{interaction.user.mention} {mention_text}", embed=embed, view=TicketActionView())
+        
+        # 2. 发送一审要求
         embed_req = discord.Embed(title="🔮 LOFI-加载中社区审核要求 【一审】", description="**⚠️ 请在审核时准备好以下材料**", color=STYLE["KIMI_YELLOW"])
         embed_req.add_field(name="一、成年证明（二选一）", value="1. 身份证**其余信息打码**，只露出身份证的__出生年月日__+__身份证号里出生年月日__部分\n2. 支付宝点击**我的-头像-我的档案-个人信息**，截图露出**生日**部分，其余信息打码", inline=False)
-        embed_req.add_field(name="二、使用自建、非商业酒馆证明", value="准备好以下内容，让它们**同屏/同一张图显示**，如果在手机上显示不清/空间不够同屏，可以进行录屏：\n1. 你的SillyTavern后台（手机Termux、电脑Powershell/cmd、云酒馆1panel/宝塔/抱脸等）\n2. 一个超过100楼以上的女性向卡聊天记录，需要露出楼层编号和卡\n3. 在输入框内输入你的Discord id，格式为`Discord id：id数字`。\n> Discord id 获取方法:\n> 在设置里打开开发者模式-在聊天点击自己的头像-个人界面右上角有一个复制id\n4. 当前你所在的工单审核页面", inline=False)
+        embed_req.add_field(name="二、使用自建、非商业酒馆证明", value="准备好以下内容，让它们**同屏/同一张图显示**，如果在手机上显示不清/空间不够同屏，可以进行录屏：\n1. 你的酒馆后台（手机Termux、电脑Powershell/cmd、云酒馆1panel/宝塔/抱脸等）\n2. 一个超过100楼以上的女性向卡聊天记录，需要露出楼层编号和卡\n3. 在输入框内输入你的Discord id，格式为`Discord id：id数字`。\n> Discord id 获取方法:\n> 在设置里打开开发者模式-在聊天点击自己的头像-个人界面右上角有一个复制id\n4. 当前你所在的工单审核页面", inline=False)
         embed_req.add_field(name="三、小红书关注电波系", value="截图对电波系的关注😋需要有点赞留痕，可以直接给置顶帖子点赞", inline=False)
         embed_req.add_field(name="四、女性证明", value="在工单内发送语音，按照以下格式清晰朗读，审核编号是当前你所在工单频道名称里的6位数字：\n> 现在是xxxx年xx月xx日xx点xx分，我的审核编号是xxxxxx，我确保我是成年女性，并且已仔细阅读过社区守则，保证绝不违反，我会为自己的行为负责\n\n完成以上所有材料提交后，审核员会将你移至二审，届时你将进行自助答题验证~", inline=False)
         embed_req.set_footer(text="🚫 禁止对外泄露任何审核条件或试卷题目，违者直接做永久封禁处理")
         embed_req.set_image(url="https://files.catbox.moe/r269hz.png")
         
-        # 2. 准备提醒消息和呼叫按钮
+        await ticket_channel.send(f"你好呀 {interaction.user.mention}，请按下面的要求提交材料哦~", embed=embed_req)
+        
+        # 3. 发送提醒和呼叫按钮
         reminder_description = (
             f"**尽量在12小时内提交哦！**超时需要重新申请工单。\n\n"
             f"你的审核编号为 `{ticket_id}`\n"
@@ -356,20 +394,8 @@ class TicketPanelView(discord.ui.View):
         )
         reminder_embed = discord.Embed(description=reminder_description, color=STYLE["KIMI_YELLOW"])
         
-        # 使用特定ID初始化视图
         notify_view = NotifyReviewerView(reviewer_id=SPECIFIC_REVIEWER_ID)
-
-        # 3. 发送所有消息
-        # 3.1: 发送初始欢迎和管理员操作面板（不包含接单按钮）
-        await ticket_channel.send(content=f"{interaction.user.mention} {super_egg_role_mention}", embed=embed, view=TicketActionView())
-        
-        # 3.2: 发送审核要求
-        await ticket_channel.send(f"你好呀 {interaction.user.mention}，请按下面的要求提交材料哦~", embed=embed_req)
-        
-        # 3.3: 发送呼叫按钮
         await ticket_channel.send(embed=reminder_embed, view=notify_view)
-        
-        # --- 修改结束 ---
         
         # --- 私信用户 ---
         dm_message = (f"你好呀！你在 **{interaction.guild.name}** 服务器的审核工单已经创建成功惹！\n\n"
@@ -398,7 +424,7 @@ class Tickets(commands.Cog):
         self.bot.add_view(TicketActionView())
         self.bot.add_view(TicketPanelView(self))
         self.bot.add_view(ArchiveRequestView())
-        # 注册持久化视图时使用特定ID，确保重启后按钮有效
+        # 注册持久化视图时使用特定ID
         self.bot.add_view(NotifyReviewerView(reviewer_id=SPECIFIC_REVIEWER_ID)) 
         print("唷呐！工单模块的永久视图已成功注册！")
         self.reset_daily_quota.start()
@@ -436,11 +462,9 @@ class Tickets(commands.Cog):
         embed.description = description
         view = TicketPanelView(self)
 
-        # 核心修改：检查名额和时间
         if quota_left <= 0:
             view.children[0].disabled = True
             view.children[0].label = "今日名额已满"
-        # 新增判断：如果时间不在 8点 到 22点 (23点前) 之间
         elif not (8 <= current_hour < 23):
             view.children[0].disabled = True
             view.children[0].label = "当前为休息时间"
@@ -468,7 +492,6 @@ class Tickets(commands.Cog):
     
     @tasks.loop(time=datetime.time(hour=23, minute=0, tzinfo=QUOTA["TIMEZONE"]))
     async def close_tickets_at_night(self):
-        """每晚23点准时运行，更新工单面板为关闭状态。"""
         await self.bot.wait_until_ready()
         print(f"[{datetime.datetime.now()}] 到达晚上23点，更新工单面板为关闭状态...")
         await self.update_ticket_panel()
@@ -483,11 +506,20 @@ class Tickets(commands.Cog):
             print("错误：找不到归档频道分类，自动归档任务跳过。")
             return
         categories_to_check_ids = [IDS["FIRST_REVIEW_CHANNEL_ID"], IDS["SECOND_REVIEW_CHANNEL_ID"]]
+        
+        # 获取审核小蛋成员对象以设置归档权限
+        # 注意：在 loop 中无法直接获取 interaction，需通过 bot 获取 guild
+        # 这里假设机器人只在一个主要的 Guild 运行，或者从频道反推
+        
         for category_id in categories_to_check_ids:
             category = self.bot.get_channel(category_id)
             if not category or not isinstance(category, discord.CategoryChannel):
                 print(f"警告：找不到ID为 {category_id} 的频道分类，跳过检查。")
                 continue
+            
+            guild = category.guild
+            specific_reviewer = guild.get_member(SPECIFIC_REVIEWER_ID)
+
             for channel in category.text_channels:
                 if not ("待接单-" in channel.name or "一审中-" in channel.name or "二审中-" in channel.name):
                     continue
@@ -499,10 +531,18 @@ class Tickets(commands.Cog):
                         info = get_ticket_info(channel)
                         new_name = f"超时归档-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
                         await channel.send("呜...这个频道超过12小时没有新消息惹，本大王先把它归档保管起来咯！")
+                        
                         overwrites = {
-                            channel.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                            channel.guild.get_role(IDS["SUPER_EGG_ROLE_ID"]): discord.PermissionOverwrite(read_messages=True)
+                            guild.default_role: discord.PermissionOverwrite(read_messages=False),
                         }
+                        if specific_reviewer:
+                             overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True)
+                        
+                        # 保留原超级小蛋角色
+                        super_egg_role = guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
+                        if super_egg_role:
+                            overwrites[super_egg_role] = discord.PermissionOverwrite(read_messages=True)
+
                         await channel.edit(
                             name=new_name, 
                             category=archive_category, 
@@ -515,8 +555,8 @@ class Tickets(commands.Cog):
 
     ticket = discord.SlashCommandGroup("ticket", "工单相关指令")
 
-    @ticket.command(name="超时归档", description="（超级小蛋用）将当前工单标记为超时，通知用户并删除。")
-    @is_super_egg()
+    @ticket.command(name="超时归档", description="（审核小蛋用）将当前工单标记为超时，通知用户并删除。")
+    @is_reviewer_egg()
     async def timeout_archive(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
         channel = ctx.channel
@@ -553,8 +593,8 @@ class Tickets(commands.Cog):
             return
         await ctx.followup.send(f"操作成功！工单 `{ticket_id}-{creator_name}` 已作为超时处理并清除。\n{dm_status}", ephemeral=True)
 
-    @ticket.command(name="删除并释放名额", description="（超级小蛋用）立即删除此工单，并将一个审核名额返还。")
-    @is_super_egg()
+    @ticket.command(name="删除并释放名额", description="（审核小蛋用）立即删除此工单，并将一个审核名额返还。")
+    @is_reviewer_egg()
     async def delete_and_refund(self, ctx: discord.ApplicationContext):
         confirm_view = discord.ui.View(timeout=30)
         confirm_button = discord.ui.Button(label="确认删除并返还名额", style=discord.ButtonStyle.danger)
@@ -591,8 +631,8 @@ class Tickets(commands.Cog):
         
         await ctx.respond("⚠️ **危险操作！**\n你确定要 **立即删除** 这个工单频道，并 **返还1个审核名额** 吗？此操作无法撤销！", view=confirm_view, ephemeral=True)
 
-    @ticket.command(name="发送一审指引", description="（超级小蛋用）手动在当前频道发送一审指引。")
-    @is_super_egg()
+    @ticket.command(name="发送一审指引", description="（审核小蛋用）手动在当前频道发送一审指引。")
+    @is_reviewer_egg()
     async def send_first_review(self, ctx: discord.ApplicationContext):
         if not ctx.channel.topic or "工单ID" not in ctx.channel.topic:
             await ctx.respond("呜...这里似乎不是一个有效的工单频道！", ephemeral=True)
@@ -607,8 +647,8 @@ class Tickets(commands.Cog):
         embed.set_image(url="https://files.catbox.moe/r269hz.png")
         await ctx.send(f"你好呀！审核员 {ctx.author.mention} 已接单，请按下面的要求提交材料哦~", embed=embed)
 
-    @ticket.command(name="发送二审指引", description="（超级小蛋用）手动在当前频道发送二审答题面板。")
-    @is_super_egg()
+    @ticket.command(name="发送二审指引", description="（审核小蛋用）手动在当前频道发送二审答题面板。")
+    @is_reviewer_egg()
     async def send_second_review(self, ctx: discord.ApplicationContext):
         if not ctx.channel.topic or "工单ID" not in ctx.channel.topic:
             await ctx.respond("呜...这里似乎不是一个有效的工单频道！", ephemeral=True)
@@ -647,8 +687,8 @@ class Tickets(commands.Cog):
         else:
             await ctx.send(embed=embed, view=QuizStartView())
 
-    @ticket.command(name="发送过审祝贺", description="（超级小蛋用）手动在当前频道发送过审消息。")
-    @is_super_egg()
+    @ticket.command(name="发送过审祝贺", description="（审核小蛋用）手动在当前频道发送过审消息。")
+    @is_reviewer_egg()
     async def send_approved(self, ctx: discord.ApplicationContext):
         if not ctx.channel.topic or "工单ID" not in ctx.channel.topic:
             await ctx.respond("呜...这里似乎不是一个有效的工单频道！", ephemeral=True)
@@ -662,13 +702,13 @@ class Tickets(commands.Cog):
             return
 
         await ctx.defer()
-        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩，进群问题也是填写你的【工单编号】就可以惹！\n## 对审核过程没有异议，同意并且阅读完全部东西后@当前审核员/任何超级小蛋来进行归档~身份组已经添加", color=STYLE["KIMI_YELLOW"])
+        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩，进群问题也是填写你的【工单编号】就可以惹！\n## 对审核过程没有异议，同意并且阅读完全部东西后@当前审核员/任何审核小蛋来进行归档~身份组已经添加", color=STYLE["KIMI_YELLOW"])
         embed.set_image(url="https://files.catbox.moe/2tytko.jpg")
         embed.set_footer(text="宝宝如果已申请/不打算加群/没有别的问题了，请点击下方对应按钮")
         await ctx.send(f"恭喜 {creator.mention} 通过审核！", embed=embed, view=ArchiveRequestView(reviewer=ctx.author))
 
     @ticket.command(name="批量导出", description="（服主用）将已归档的过审频道打包成网页快照并删除！")
-    @is_super_egg()
+    @is_reviewer_egg()
     async def bulk_export_and_archive(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
         archive_category = self.bot.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
@@ -720,7 +760,7 @@ class Tickets(commands.Cog):
                 print(f"批量导出频道 {channel.name} 时出错: {e}"); await log_channel.send(f"❌ 导出频道 `{channel.name}` 时出错: {e}")
         await ctx.followup.send(f"批量导出完成！成功处理了 **{exported_count}/{len(channels_to_process)}** 个频道！", ephemeral=True)
 
-    quota_mg = discord.SlashCommandGroup("名额管理", "（仅限超级小蛋）手动调整工单名额~", checks=[is_super_egg()])
+    quota_mg = discord.SlashCommandGroup("名额管理", "（仅限审核小蛋）手动调整工单名额~", checks=[is_reviewer_egg()])
     @quota_mg.command(name="重置", description="将今天的剩余名额恢复到最大值！")
     async def reset_quota(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True); data = self.load_quota_data(); daily_limit = QUOTA["DAILY_TICKET_LIMIT"]; data["daily_quota_left"] = daily_limit; self.save_quota_data(data); await self.update_ticket_panel()
@@ -738,8 +778,8 @@ class Tickets(commands.Cog):
         data = self.load_quota_data(); data["daily_quota_left"] += amount; self.save_quota_data(data); await self.update_ticket_panel()
         await ctx.followup.send(f"好嘞！本大王刚刚变出了 **{amount}** 个新名额，现在还剩 **{data['daily_quota_left']}** 个！", ephemeral=True)
 
-    @discord.slash_command(name="setup_ticket_panel", description="（仅限超级小蛋）手动发送或刷新工单创建面板！")
-    @is_super_egg()
+    @discord.slash_command(name="setup_ticket_panel", description="（仅限审核小蛋）手动发送或刷新工单创建面板！")
+    @is_reviewer_egg()
     async def setup_ticket_panel(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
         channel = self.bot.get_channel(IDS["TICKET_PANEL_CHANNEL_ID"])
