@@ -9,14 +9,12 @@ from quiz_data import QUIZ_QUESTIONS
 # --- 配置区 ---
 SECOND_REVIEW_CHANNEL_ID = IDS.get("SECOND_REVIEW_CHANNEL_ID", 1419599094988537856)
 SUPER_EGG_ROLE_ID = IDS.get("SUPER_EGG_ROLE_ID", 1417724603253395526)
+QUIZ_LOG_CHANNEL_ID = 1452485785939869808
 MAX_ATTEMPTS = 3          # 最大尝试次数
 RETRY_COOLDOWN = 20       # 重试冷却时间（秒）
 
 # --- 数据存储 ---
-# 正在进行的会话: {user_id: {questions, answers, start_time, current_q, channel_id}}
 quiz_sessions = {}
-
-# 历史记录 (用于限制次数和冷却): {user_id: {"count": 已尝试次数, "last_end_time": datetime}}
 quiz_history = {}
 
 # ======================================================================================
@@ -276,7 +274,7 @@ async def finalize_quiz_result(user, interface, session, is_timeout=False):
     :param session: 会话数据
     :param is_timeout: 是否因为超时结束
     """
-    # 1. 防止重复结算 (如果是并发调用)
+    # 1. 防止重复结算
     if user.id not in quiz_sessions:
         return
     
@@ -301,17 +299,19 @@ async def finalize_quiz_result(user, interface, session, is_timeout=False):
     attempts_used = record_attempt_end(user.id)
     attempts_left = MAX_ATTEMPTS - attempts_used
     
-    # 4. 准备结果消息
+    # 4. 准备结果消息 (公屏)
     is_passed = score >= 60
     color = 0x00FF00 if is_passed else 0xFF0000
     
     title_text = "⏰ 答题超时！" if is_timeout else "🎉 答题完成！"
     desc_text = f"{user.mention} 你的二审答题已结束。\n\n**最终成绩：{score}/100分**\n"
     
+    view = None
+    footer_text = ""
+
     if is_passed:
-        desc_text += "\n✅ **恭喜你通过了测试！** 请等待管理员进行后续操作。"
+        desc_text += "\n✅ **恭喜你通过了测试！** 请等待审核小蛋进行后续操作。"
         footer_text = "恭喜过审！"
-        view = None
     else:
         desc_text += f"\n❌ **未达到60分及格线。**"
         if attempts_left > 0:
@@ -321,34 +321,36 @@ async def finalize_quiz_result(user, interface, session, is_timeout=False):
         else:
             desc_text += f"\n\n🚫 **你的 {MAX_ATTEMPTS} 次机会已全部用尽。**\n请在工单内联系管理员说明情况。"
             footer_text = "机会用尽"
-            view = None
 
-    # 公屏结果 Embed
     public_embed = discord.Embed(title=title_text, description=desc_text, color=color)
     public_embed.set_footer(text=footer_text)
 
-    # 5. 发送公屏消息
-    # 如果是Interaction(手动点完)，用edit或followup；如果是Channel(超时)，用send
+    # 5. 发送公屏消息 
+    # 获取频道对象
+    target_channel = interface.channel if isinstance(interface, discord.Interaction) else interface
+    
     try:
+        # 发送新消息到频道，确保大家都能看到
+        await target_channel.send(embed=public_embed, view=view)
+        
+        # 如果是交互(按钮点击)，为了防止按钮一直转圈或保留，简单编辑一下原消息
         if isinstance(interface, discord.Interaction):
-            # 尝试编辑原消息显示结果
-            await interface.edit_original_response(embed=public_embed, view=view)
-        else:
-            # 超时情况，直接在频道发新消息
-            await interface.send(embed=public_embed, view=view)
+            try:
+                # 把原来的题目变成简单的结束提示，避免占用版面
+                simple_end_embed = discord.Embed(description="✅ 答题已提交，结果已发送至下方。", color=0xcccccc)
+                await interface.edit_original_response(embed=simple_end_embed, view=None)
+            except: pass
     except Exception as e:
         print(f"发送成绩时出错: {e}")
 
-    # 6. 发送管理员私信 (保持原逻辑)
+    # 6. 发送详细成绩单到指定频道 (ID: 1452485785939869808)
     # 获取工单信息
-    channel = interface.channel if isinstance(interface, discord.Interaction) else interface
-    ticket_info = get_ticket_info_from_channel(channel)
+    ticket_info = get_ticket_info_from_channel(target_channel)
     ticket_id = ticket_info.get("工单ID", "未知")
-    reviewer_id = ticket_info.get("ReviewerID")
     
     admin_embed = discord.Embed(
         title=f"📊 {user.display_name} 的详细成绩单 {'(超时)' if is_timeout else ''}",
-        description=f"**工单号：{ticket_id}**\n**总分：{score}/100**\n**已用机会：{attempts_used}/{MAX_ATTEMPTS}**\n",
+        description=f"**工单号：{ticket_id}**\n**用户：{user.mention} (ID: {user.id})**\n**总分：{score}/100**\n**已用机会：{attempts_used}/{MAX_ATTEMPTS}**\n",
         color=color
     )
     for i, detail in enumerate(details, 1):
@@ -359,11 +361,15 @@ async def finalize_quiz_result(user, interface, session, is_timeout=False):
             inline=False
         )
 
-    if reviewer_id:
-        try:
-            reviewer = await channel.guild.fetch_member(int(reviewer_id))
-            await reviewer.send(embed=admin_embed)
-        except: pass
+    # 获取日志频道并发送
+    try:
+        log_channel = target_channel.guild.get_channel(QUIZ_LOG_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(embed=admin_embed)
+        else:
+            print(f"警告：找不到答题日志频道 ID {QUIZ_LOG_CHANNEL_ID}")
+    except Exception as e:
+        print(f"发送答题日志失败: {e}")
 
 
 # ======================================================================================
