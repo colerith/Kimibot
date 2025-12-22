@@ -130,7 +130,7 @@ class NotifyReviewerView(discord.ui.View):
 
         # 发送提及消息并给用户一个确认
         # 这里的 reviewer_id 已经被外面传入为 SPECIFIC_REVIEWER_ID
-        await interaction.response.send_message(f"<@{self.reviewer_id}> 小饱饱的材料准备好啦，快来看看吧！")
+        await interaction.response.send_message(f"<@&{self.reviewer_id}> 小饱饱的材料准备好啦，快来看看吧！")
 
 # 视图2：管理员在工单内的主要操作按钮面板
 class TicketActionView(discord.ui.View):
@@ -372,8 +372,8 @@ class TicketPanelView(discord.ui.View):
 
         embed = discord.Embed(title=f"🎫 工单 #{ticket_id} 已创建", description=f"饱饱你好呀！请按照审核要求提交相关材料哦~", color=STYLE["KIMI_YELLOW"])
         
-        # 欢迎消息中艾特指定的审核小蛋
-        mention_text = f"<@{SPECIFIC_REVIEWER_ID}>"
+        # 欢迎消息中艾特审核小蛋
+        mention_text = f"<@&{SPECIFIC_REVIEWER_ID}>"
         
         # 1. 发送初始欢迎和面板
         await ticket_channel.send(content=f"{interaction.user.mention} {mention_text}", embed=embed, view=TicketActionView())
