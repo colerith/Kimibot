@@ -90,7 +90,7 @@ class ArchiveRequestView(discord.ui.View):
         notify_text = f"📢 {interaction.user.mention} 选择了：**{choice}**\n\n"
         
         # 逻辑修改：优先通知审核小蛋
-        reviewer_mention = f"<@{SPECIFIC_REVIEWER_ID}>"
+        reviewer_mention = f"<@&{SPECIFIC_REVIEWER_ID}>"
         
         # 如果有明确的当前审核员（且不是审核小蛋本人），也通知一下
         if self.reviewer and self.reviewer.id != SPECIFIC_REVIEWER_ID:
@@ -128,26 +128,29 @@ class NotifyReviewerView(discord.ui.View):
         button.label = "✅ 已呼叫审核小蛋"
         await interaction.message.edit(view=self)
 
-        # 发送提及消息并给用户一个确认
-        # 这里的 reviewer_id 已经被外面传入为 SPECIFIC_REVIEWER_ID
         await interaction.response.send_message(f"<@&{self.reviewer_id}> 小饱饱的材料准备好啦，快来看看吧！")
 
 # 视图2：管理员在工单内的主要操作按钮面板
 class TicketActionView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+        # 初始化时，根据 custom_id 找到按钮并禁用后续步骤
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "ticket_approved":
+                    child.disabled = True # 初始禁用“已过审”
+                    child.style = discord.ButtonStyle.secondary # 变灰
+                elif child.custom_id == "ticket_archive":
+                    child.disabled = True # 初始禁用“归档”
+                    child.style = discord.ButtonStyle.secondary # 变灰
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """检查点击按钮的是否为【审核小蛋】"""
-        # 优先检查是否为指定的审核小蛋
         if interaction.user.id == SPECIFIC_REVIEWER_ID:
             return True
-            
-        # 后备检查：是否有管理员权限（防止审核小蛋不在时无法操作）
         super_egg_role = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
         if super_egg_role and super_egg_role in interaction.user.roles:
             return True
-            
         await interaction.response.send_message("呜...只有【审核小蛋】才能操作审核按钮哦！", ephemeral=True)
         return False
 
@@ -155,22 +158,19 @@ class TicketActionView(discord.ui.View):
     async def review2(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.defer()
         
-        # 获取二审分类
         second_review_category = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
-        if not second_review_category or not isinstance(second_review_category, discord.CategoryChannel):
-            await interaction.followup.send("呜...找不到【二审】的频道分类或配置错误！", ephemeral=True)
+        if not second_review_category:
+            await interaction.followup.send("呜...找不到【二审】的频道分类！", ephemeral=True)
             return
         
         try:
-            # 获取工单信息
             info = get_ticket_info(interaction.channel)
             creator_id = int(info.get("创建者ID", 0))
             creator = interaction.guild.get_member(creator_id)
-            
-            # 移动频道并改名
             reviewer_name = interaction.user.name
-            new_name = f"二审中-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}-{reviewer_name}"
             
+            # 改名并移动
+            new_name = f"二审中-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}-{reviewer_name}"
             await interaction.channel.edit(name=new_name, category=second_review_category)
             
             # 发送答题提示
@@ -181,33 +181,27 @@ class TicketActionView(discord.ui.View):
             )
             embed.add_field(
                 name="📝 答题说明",
-                value=(
-                    "• 随机抽取10道题，每题10分，满分100分\n"
-                    "• 限时2分钟完成\n"
-                    "• 需要达到60分以上才能通过\n"
-                    "• 题目涉及基础酒馆知识和女性生活常识\n"
-                    "• **请认真作答，祝你好运！**"
-                ),
+                value="• 随机抽取10道题，每题10分，满分100分\n• 限时2分钟完成\n• 需要达到60分以上才能通过\n• **请认真作答，祝你好运！**",
                 inline=False
             )
             embed.set_footer(text="准备好后，请点击下方按钮开始答题")
             
-            # @提到待审核用户并发送答题面板
-            if creator:
-                await interaction.channel.send(
-                    f"叮咚！{creator.mention} 小宝，请开始你的二审答题吧~",
-                    embed=embed,
-                    view=QuizStartView()
-                )
-            else:
-                await interaction.channel.send(embed=embed, view=QuizStartView())
+            content = f"叮咚！{creator.mention} 小宝，请开始你的二审答题吧~" if creator else None
+            await interaction.channel.send(content=content, embed=embed, view=QuizStartView())
             
-            # 禁用按钮
+            # --- 按钮状态逻辑更新 ---
+            # 1. 禁用当前按钮
             button.disabled = True
+            button.style = discord.ButtonStyle.secondary
+            
+            # 2. 解锁“已过审”按钮
+            for child in self.children:
+                if child.custom_id == "ticket_approved":
+                    child.disabled = False
+                    child.style = discord.ButtonStyle.success # 变绿
+            
             await interaction.message.edit(view=self)
             
-        except discord.Forbidden:
-            await interaction.followup.send("❌ **移动失败！** 呜哇！本大王被【二审】分类挡在门外了！快让服主检查我在那个分类的权限！", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"移动到二审时发生未知错误: {e}", ephemeral=True)
 
@@ -216,25 +210,36 @@ class TicketActionView(discord.ui.View):
         info = get_ticket_info(interaction.channel)
         creator_id = int(info.get("创建者ID", 0))
         creator = interaction.guild.get_member(creator_id)
-        if not creator:
-            await interaction.response.send_message("呜...找不到申请工单的饱饱了，他可能已经离开服务器了...", ephemeral=True)
-            return
+        
+        # 即使找不到人也允许操作下去，防止卡死
+        if creator:
+            newbie_role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
+            hatched_role = interaction.guild.get_role(IDS["HATCHED_ROLE_ID"])
+            try:
+                if newbie_role: await creator.remove_roles(newbie_role, reason="审核通过")
+                if hatched_role: await creator.add_roles(hatched_role, reason="审核通过")
+            except discord.Forbidden:
+                await interaction.response.send_message("呜哇！本大王没有权限修改身份组！", ephemeral=True)
+                return
 
-        newbie_role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
-        hatched_role = interaction.guild.get_role(IDS["HATCHED_ROLE_ID"])
-        try:
-            if newbie_role: await creator.remove_roles(newbie_role, reason="审核通过")
-            if hatched_role: await creator.add_roles(hatched_role, reason="审核通过")
-        except discord.Forbidden:
-            await interaction.response.send_message("呜哇！本大王没有权限修改身份组！", ephemeral=True)
-            return
-
-        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩，进群问题也是填写你的【工单编号】就可以惹！\n## 对审核过程没有异议，同意并且阅读完全部东西后请点击下方按钮~身份组已经添加", color=STYLE["KIMI_YELLOW"])
+        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩...\n## 对审核过程没有异议，同意并且阅读完全部东西后请点击下方按钮~", color=STYLE["KIMI_YELLOW"])
         embed.set_image(url="https://files.catbox.moe/2tytko.jpg")
         embed.set_footer(text="宝宝如果已申请/不打算加群/没有别的问题了，请点击下方对应按钮")
-        await interaction.channel.send(f"恭喜 {creator.mention} 通过审核！", embed=embed, view=ArchiveRequestView(reviewer=interaction.user))
+        
+        msg_content = f"恭喜 {creator.mention} 通过审核！" if creator else "恭喜通过审核！(用户已不在服务器)"
+        await interaction.channel.send(msg_content, embed=embed, view=ArchiveRequestView(reviewer=interaction.user))
 
+        # --- 按钮状态逻辑更新 ---
+        # 1. 禁用当前按钮
         button.disabled = True
+        button.style = discord.ButtonStyle.secondary
+        
+        # 2. 解锁“工单归档”按钮
+        for child in self.children:
+            if child.custom_id == "ticket_archive":
+                child.disabled = False
+                child.style = discord.ButtonStyle.secondary # 保持灰色或设为主要颜色
+        
         await interaction.response.edit_message(view=self)
 
     @discord.ui.button(label="📦 工单归档", style=discord.ButtonStyle.secondary, custom_id="ticket_archive")
@@ -253,22 +258,16 @@ class TicketActionView(discord.ui.View):
         try:
             is_approved = "已过审" in channel.name or "二审中" in channel.name or "一审中" in channel.name
             info = get_ticket_info(channel)
-            if is_approved: new_name = f"已过审-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
-            else: new_name = f"未通过-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
+            prefix = "已过审" if is_approved else "未通过"
+            new_name = f"{prefix}-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
 
-            # 获取审核小蛋的用户对象以设置权限
+            # 权限设置
             specific_reviewer = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
-            
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                # 赋予指定的审核小蛋查看权限
             }
-            
-            # 如果能获取到成员对象，添加权限
             if specific_reviewer:
                 overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True)
-            
-            # 保留原有的超级小蛋角色权限作为备份
             super_egg_role = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
             if super_egg_role:
                  overwrites[super_egg_role] = discord.PermissionOverwrite(read_messages=True)
@@ -277,7 +276,7 @@ class TicketActionView(discord.ui.View):
             await interaction.followup.send("工单已成功归档并锁定！✨", ephemeral=True)
 
         except discord.Forbidden:
-            await channel.send("❌ **归档失败！** 呜哇！本大王没有权限移动或修改这个频道！请服主检查我在【始发分类】和【归档分类】的权限！")
+            await channel.send("❌ **归档失败！** 呜哇！本大王没有权限移动或修改这个频道！")
         except Exception as e:
             await channel.send(f"❌ **归档失败！** 发生未知错误: {e}")
 
@@ -515,26 +514,34 @@ class Tickets(commands.Cog):
             category = self.bot.get_channel(category_id)
             if not category: continue
             
-            # 获取审核小蛋成员对象以设置归档权限
             guild = category.guild
             specific_reviewer = guild.get_member(SPECIFIC_REVIEWER_ID)
             super_egg_role = guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
 
             for channel in category.text_channels:
+                # 只检查这些状态的频道
                 if not ("待接单-" in channel.name or "一审中-" in channel.name or "二审中-" in channel.name):
                     continue
                 try:
-                    # 获取最后一条消息
-                    last_message = await channel.fetch_message(channel.last_message_id) if channel.last_message_id else None
-                    if not last_message: continue
+                    # --- 核心修改：计算最后活动时间 ---
+                    # 默认使用频道创建时间
+                    last_active_time = channel.created_at
+                    
 
-                    time_diff = now - last_message.created_at
+                    async for msg in channel.history(limit=10):
+                        if not msg.author.bot:
+                            last_active_time = msg.created_at
+                            break
+                    
+                    # 计算时间差 (当前时间 - 用户最后说话的时间)
+                    time_diff = now - last_active_time
+                    
                     info = get_ticket_info(channel)
                     creator_id = info.get('创建者ID')
 
                     # 1. 检查是否超过 24 小时 (归档)
                     if time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
-                        print(f"频道 '{channel.name}' 超过24小时无响应，执行归档...")
+                        print(f"频道 '{channel.name}' 超过24小时无有效活动，执行归档...")
                         new_name = f"超时归档-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
                         await channel.send("呜...这个频道超过24小时没有动静惹，本大王先把它归档保管起来咯！")
                         
@@ -544,7 +551,6 @@ class Tickets(commands.Cog):
 
                         await channel.edit(name=new_name, category=archive_category, overwrites=overwrites, reason="24小时超时自动归档")
                         
-                        # 尝试私信通知
                         if creator_id:
                             try:
                                 member = await guild.fetch_member(int(creator_id))
@@ -553,16 +559,20 @@ class Tickets(commands.Cog):
 
                     # 2. 检查是否超过 12 小时 (提醒)
                     elif time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND):
-                        # 只有当最后一条消息 *不是* 机器人的温馨提醒时，才发送提醒
-                        # 防止每小时重复轰炸
-                        is_reminder = (last_message.author == self.bot.user and "温馨提醒" in last_message.content)
+                        # 获取绝对最后一条消息（用于判断是否刚刚才发过提醒）
+                        last_msg_absolute = await channel.fetch_message(channel.last_message_id) if channel.last_message_id else None
                         
-                        if not is_reminder:
-                            print(f"频道 '{channel.name}' 超过12小时无响应，发送提醒...")
+                        is_recently_reminded = (
+                            last_msg_absolute and 
+                            last_msg_absolute.author == self.bot.user and 
+                            "温馨提醒" in last_msg_absolute.content
+                        )
+                        
+                        if not is_recently_reminded:
+                            print(f"频道 '{channel.name}' 超过12小时无有效活动，发送提醒...")
                             mention_str = ""
                             if creator_id:
                                 mention_str = f"<@{creator_id}>"
-                                # 尝试私信
                                 try:
                                     member = await guild.fetch_member(int(creator_id))
                                     await member.send(f"👋 饱饱，你的审核工单 `{info.get('工单ID')}` 已经12小时没有变动了哦！如果材料准备好了请尽快提交，超过24小时会自动关闭工单哒！")
