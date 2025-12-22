@@ -332,7 +332,7 @@ class TicketPanelView(discord.ui.View):
                 raise ValueError("一审频道分类配置错误")
 
             ticket_id = random.randint(100000, 999999)
-            channel_name = f"待接单-{ticket_id}-{interaction.user.name}"
+            channel_name = f"一审中-{ticket_id}-{interaction.user.name}"
 
             # 获取指定的审核小蛋成员对象
             specific_reviewer = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
@@ -578,41 +578,39 @@ class Tickets(commands.Cog):
 
     @ticket.command(name="超时归档", description="（审核小蛋用）将当前工单标记为超时，通知用户并删除。")
     @is_reviewer_egg()
-    async def timeout_archive(self, ctx: discord.ApplicationContext):
+    async def timeout_archive(self, ctx: discord.ApplicationContext, 
+                              note: discord.Option(str, "补充备注（可选）", required=False) = None):
         await ctx.defer(ephemeral=True)
         channel = ctx.channel
         if not channel.topic or "工单ID" not in channel.topic:
-            await ctx.followup.send("呜...这里似乎不是一个有效的工单频道（缺少工单Topic信息）！", ephemeral=True)
-            return
-        archive_log_channel = self.bot.get_channel(1419652525249794128)
-        if not archive_log_channel:
-            await ctx.followup.send("呜...找不到档案记录频道 `1419652525249794128`！请检查ID是否正确或机器人是否有权限查看。", ephemeral=True)
-            return
+            await ctx.followup.send("无效工单频道！", ephemeral=True); return
+        
         info = get_ticket_info(channel)
-        ticket_id = info.get("工单ID", "未知编号")
+        ticket_id = info.get("工单ID", "未知")
+        creator_id = info.get("创建者ID")
         creator_name = info.get("创建者", "未知用户")
-        creator_id_str = info.get("创建者ID")
-        if not creator_id_str:
-            await ctx.followup.send("呜...无法从此频道的Topic中解析出【创建者ID】，无法私信用户！", ephemeral=True)
-            return
-        log_message = f"{ticket_id}-{creator_name}因超时已归档"
-        try: await archive_log_channel.send(log_message)
-        except discord.Forbidden:
-            await ctx.followup.send(f"呜...我没有权限在 {archive_log_channel.mention} 中发言！", ephemeral=True)
-            return
-        dm_message = "不好意思你在🔮LOFI-加载中申请的审核工单已超时，所以先做关闭处理惹😱如果还想要继续审核，欢迎宝宝重新申请~"
-        try:
-            creator = await self.bot.fetch_user(int(creator_id_str))
-            await creator.send(dm_message)
-            dm_status = "✅ 已成功私信用户。"
-        except discord.NotFound: dm_status = f"❌ 找不到ID为 {creator_id_str} 的用户，无法私信。"
-        except discord.Forbidden: dm_status = f"❌ 无法私信用户 {creator_name}，TA可能关闭了私信或屏蔽了我。"
-        except Exception as e: dm_status = f"❌ 私信时发生未知错误: {e}"
-        try: await channel.delete(reason=f"管理员 {ctx.author.name} 手动超时归档")
-        except discord.Forbidden:
-            await ctx.followup.send(f"呜...日志和私信都已处理，但我没有权限删除这个频道！请手动删除。\n{dm_status}", ephemeral=True)
-            return
-        await ctx.followup.send(f"操作成功！工单 `{ticket_id}-{creator_name}` 已作为超时处理并清除。\n{dm_status}", ephemeral=True)
+
+        # 记录日志
+        archive_log_channel = self.bot.get_channel(1419652525249794128)
+        log_content = f"🚫 **超时归档**\n工单: `{ticket_id}`\n用户: `{creator_name}` (`{creator_id}`)"
+        if note:
+            log_content += f"\n备注: {note}"
+            
+        if archive_log_channel: 
+            await archive_log_channel.send(log_content)
+        
+        # 私信用户
+        if creator_id:
+            try:
+                user = await self.bot.fetch_user(int(creator_id))
+                dm_content = "不好意思你在🔮LOFI-加载中申请的审核工单已超时，所以先做关闭处理惹😱欢迎重新申请~"
+                if note:
+                    dm_content += f"\n(管理员留言: {note})"
+                await user.send(dm_content)
+            except: pass
+            
+        await channel.delete(reason=f"手动超时归档 - {ctx.author.name}")
+        await ctx.followup.send(f"工单 `{ticket_id}` 已处理。", ephemeral=True)
 
     @ticket.command(name="删除并释放名额", description="（审核小蛋用）立即删除此工单，并将一个审核名额返还。")
     @is_reviewer_egg()
@@ -734,14 +732,34 @@ class Tickets(commands.Cog):
         await ctx.defer(ephemeral=True)
         archive_category = self.bot.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
         log_channel = self.bot.get_channel(IDS["TICKET_LOG_CHANNEL_ID"])
+        
         if not archive_category: await ctx.followup.send("呜...找不到配置的【归档】分类！", ephemeral=True); return
         if not log_channel: await ctx.followup.send("呜...找不到存放日志的频道！", ephemeral=True); return
+        
         await ctx.followup.send(f"收到！开始扫描 “{archive_category.name}” 中带 “已过审” 的频道...", ephemeral=True)
-        exported_count = 0; channels_to_process = [ch for ch in archive_category.text_channels if "已过审" in ch.name]
+        
+        # 1. 筛选频道
+        channels_to_process = [ch for ch in archive_category.text_channels if "已过审" in ch.name]
         if not channels_to_process:
             await ctx.followup.send("在归档区没找到带“已过审”的频道哦~", ephemeral=True); return
+
+        # 2. 按频道创建时间排序
+        channels_to_process.sort(key=lambda x: x.created_at)
+
+        exported_count = 0
+        current_date_header = "" # 用于记录当前正在处理的日期
+
         for channel in channels_to_process:
             try:
+                # 获取频道创建日期 (转换为配置的时区)
+                channel_date = channel.created_at.astimezone(QUOTA["TIMEZONE"]).strftime('%Y%m%d')
+                
+                # 如果日期变化，发送新的大标题
+                if channel_date != current_date_header:
+                    current_date_header = channel_date
+                    await log_channel.send(f"## 📅 {current_date_header}") # 发送日期大标题
+
+                # 生成HTML内容
                 html_template = """
                 <!DOCTYPE html><html><head><title>Log for {channel_name}</title><meta charset="UTF-8"><style>
                 body {{ background-color: #313338; color: #dbdee1; font-family: 'Whitney', 'Helvetica Neue', sans-serif; padding: 20px; }}
@@ -753,6 +771,7 @@ class Tickets(commands.Cog):
                 </style></head><body><h1>工单日志: {channel_name}</h1>
                 """
                 html_content = html_template.format(channel_name=channel.name, embed_color=hex(STYLE['KIMI_YELLOW']).replace('0x', '#'))
+                
                 async for message in channel.history(limit=None, oldest_first=True):
                     message_text = message.clean_content.replace('\n', '<br>')
                     timestamp = message.created_at.astimezone(QUOTA["TIMEZONE"]).strftime('%Y-%m-%d %H:%M:%S')
@@ -770,15 +789,24 @@ class Tickets(commands.Cog):
                         html_content += '</div>'
                     html_content += '</div></div>'
                 html_content += "</body></html>"
+                
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                     zip_file.writestr(f'{channel.name}.html', html_content.encode('utf-8'))
                 zip_buffer.seek(0)
-                log_embed = discord.Embed(title="📦 批量导出日志", description=f"频道: `{channel.name}`", color=STYLE["KIMI_YELLOW"])
-                await log_channel.send(embed=log_embed, file=discord.File(zip_buffer, filename=f"{channel.name}.zip"))
-                await channel.delete(reason="批量导出并归档"); exported_count += 1; await asyncio.sleep(1)
+                
+                # [修改点] 先发频道名称文字，再发文件
+                await log_channel.send(f"📄 归档记录: `{channel.name}`")
+                await log_channel.send(file=discord.File(zip_buffer, filename=f"{channel.name}.zip"))
+                
+                await channel.delete(reason="批量导出并归档")
+                exported_count += 1
+                await asyncio.sleep(1) # 稍微暂停一下防止速率限制
+
             except Exception as e:
-                print(f"批量导出频道 {channel.name} 时出错: {e}"); await log_channel.send(f"❌ 导出频道 `{channel.name}` 时出错: {e}")
+                print(f"批量导出频道 {channel.name} 时出错: {e}")
+                await log_channel.send(f"❌ 导出频道 `{channel.name}` 时出错: {e}")
+
         await ctx.followup.send(f"批量导出完成！成功处理了 **{exported_count}/{len(channels_to_process)}** 个频道！", ephemeral=True)
 
     quota_mg = discord.SlashCommandGroup("名额管理", "（仅限审核小蛋）手动调整工单名额~", checks=[is_reviewer_egg()])
