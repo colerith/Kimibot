@@ -1,7 +1,4 @@
 py-cord
 aiohttp
 pytz
-discord-py
-py-cord
-pytz
-flask
+openpyxl
