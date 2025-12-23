@@ -6,7 +6,8 @@ import sqlite3
 import datetime
 import asyncio
 from discord.commands import SlashCommandGroup, Option
-from config import IDS, STYLE  # 假设你依然使用统一的配置文件
+from typing import Union
+from config import IDS, STYLE
 
 # 数据库文件路径
 DB_PATH = "forum_data.db"
@@ -286,8 +287,16 @@ class ForumTracker(commands.Cog):
             try:
                 task_id, name, _, output_id, msg_id, _, _, _ = task
                 
+                # 修改点：尝试获取频道，如果缓存没有则尝试 API 获取（对子区很重要）
                 channel = self.bot.get_channel(output_id)
-                if not channel: continue
+                if not channel:
+                    try:
+                        channel = await self.bot.fetch_channel(output_id)
+                    except discord.NotFound:
+                        print(f"任务 {task_id} 的输出频道/子区已不存在。")
+                        continue
+                    except Exception:
+                        continue
                 
                 try:
                     msg = await channel.fetch_message(msg_id)
@@ -302,15 +311,11 @@ class ForumTracker(commands.Cog):
 
                 # 构建第一页
                 view = ForumStatsView(task_id=task_id, current_page=1)
-                # 模拟交互更新（复用逻辑）
-                # 这里手动构建 Embed
+                
                 total_count = db.get_total_valid_count(task_id)
                 view.total_pages = max(1, (total_count + 19) // 20)
                 view.update_buttons()
                 
-                # 这里的逻辑其实和 View 里的 update_embed 是一样的，为了代码复用，
-                # 我们可以直接调用 view 里的逻辑，但 view 需要 interaction。
-                # 所以这里简单重写一下 Embed 构建
                 posts = db.get_valid_posts(task_id, 1)
                 embed = discord.Embed(
                     title=f"📊 论坛统计：{name}",
@@ -346,16 +351,25 @@ class ForumTracker(commands.Cog):
     async def create_task(self, ctx,
         name: Option(str, "任务名称 (如: 围炉杯统计)"),
         forum_channel: Option(discord.ForumChannel, "要监控的论坛频道"),
-        output_channel: Option(discord.TextChannel, "统计结果发送到哪个频道"),
+        # 修改点：允许 TextChannel (普通频道) 或 Thread (子区)
+        output_channel: Option(Union[discord.TextChannel, discord.Thread], "统计结果发送到哪个频道或子区"),
         title_keyword: Option(str, "标题必须包含的关键词", required=True),
         content_keyword: Option(str, "首楼必须包含的关键词", required=False, default=None),
         auto_verify: Option(bool, "是否自动通过审核 (True=自动上榜, False=需人工审核)", default=True)
     ):
         await ctx.defer()
         
-        # 发送初始消息占位
-        embed = discord.Embed(title=f"📊 统计任务初始化: {name}", description="正在准备数据...", color=STYLE["KIMI_YELLOW"])
-        msg = await output_channel.send(embed=embed)
+        # 检查机器人是否有权限在那个子区/频道说话
+        try:
+            # 发送初始消息占位
+            embed = discord.Embed(title=f"📊 统计任务初始化: {name}", description="正在准备数据...", color=STYLE["KIMI_YELLOW"])
+            msg = await output_channel.send(embed=embed)
+        except discord.Forbidden:
+            await ctx.followup.send(f"❌ 我没有权限在 {output_channel.mention} 发送消息！请检查权限。", ephemeral=True)
+            return
+        except Exception as e:
+            await ctx.followup.send(f"❌ 发送初始化消息失败: {e}", ephemeral=True)
+            return
         
         # 入库
         task_id = db.add_task(name, forum_channel.id, output_channel.id, msg.id, title_keyword, content_keyword, auto_verify)
@@ -363,8 +377,8 @@ class ForumTracker(commands.Cog):
         # 立即刷新一次面板
         await self.refresh_all_panels()
         
-        await ctx.followup.send(f"✅ 任务 **{name}** (ID: {task_id}) 创建成功！\n监控频道: {forum_channel.mention}\n输出面板: {output_channel.mention}\n\n从现在开始的新帖子将被自动记录。", ephemeral=True)
-
+        await ctx.followup.send(f"✅ 任务 **{name}** (ID: {task_id}) 创建成功！\n监控频道: {forum_channel.mention}\n输出位置: {output_channel.mention}\n\n从现在开始的新帖子将被自动记录。", ephemeral=True)
+        
     @stats.command(name="列表", description="查看当前正在运行的统计任务")
     @is_super_egg()
     async def list_tasks(self, ctx):

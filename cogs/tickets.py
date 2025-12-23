@@ -499,7 +499,7 @@ class Tickets(commands.Cog):
         print(f"[{datetime.datetime.now()}] 到达晚上23点，更新工单面板为关闭状态...")
         await self.update_ticket_panel()
 
-    # --- 核心修改：超时检测与提醒 ---
+    # --- 超时检测与提醒 ---
     @tasks.loop(hours=1) 
     async def check_inactive_tickets(self):
         await self.bot.wait_until_ready()
@@ -519,17 +519,21 @@ class Tickets(commands.Cog):
             super_egg_role = guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
 
             for channel in category.text_channels:
-                # 只检查这些状态的频道
                 if not ("待接单-" in channel.name or "一审中-" in channel.name or "二审中-" in channel.name):
                     continue
                 try:
-                    # --- 核心修改：计算最后活动时间 ---
-                    # 默认使用频道创建时间
-                    last_active_time = channel.created_at
+                    # --- 核心逻辑修复 ---
                     
-
-                    async for msg in channel.history(limit=10):
-                        if not msg.author.bot:
+                    # 1. 获取最后一次有效活动时间（用户的发言时间 或 频道创建时间）
+                    last_active_time = channel.created_at
+                    has_already_reminded = False 
+                    
+                    # 遍历最近的 20 条消息 (倒序，从最新到最旧)
+                    async for msg in channel.history(limit=20):
+                        if msg.author.bot:
+                            if "温馨提醒" in msg.content or (msg.embeds and "温馨提醒" in (msg.embeds[0].title or "")):
+                                has_already_reminded = True
+                        else:
                             last_active_time = msg.created_at
                             break
                     
@@ -539,7 +543,7 @@ class Tickets(commands.Cog):
                     info = get_ticket_info(channel)
                     creator_id = info.get('创建者ID')
 
-                    # 1. 检查是否超过 24 小时 (归档)
+                    # 2. 检查是否超过 24 小时 (归档)
                     if time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
                         print(f"频道 '{channel.name}' 超过24小时无有效活动，执行归档...")
                         new_name = f"超时归档-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
@@ -557,29 +561,21 @@ class Tickets(commands.Cog):
                                 await member.send(f"你的工单 `{info.get('工单ID')}` 因超过24小时未活动已被归档。如需继续请重新创建工单哦！")
                             except: pass
 
-                    # 2. 检查是否超过 12 小时 (提醒)
-                    elif time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND):
-                        # 获取绝对最后一条消息（用于判断是否刚刚才发过提醒）
-                        last_msg_absolute = await channel.fetch_message(channel.last_message_id) if channel.last_message_id else None
+                    # 3. 检查是否超过 12 小时 (提醒)
+                    # 条件：时间超过12小时 且 还没归档(隐含) 且 【在这期间没有提醒过】
+                    elif time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND) and not has_already_reminded:
+                        print(f"频道 '{channel.name}' 超过12小时无有效活动，发送首次提醒...")
                         
-                        is_recently_reminded = (
-                            last_msg_absolute and 
-                            last_msg_absolute.author == self.bot.user and 
-                            "温馨提醒" in last_msg_absolute.content
-                        )
+                        mention_str = ""
+                        if creator_id:
+                            mention_str = f"<@{creator_id}>"
+                            try:
+                                member = await guild.fetch_member(int(creator_id))
+                                await member.send(f"👋 饱饱，你的审核工单 `{info.get('工单ID')}` 已经12小时没有变动了哦！如果材料准备好了请尽快提交，超过24小时会自动关闭工单哒！")
+                            except: pass
                         
-                        if not is_recently_reminded:
-                            print(f"频道 '{channel.name}' 超过12小时无有效活动，发送提醒...")
-                            mention_str = ""
-                            if creator_id:
-                                mention_str = f"<@{creator_id}>"
-                                try:
-                                    member = await guild.fetch_member(int(creator_id))
-                                    await member.send(f"👋 饱饱，你的审核工单 `{info.get('工单ID')}` 已经12小时没有变动了哦！如果材料准备好了请尽快提交，超过24小时会自动关闭工单哒！")
-                                except: pass
-                            
-                            embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已经沉睡超过 **12小时** 啦！\n请注意：**超过24小时无响应** 将会自动归档哦！\n如果需要审核，请尽快回复~", color=0xFFA500)
-                            await channel.send(content=mention_str, embed=embed)
+                        embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已经沉睡超过 **12小时** 啦！\n请注意：**超过24小时无响应** 将会自动归档哦！\n如果需要审核，请尽快回复~", color=0xFFA500)
+                        await channel.send(content=mention_str, embed=embed)
 
                 except Exception as e:
                     print(f"检查频道 '{channel.name}' 时发生错误: {e}")
