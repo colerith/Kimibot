@@ -9,6 +9,7 @@ import io
 from discord.commands import SlashCommandGroup, Option
 from typing import Union
 
+# 尝试导入 openpyxl
 try:
     import openpyxl
     HAS_OPENPYXL = True
@@ -29,8 +30,10 @@ class DatabaseManager:
         self.conn = sqlite3.connect(DB_PATH)
         self.cursor = self.conn.cursor()
         self.create_tables()
+        self.check_and_migrate() # 检查是否需要更新表结构
 
     def create_tables(self):
+        # 任务表
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS tracking_tasks (
                 task_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,9 +43,11 @@ class DatabaseManager:
                 msg_id INTEGER,
                 title_keyword TEXT,
                 content_keyword TEXT,
-                auto_verify BOOLEAN DEFAULT 0
+                auto_verify BOOLEAN DEFAULT 0,
+                content_logic TEXT DEFAULT 'OR' 
             )
         """)
+        # 帖子表
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS tracked_posts (
                 thread_id INTEGER PRIMARY KEY,
@@ -57,11 +62,25 @@ class DatabaseManager:
         """)
         self.conn.commit()
 
-    def add_task(self, name, forum_id, output_id, msg_id, title_kw, content_kw, auto_verify):
+    def check_and_migrate(self):
+        """检查并自动添加新字段，防止旧数据库报错"""
+        try:
+            # 尝试查询新字段，如果报错说明不存在
+            self.cursor.execute("SELECT content_logic FROM tracking_tasks LIMIT 1")
+        except sqlite3.OperationalError:
+            print("⚠️ 检测到旧版数据库，正在自动升级表结构 (添加 content_logic 字段)...")
+            try:
+                self.cursor.execute("ALTER TABLE tracking_tasks ADD COLUMN content_logic TEXT DEFAULT 'OR'")
+                self.conn.commit()
+                print("✅ 数据库升级完成！")
+            except Exception as e:
+                print(f"❌ 数据库升级失败: {e}")
+
+    def add_task(self, name, forum_id, output_id, msg_id, title_kw, content_kw, auto_verify, content_logic):
         self.cursor.execute("""
-            INSERT INTO tracking_tasks (name, forum_channel_id, output_channel_id, msg_id, title_keyword, content_keyword, auto_verify)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (name, forum_id, output_id, msg_id, title_kw, content_kw, auto_verify))
+            INSERT INTO tracking_tasks (name, forum_channel_id, output_channel_id, msg_id, title_keyword, content_keyword, auto_verify, content_logic)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (name, forum_id, output_id, msg_id, title_kw, content_kw, auto_verify, content_logic))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -102,15 +121,6 @@ class DatabaseManager:
         """, (task_id, per_page, offset))
         return self.cursor.fetchall()
     
-    def get_all_posts_for_export(self, task_id):
-        """获取某任务下的所有帖子（包括无效的，用于导出）"""
-        self.cursor.execute("""
-            SELECT * FROM tracked_posts 
-            WHERE task_id = ? 
-            ORDER BY created_at DESC 
-        """, (task_id,))
-        return self.cursor.fetchall()
-
     def get_total_valid_count(self, task_id):
         self.cursor.execute("SELECT COUNT(*) FROM tracked_posts WHERE task_id = ? AND status = 1", (task_id,))
         result = self.cursor.fetchone()
@@ -123,9 +133,7 @@ db = DatabaseManager()
 # ======================================================================================
 
 async def get_task_autocomplete(ctx: discord.AutocompleteContext):
-    """用于 Slash Command 的任务自动补全"""
     tasks_data = db.get_tasks()
-    # 过滤逻辑：如果用户输入了内容，匹配任务名；否则显示所有
     user_input = ctx.value.lower()
     return [
         discord.OptionChoice(name=f"{task[1]} (ID: {task[0]})", value=str(task[0]))
@@ -142,6 +150,28 @@ def is_super_egg():
         await ctx.respond("🚫 只有管理员才能管理统计任务哦！", ephemeral=True)
         return False
     return commands.check(predicate)
+
+def check_keywords(text: str, keywords_str: str, logic: str) -> bool:
+    """
+    检查文本是否符合关键词逻辑
+    keywords_str: 用逗号分隔的关键词字符串
+    logic: 'OR' 或 'AND'
+    """
+    if not text or not keywords_str:
+        return False
+    
+    # 统一分隔符，支持中英文逗号
+    keywords = [k.strip() for k in keywords_str.replace("，", ",").split(",") if k.strip()]
+    
+    if not keywords:
+        return True # 如果关键词为空字符串，视为无需过滤
+    
+    if logic == 'AND':
+        # 必须包含所有关键词
+        return all(k in text for k in keywords)
+    else:
+        # 包含任意一个关键词
+        return any(k in text for k in keywords)
 
 # ======================================================================================
 # --- 翻页视图 ---
@@ -162,22 +192,29 @@ class ForumStatsView(discord.ui.View):
 
     async def update_embed(self, interaction):
         posts = db.get_valid_posts(self.task_id, self.current_page)
-        total_count = db.get_total_valid_count(self.task_id) # 获取总数
+        total_count = db.get_total_valid_count(self.task_id)
         
         task_info = db.get_task_by_id(self.task_id)
         if not task_info:
             await interaction.response.send_message("该任务似乎已被删除。", ephemeral=True)
             return
 
-        task_name, _, _, _, _, title_kw, _, _ = task_info
-        
-        # [修改] 时间格式化
+        # task_info: 0:id, 1:name, ..., 5:title_kw, 6:content_kw, 7:verify, 8:logic
+        task_name = task_info[1]
+        title_kw = task_info[5]
+        content_kw = task_info[6]
+        content_logic = task_info[8] if len(task_info) > 8 else "OR" # 兼容旧数据
+
         update_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        
+        desc_str = f"📈 **总收录数：{total_count} 篇**\n🕒 更新时间：{update_time}\n"
+        desc_str += f"🔍 标题包含：`{title_kw}`\n"
+        if content_kw:
+             desc_str += f"📄 首楼包含：`{content_kw}` (模式: {content_logic})"
         
         embed = discord.Embed(
             title=f"📊 论坛统计：{task_name}",
-            # [修改] 描述中显示总收录数和固定时间格式
-            description=f"🔍 关键词：`{title_kw}`\n📈 **总收录数：{total_count} 篇**\n🕒 更新时间：{update_time}",
+            description=desc_str,
             color=STYLE["KIMI_YELLOW"]
         )
         
@@ -186,19 +223,12 @@ class ForumStatsView(discord.ui.View):
         else:
             content_list = []
             for i, post in enumerate(posts):
-                # post: 0:id, 1:task_id, 2:uid, 3:name, 4:title, 5:url, 6:time, 7:status
                 index = (self.current_page - 1) * 20 + i + 1
-                
-                # [修改] 帖子时间格式化
                 try:
-                    # 尝试解析时间字符串
-                    if isinstance(post[6], str):
-                        dt = datetime.datetime.fromisoformat(post[6])
-                    else:
-                        dt = post[6]
+                    if isinstance(post[6], str): dt = datetime.datetime.fromisoformat(post[6])
+                    else: dt = post[6]
                     date_str = dt.strftime('%Y-%m-%d')
-                except:
-                    date_str = str(post[6]).split(" ")[0]
+                except: date_str = str(post[6]).split(" ")[0]
 
                 line = f"`{index}.` [{post[4]}]({post[5]}) - by {post[3]} ({date_str})"
                 content_list.append(line)
@@ -250,16 +280,22 @@ class ForumTracker(commands.Cog):
     async def on_thread_create(self, thread):
         await asyncio.sleep(2)
         tasks_data = db.get_tasks()
+        
         for task in tasks_data:
-            task_id, _, forum_id, _, _, title_kw, content_kw, auto_verify = task
+            # task: 0:id, 1:name, 2:forum_id, 3:output_id, 4:msg_id, 5:title_kw, 6:content_kw, 7:auto_verify, 8:logic
+            task_id, _, forum_id, _, _, title_kw, content_kw, auto_verify = task[:8]
+            content_logic = task[8] if len(task) > 8 else "OR" # 兼容旧数据
             
             if thread.parent_id != forum_id: continue
             if title_kw and title_kw not in thread.name: continue
             
+            # 检查首楼内容（支持多关键词）
             if content_kw:
                 try:
                     starter_msg = await thread.fetch_message(thread.id)
-                    if content_kw not in starter_msg.content: continue
+                    # 调用新的检查函数
+                    if not check_keywords(starter_msg.content, content_kw, content_logic):
+                        continue
                 except: continue
 
             status = 1 if auto_verify else 0
@@ -285,7 +321,7 @@ class ForumTracker(commands.Cog):
         tasks_data = db.get_tasks()
         for task in tasks_data:
             try:
-                task_id, name, _, output_id, msg_id, _, _, _ = task
+                task_id, name, _, output_id, msg_id, _, _, _ = task[:8]
                 
                 channel = self.bot.get_channel(output_id)
                 if not channel:
@@ -307,12 +343,24 @@ class ForumTracker(commands.Cog):
                 view.total_pages = max(1, (total_count + 19) // 20)
                 view.update_buttons()
                 
+                # 获取并更新信息 (重新从DB获取以包含逻辑描述)
+                # 复用 View 里的 update_embed 逻辑，这里手动构建一次
+                task_info = db.get_task_by_id(task_id)
+                title_kw = task_info[5]
+                content_kw = task_info[6]
+                content_logic = task_info[8] if len(task_info) > 8 else "OR"
+                
                 posts = db.get_valid_posts(task_id, 1)
                 update_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
+                desc_str = f"📈 **总收录数：{total_count} 篇**\n🕒 更新时间：{update_time}\n"
+                desc_str += f"🔍 标题包含：`{title_kw}`\n"
+                if content_kw:
+                     desc_str += f"📄 首楼包含：`{content_kw}` (模式: {content_logic})"
+
                 embed = discord.Embed(
                     title=f"📊 论坛统计：{name}",
-                    description=f"📈 **总收录数：{total_count} 篇**\n🕒 更新时间：{update_time}",
+                    description=desc_str,
                     color=STYLE["KIMI_YELLOW"]
                 )
                 if posts:
@@ -349,10 +397,15 @@ class ForumTracker(commands.Cog):
         forum_channel: Option(discord.ForumChannel, "要监控的论坛频道"),
         output_channel: Option(Union[discord.TextChannel, discord.Thread], "统计结果发送到哪个频道/子区"),
         title_keyword: Option(str, "标题必须包含的关键词", required=True),
-        content_keyword: Option(str, "首楼必须包含的关键词", required=False, default=None),
+        content_keyword: Option(str, "首楼关键词 (多个用逗号分隔)", required=False, default=None),
+        logic_mode: Option(str, "关键词匹配逻辑", choices=["满足任意一个(OR)", "满足所有(AND)"], default="满足任意一个(OR)"),
         auto_verify: Option(bool, "是否自动通过审核", default=True)
     ):
         await ctx.defer()
+        
+        # 解析逻辑模式
+        logic_val = 'AND' if 'AND' in logic_mode else 'OR'
+        
         try:
             embed = discord.Embed(title=f"📊 统计任务初始化: {name}", description="正在准备数据...", color=STYLE["KIMI_YELLOW"])
             msg = await output_channel.send(embed=embed)
@@ -360,7 +413,7 @@ class ForumTracker(commands.Cog):
             await ctx.followup.send(f"❌ 发送初始化消息失败: {e}", ephemeral=True)
             return
         
-        task_id = db.add_task(name, forum_channel.id, output_channel.id, msg.id, title_keyword, content_keyword, auto_verify)
+        task_id = db.add_task(name, forum_channel.id, output_channel.id, msg.id, title_keyword, content_keyword, auto_verify, logic_val)
         await self.refresh_all_panels()
         await ctx.followup.send(f"✅ 任务 **{name}** (ID: {task_id}) 创建成功！", ephemeral=True)
 
@@ -380,7 +433,6 @@ class ForumTracker(commands.Cog):
         valid: Option(bool, "True=有效, False=移除"),
         thread_id: Option(str, "帖子ID (如果在帖子内使用可不填)", required=False) = None
     ):
-        # [修改] 自动获取 ID 逻辑
         target_id = None
         if thread_id:
             target_id = int(thread_id)
@@ -411,7 +463,6 @@ class ForumTracker(commands.Cog):
     ):
         await ctx.defer(ephemeral=True)
         
-        # [修改] 自动获取 ID 逻辑
         target_id = None
         if thread_id:
             target_id = int(thread_id)
@@ -423,9 +474,8 @@ class ForumTracker(commands.Cog):
             return
 
         try:
-            tid = int(task_id) # 确保任务ID是数字
+            tid = int(task_id)
             thread = await self.bot.fetch_channel(target_id)
-            
             if not isinstance(thread, discord.Thread):
                 await ctx.followup.send("❌ 目标不是一个有效的帖子/子区！", ephemeral=True)
                 return
@@ -441,20 +491,16 @@ class ForumTracker(commands.Cog):
                 status=1
             )
             await ctx.followup.send(f"✅ 帖子 **{thread.name}** 已补录到任务 {tid}！", ephemeral=True)
-            
-        except ValueError:
-            await ctx.followup.send("❌ ID格式错误。", ephemeral=True)
         except Exception as e:
             await ctx.followup.send(f"❌ 录入失败: {e}", ephemeral=True)
 
-    # [新增] 导出 Excel 命令
     @stats.command(name="导出", description="将统计结果导出为 Excel 表格")
     @is_super_egg()
     async def export_excel(self, ctx, 
         task_id: Option(str, "选择要导出的任务", autocomplete=get_task_autocomplete)
     ):
         if not HAS_OPENPYXL:
-            await ctx.respond("❌ 导出功能需要安装 `openpyxl` 库。\n请联系管理员在后台运行 `pip install openpyxl`。", ephemeral=True)
+            await ctx.respond("❌ 需要安装 `openpyxl` 库。", ephemeral=True)
             return
 
         await ctx.defer(ephemeral=True)
@@ -466,23 +512,15 @@ class ForumTracker(commands.Cog):
                 return
 
             task_name = task_info[1]
-            # 获取该任务下的所有帖子（包括无效的，也可以选择只导出有效的）
-            # 这里我设置为只导出有效的(status=1)，如果需要全部请改用 get_all_posts_for_export
-            posts = db.get_valid_posts(tid, 1, 999999) # 获取所有有效帖子
+            posts = db.get_valid_posts(tid, 1, 999999) 
 
-            # 创建 Excel
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "统计结果"
-            
-            # 表头
             headers = ["序号", "帖子ID", "作者ID", "作者名称", "标题", "链接", "发布时间", "状态"]
             ws.append(headers)
             
             for i, post in enumerate(posts):
-                # post: 0:thread_id, 1:task_id, 2:author_id, 3:author_name, 4:title, 5:jump_url, 6:created_at, 7:status
-                
-                # 处理时间格式
                 try:
                     if isinstance(post[6], str): dt = datetime.datetime.fromisoformat(post[6])
                     else: dt = post[6]
@@ -490,18 +528,11 @@ class ForumTracker(commands.Cog):
                 except: time_str = str(post[6])
 
                 row = [
-                    i + 1,
-                    str(post[0]),
-                    str(post[2]),
-                    post[3],
-                    post[4],
-                    post[5],
-                    time_str,
+                    i + 1, str(post[0]), str(post[2]), post[3], post[4], post[5], time_str,
                     "有效" if post[7] == 1 else "无效"
                 ]
                 ws.append(row)
 
-            # 保存到内存
             buffer = io.BytesIO()
             wb.save(buffer)
             buffer.seek(0)
