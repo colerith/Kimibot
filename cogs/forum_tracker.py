@@ -271,11 +271,10 @@ class ForumStatsView(discord.ui.View):
             await interaction.response.send_message("该任务似乎已被删除。", ephemeral=True)
             return
 
-        # task_info: 0:id, 1:name, ..., 5:title_kw, 6:content_kw, 7:verify, 8:logic
         task_name = task_info[1]
         title_kw = task_info[5]
         content_kw = task_info[6]
-        content_logic = task_info[8] if len(task_info) > 8 else "OR" # 兼容旧数据
+        content_logic = task_info[8] if len(task_info) > 8 else "OR"
 
         update_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
         
@@ -295,14 +294,17 @@ class ForumStatsView(discord.ui.View):
         else:
             content_list = []
             for i, post in enumerate(posts):
+                # 修正后的索引映射:
+                # 0:id, 1:thread_id, 2:task_id, 3:author_id, 4:author_name, 5:title, 6:jump_url, 7:created_at, 8:status
                 index = (self.current_page - 1) * 20 + i + 1
+                
                 try:
-                    if isinstance(post[6], str): dt = datetime.datetime.fromisoformat(post[6])
-                    else: dt = post[6]
+                    if isinstance(post[7], str): dt = datetime.datetime.fromisoformat(post[7])
+                    else: dt = post[7]
                     date_str = dt.strftime('%Y-%m-%d')
-                except: date_str = str(post[6]).split(" ")[0]
+                except: date_str = str(post[7]).split(" ")[0]
 
-                line = f"`{index}.` [{post[4]}]({post[5]}) - by {post[3]} ({date_str})"
+                line = f"`{index}.` [{post[5]}]({post[6]}) - by {post[4]} ({date_str})"
                 content_list.append(line)
             
             chunk_text = "\n".join(content_list)
@@ -415,13 +417,12 @@ class ForumTracker(commands.Cog):
                 view.total_pages = max(1, (total_count + 19) // 20)
                 view.update_buttons()
                 
-                # 获取并更新信息 (重新从DB获取以包含逻辑描述)
-                # 复用 View 里的 update_embed 逻辑，这里手动构建一次
+                # 获取任务信息用于显示关键词
                 task_info = db.get_task_by_id(task_id)
                 title_kw = task_info[5]
                 content_kw = task_info[6]
                 content_logic = task_info[8] if len(task_info) > 8 else "OR"
-                
+
                 posts = db.get_valid_posts(task_id, 1)
                 update_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
@@ -439,12 +440,15 @@ class ForumTracker(commands.Cog):
                     content_list = []
                     for i, post in enumerate(posts):
                         index = i + 1
+                        # 修正索引
                         try:
-                            if isinstance(post[6], str): dt = datetime.datetime.fromisoformat(post[6])
-                            else: dt = post[6]
+                            if isinstance(post[7], str): dt = datetime.datetime.fromisoformat(post[7])
+                            else: dt = post[7]
                             date_str = dt.strftime('%Y-%m-%d')
-                        except: date_str = str(post[6]).split(" ")[0]
-                        line = f"`{index}.` [{post[4]}]({post[5]}) - by {post[3]} ({date_str})"
+                        except: date_str = str(post[7]).split(" ")[0]
+                        
+                        # 修正：Title[5], URL[6], Author[4]
+                        line = f"`{index}.` [{post[5]}]({post[6]}) - by {post[4]} ({date_str})"
                         content_list.append(line)
                     embed.add_field(name="统计列表", value="\n".join(content_list), inline=False)
                 else:
@@ -589,19 +593,29 @@ class ForumTracker(commands.Cog):
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "统计结果"
+            # 修改表头顺序以匹配数据
             headers = ["序号", "帖子ID", "作者ID", "作者名称", "标题", "链接", "发布时间", "状态"]
             ws.append(headers)
             
             for i, post in enumerate(posts):
+                # 修正后的数据映射:
+                # 0:id, 1:thread_id, 2:task_id, 3:author_id, 4:author_name, 5:title, 6:jump_url, 7:created_at, 8:status
+                
                 try:
-                    if isinstance(post[6], str): dt = datetime.datetime.fromisoformat(post[6])
-                    else: dt = post[6]
+                    if isinstance(post[7], str): dt = datetime.datetime.fromisoformat(post[7])
+                    else: dt = post[7]
                     time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
-                except: time_str = str(post[6])
+                except: time_str = str(post[7])
 
                 row = [
-                    i + 1, str(post[0]), str(post[2]), post[3], post[4], post[5], time_str,
-                    "有效" if post[7] == 1 else "无效"
+                    i + 1,
+                    str(post[1]), # thread_id
+                    str(post[3]), # author_id
+                    post[4],      # author_name
+                    post[5],      # title
+                    post[6],      # jump_url
+                    time_str,     # created_at
+                    "有效" if post[8] == 1 else "无效" # status
                 ]
                 ws.append(row)
 
