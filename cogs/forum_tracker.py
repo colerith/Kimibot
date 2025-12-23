@@ -673,7 +673,7 @@ class ForumTracker(commands.Cog):
                     # 其他错误（如无权限）暂时忽略
                     pass
                 
-                await asyncio.sleep(5)
+                await asyncio.sleep(0.1)
             
             if cleaned_count > 0:
                 await self.refresh_all_panels() # 清理完自动刷新面板
