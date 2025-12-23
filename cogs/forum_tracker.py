@@ -197,6 +197,11 @@ class DatabaseManager:
         self.cursor.execute("SELECT COUNT(*) FROM tracked_posts WHERE task_id = ? AND status = 1", (task_id,))
         result = self.cursor.fetchone()
         return result[0] if result else 0
+    
+    def delete_post_by_thread_id(self, thread_id):
+        self.cursor.execute("DELETE FROM tracked_posts WHERE thread_id = ?", (thread_id,))
+        self.conn.commit()
+        return self.cursor.rowcount
 
 db = DatabaseManager()
 
@@ -384,6 +389,15 @@ class ForumTracker(commands.Cog):
                 status=status
             )
             print(f"✅ [统计] 捕获新帖: {thread.name} -> Task {task_id}")
+
+    @commands.Cog.listener()
+    async def on_thread_delete(self, thread):
+        """监听帖子删除事件，自动同步数据库"""
+        # 尝试从数据库删除对应的记录
+        deleted_count = db.delete_post_by_thread_id(thread.id)
+        
+        if deleted_count > 0:
+            print(f"🗑️ [统计] 监测到帖子被删，已从数据库移除: {thread.name} (ID: {thread.id})")
 
     @tasks.loop(hours=24)
     async def daily_update_task(self):
@@ -628,6 +642,49 @@ class ForumTracker(commands.Cog):
 
         except Exception as e:
             await ctx.followup.send(f"❌ 导出失败: {e}", ephemeral=True)
+
+    @stats.command(name="清理", description="检测并移除已失效(被删除)的帖子数据")
+    @is_super_egg()
+    async def clean_invalid_posts(self, ctx,
+        task_id: Option(str, "选择任务", autocomplete=get_task_autocomplete)
+    ):
+        await ctx.defer(ephemeral=True)
+        try:
+            tid = int(task_id)
+            # 获取该任务下所有“有效”状态的帖子
+            posts = db.get_valid_posts(tid, 1, 999999)
+            
+            cleaned_count = 0
+            await ctx.followup.send(f"🔍 开始检查 {len(posts)} 个帖子的有效性，请稍候...", ephemeral=True)
+            
+            for post in posts:
+                # post[1] 是 thread_id
+                thread_id = post[1]
+                
+                try:
+                    # 尝试获取帖子
+                    # fetch_channel 会请求 API，如果帖子没了会抛出 NotFound
+                    await self.bot.fetch_channel(thread_id)
+                except discord.NotFound:
+                    # 抓到了！这个帖子在 Discord 里没了，但在数据库里还有
+                    db.delete_post_by_thread_id(thread_id)
+                    cleaned_count += 1
+                except Exception:
+                    # 其他错误（如无权限）暂时忽略
+                    pass
+                
+                await asyncio.sleep(5)
+            
+            if cleaned_count > 0:
+                await self.refresh_all_panels() # 清理完自动刷新面板
+                await ctx.followup.send(f"✅ 清理完成！共移除了 **{cleaned_count}** 个已删除的帖子数据。\n面板已自动刷新。", ephemeral=True)
+            else:
+                await ctx.followup.send("✅ 数据很健康！没有发现失效的帖子。", ephemeral=True)
+                
+        except ValueError:
+            await ctx.followup.send("❌ 任务ID错误。", ephemeral=True)
+        except Exception as e:
+            await ctx.followup.send(f"❌ 清理过程中出错: {e}", ephemeral=True)
 
 def setup(bot):
     bot.add_cog(ForumTracker(bot))
