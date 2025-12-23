@@ -20,7 +20,7 @@ bot = discord.Bot(intents=intents)
 # --- 启动时加载所有“魔法书” (Cogs) ---
 # 将要加载的 Cog 文件名放在一个列表中
 # 这样你就可以轻松地启用或禁用某个功能模块
-cogs_list = ['general', 'management', 'tickets', 'quiz']
+cogs_list = ['general', 'management', 'tickets', 'quiz', 'forum_tracker' ]
 
 for cog in cogs_list:
     try:
