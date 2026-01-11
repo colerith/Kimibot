@@ -369,7 +369,7 @@ class TicketPanelView(discord.ui.View):
             await self.cog.update_ticket_panel()
             return
 
-        embed = discord.Embed(title=f"🎫 工单 #{ticket_id} 已创建", description=f"饱饱你好呀！请按照审核要求提交相关材料哦~", color=STYLE["KIMI_YELLOW"])
+        embed = discord.Embed(title=f"🎫 工单 #{ticket_id} 已创建", description=f"饱饱你好呀！请按照审核要求提交相关材料哦~\n**准备好材料后在本频道直接发送即可**", color=STYLE["KIMI_YELLOW"])
         
         # 欢迎消息中艾特审核小蛋
         mention_text = f"<@&{SPECIFIC_REVIEWER_ID}>"
@@ -393,7 +393,7 @@ class TicketPanelView(discord.ui.View):
             f"**尽量在24小时内提交哦！**超时需要重新申请工单。\n\n"
             f"你的审核编号为 `{ticket_id}`\n"
             f"你的Discord id为 `{interaction.user.id}`\n\n"
-            f"准备好所有材料**并提交后**点击下方按钮艾特审核小蛋。"
+            f"准备好所有材料**并在本频道完全提交后**点击下方按钮艾特审核小蛋。"
         )
         reminder_embed = discord.Embed(description=reminder_description, color=STYLE["KIMI_YELLOW"])
         
