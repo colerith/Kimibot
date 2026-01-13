@@ -20,7 +20,7 @@ IDS = {
 
 # --- 额度配置 ---
 QUOTA = {
-    "DAILY_TICKET_LIMIT": 60,
+    "DAILY_TICKET_LIMIT": 100,
     "TIMEZONE": datetime.timezone(datetime.timedelta(hours=8)),
     "QUOTA_FILE_PATH": 'quota_data.json'
 }
