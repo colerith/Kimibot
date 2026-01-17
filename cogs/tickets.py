@@ -753,30 +753,53 @@ class Tickets(commands.Cog):
         channels_to_process.sort(key=lambda x: x.created_at)
 
         exported_count = 0
-        current_date_header = "" # 用于记录当前正在处理的日期
+        current_date_header = "" 
 
         for channel in channels_to_process:
             try:
-                # 获取频道创建日期 (转换为配置的时区)
+                # 获取频道创建日期
                 channel_date = channel.created_at.astimezone(QUOTA["TIMEZONE"]).strftime('%Y%m%d')
                 
-                # 如果日期变化，发送新的大标题
                 if channel_date != current_date_header:
                     current_date_header = channel_date
-                    await log_channel.send(f"## 📅 {current_date_header}") # 发送日期大标题
+                    await log_channel.send(f"## 📅 {current_date_header}") 
 
-                # 生成HTML内容
+                # --- 新增：获取工单信息和QQ号 ---
+                info = get_ticket_info(channel)
+                qq_number = info.get("QQ", "未录入") # 获取QQ号，如果没有则显示未录入
+                ticket_id = info.get("工单ID", "未知")
+                creator_name = info.get("创建者", "未知")
+                # -----------------------------
+
+                # 生成HTML内容 (修改了模板以包含QQ号)
                 html_template = """
                 <!DOCTYPE html><html><head><title>Log for {channel_name}</title><meta charset="UTF-8"><style>
                 body {{ background-color: #313338; color: #dbdee1; font-family: 'Whitney', 'Helvetica Neue', sans-serif; padding: 20px; }}
+                .info-box {{ background-color: #2b2d31; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #F1C40F; }}
+                .info-item {{ margin: 5px 0; font-size: 1.1em; }}
                 .message-group {{ display: flex; margin-bottom: 20px; }} .avatar img {{ width: 40px; height: 40px; border-radius: 50%; margin-right: 20px; }}
                 .message-content .author {{ font-weight: 500; color: #f2f3f5; }} .message-content .timestamp {{ font-size: 0.75rem; color: #949ba4; margin-left: 10px; }}
                 .message-content .text {{ margin-top: 5px; line-height: 1.375rem; }} .attachment img {{ max-width: 400px; border-radius: 5px; margin-top: 10px; }}
                 .embed {{ background-color: #2b2d31; border-left: 4px solid {embed_color}; padding: 10px; border-radius: 5px; margin-top: 10px; }}
                 .embed-title {{ font-weight: bold; color: white; }} .embed-description {{ font-size: 0.9rem; }}
-                </style></head><body><h1>工单日志: {channel_name}</h1>
+                </style></head><body>
+                <h1>工单日志: {channel_name}</h1>
+                <div class="info-box">
+                    <div class="info-item">🎫 <b>工单编号:</b> {ticket_id}</div>
+                    <div class="info-item">👤 <b>申请用户:</b> {creator_name}</div>
+                    <div class="info-item">🐧 <b>绑定QQ:</b> {qq_number}</div>
+                </div>
+                <hr>
                 """
-                html_content = html_template.format(channel_name=channel.name, embed_color=hex(STYLE['KIMI_YELLOW']).replace('0x', '#'))
+                
+                # 填充模板
+                html_content = html_template.format(
+                    channel_name=channel.name, 
+                    embed_color=hex(STYLE['KIMI_YELLOW']).replace('0x', '#'),
+                    ticket_id=ticket_id,
+                    creator_name=creator_name,
+                    qq_number=qq_number
+                )
                 
                 async for message in channel.history(limit=None, oldest_first=True):
                     message_text = message.clean_content.replace('\n', '<br>')
@@ -801,19 +824,66 @@ class Tickets(commands.Cog):
                     zip_file.writestr(f'{channel.name}.html', html_content.encode('utf-8'))
                 zip_buffer.seek(0)
                 
-                # [修改点] 先发频道名称文字，再发文件
-                await log_channel.send(f"📄 归档记录: `{channel.name}`")
+                # 日志消息中也显示QQ号
+                await log_channel.send(f"📄 归档记录: `{channel.name}` (QQ: {qq_number})")
                 await log_channel.send(file=discord.File(zip_buffer, filename=f"{channel.name}.zip"))
                 
                 await channel.delete(reason="批量导出并归档")
                 exported_count += 1
-                await asyncio.sleep(1) # 稍微暂停一下防止速率限制
+                await asyncio.sleep(1) 
 
             except Exception as e:
                 print(f"批量导出频道 {channel.name} 时出错: {e}")
                 await log_channel.send(f"❌ 导出频道 `{channel.name}` 时出错: {e}")
 
         await ctx.followup.send(f"批量导出完成！成功处理了 **{exported_count}/{len(channels_to_process)}** 个频道！", ephemeral=True)
+    
+    @ticket.command(name="录入qq", description="（审核小蛋用）录入或更新当前工单对应的QQ号。")
+    @is_reviewer_egg()
+    async def record_qq(self, ctx: discord.ApplicationContext, 
+                        qq_number: discord.Option(str, "用户的QQ号码", required=True)):
+        """
+        录入QQ号到频道Topic中，方便归档时读取。
+        此版本反馈信息仅管理员可见。
+        """
+        channel = ctx.channel
+        
+        # 1. 检查是否在有效的工单频道内
+        if not channel.topic or "工单ID" not in channel.topic:
+            await ctx.respond("呜...这里似乎不是一个有效的工单频道！请在工单频道内使用此指令。", ephemeral=True)
+            return
+
+        # 这里的 ephemeral=True 保证了后续的 followup 消息默认是隐藏的
+        await ctx.defer(ephemeral=True)
+
+        try:
+            # 2. 获取当前Topic信息并转为字典
+            info = get_ticket_info(channel)
+            
+            # 3. 更新或添加QQ信息
+            info["QQ"] = qq_number
+            
+            # 4. 重新构建Topic字符串
+            new_topic_parts = []
+            for key, value in info.items():
+                new_topic_parts.append(f"{key}: {value}")
+            
+            new_topic = " | ".join(new_topic_parts)
+ 
+            # 5. 编辑频道 
+            await channel.edit(topic=new_topic)
+            
+            # 6. 发送反馈 (仅管理员可见)
+            embed = discord.Embed(
+                description=f"✅ **录入成功！**\n\n工单QQ已更新为：`{qq_number}`\n归档导出时将包含此信息。",
+                color=STYLE["KIMI_YELLOW"]
+            )
+            await ctx.followup.send(embed=embed, ephemeral=True)
+
+        except discord.Forbidden:
+            await ctx.followup.send("呜哇！本大王没有权限修改这个频道的简介（Topic），请检查权限！", ephemeral=True)
+        except Exception as e:
+            await ctx.followup.send(f"录入失败，发生未知错误: {e}", ephemeral=True)
 
     quota_mg = discord.SlashCommandGroup("名额管理", "（仅限审核小蛋）手动调整工单名额~", checks=[is_reviewer_egg()])
     @quota_mg.command(name="重置", description="将今天的剩余名额恢复到最大值！")
