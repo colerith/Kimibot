@@ -184,14 +184,14 @@ class PresetFeatureView(discord.ui.View):
         await interaction.message.edit(view=self)
         self.stop()
 
-    # 修复：参数顺序调整为 (self, interaction, button)
+    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="🌌 极光", style=discord.ButtonStyle.primary)
-    async def wish_aurora(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def wish_aurora(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.create_preset_wish(interaction, "极光")
 
-    # 修复：参数顺序调整为 (self, interaction, button)
+    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="🏛️ 象牙塔", style=discord.ButtonStyle.secondary)
-    async def wish_ivory_tower(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def wish_ivory_tower(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.create_preset_wish(interaction, "象牙塔")
 
 class WishSelect(discord.ui.Select):
@@ -203,7 +203,7 @@ class WishSelect(discord.ui.Select):
             discord.SelectOption(label="社区建设", description="对社区发展提出建议", emoji="🏗️", value="社区建设"),
             discord.SelectOption(label="其他", description="许一个天马行空的愿望", emoji="💭", value="其他"),
         ]
-        # 修复：必须添加 custom_id 才能用于持久化视图 (add_view)
+        # 必须保持 custom_id 以支持持久化
         super().__init__(
             placeholder="👇 请选择你的愿望类型...", 
             min_values=1, 
@@ -230,6 +230,7 @@ class WishActionView(discord.ui.View):
         super().__init__(timeout=None)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # 只有服主才能操作
         if interaction.user.id == SERVER_OWNER_ID:
             return True
         await interaction.response.send_message("呜...只有服主大人才能操作这个按钮哦！", ephemeral=True)
@@ -250,19 +251,19 @@ class WishActionView(discord.ui.View):
             await asyncio.sleep(10)
             await interaction.channel.edit(archived=True, locked=True)
 
-    # 修复：参数顺序调整为 (self, interaction, button)
+    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="✅ 受理", style=discord.ButtonStyle.success, custom_id="wish_accept")
-    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def accept(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.update_wish_status(interaction, "✅ 已受理")
 
-    # 修复：参数顺序调整为 (self, interaction, button)
+    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="🤔 暂不考虑", style=discord.ButtonStyle.secondary, custom_id="wish_reject")
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def reject(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.update_wish_status(interaction, "🤔 暂不考虑", close_thread=True)
 
-    # 修复：参数顺序调整为 (self, interaction, button)
+    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="🎉 已实现", style=discord.ButtonStyle.primary, custom_id="wish_done")
-    async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def done(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.update_wish_status(interaction, "🎉 已实现！", close_thread=True)
 
 class PollView(discord.ui.View):
@@ -362,7 +363,7 @@ class General(commands.Cog):
         self.bot.add_view(WishActionView())
         print("唷呐！通用功能模块的永久视图已成功注册！")
         
-        # 修复：调用重命名后的函数 check_and_post_wish_panel
+        # 自动检查并更新许愿面板
         asyncio.create_task(self.check_and_post_wish_panel())
 
     # --- 事件监听器 (Listeners) ---
@@ -434,7 +435,6 @@ class General(commands.Cog):
         panel_message = await channel.send(embed=embed, view=WishPanelView())
         self.wish_panel_message_id = panel_message.id
 
-    # 修复：重命名函数以匹配 main.py 的调用和报错日志
     async def check_and_post_wish_panel(self):
         """机器人启动时运行，清理所有旧面板并发送一个新的。"""
         await self.bot.wait_until_ready()
