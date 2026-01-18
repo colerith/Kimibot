@@ -2,13 +2,16 @@ import discord
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
-# from keep_alive import keep_alive  # Not needed for Reserved VM deployment
 
 load_dotenv()
-# 从环境变量读取 Bot Token（由 Replit Secrets 管理）
+# 从环境变量读取 Bot Token
 BOT_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
 
-print(f"从.env文件中读取到的Token是: '{BOT_TOKEN}'")
+# 安全起见，不要在日志里直接打印完整的 Token，只显示前几位
+if BOT_TOKEN:
+    print(f"成功读取 Token: {BOT_TOKEN[:5]}...******")
+else:
+    print("❌ 未检测到 Token！请检查环境变量或 .env 文件")
 
 # --- 机器人本体创建 ---
 # 确保所有需要的 Intents 都已开启
@@ -18,9 +21,7 @@ intents.message_content = True
 bot = discord.Bot(intents=intents)
 
 # --- 启动时加载所有“魔法书” (Cogs) ---
-# 将要加载的 Cog 文件名放在一个列表中
-# 这样你就可以轻松地启用或禁用某个功能模块
-cogs_list = ['general', 'management', 'tickets', 'quiz', 'forum_tracker' ]
+cogs_list = ['general', 'management', 'tickets', 'quiz', 'forum_tracker']
 
 for cog in cogs_list:
     try:
@@ -37,28 +38,11 @@ async def on_ready():
     print(f"唷呐！我是 {bot.user.name}，最可爱的美少年来捉！")
     print(f"机器人ID: {bot.user.id}")
     print("----------------------------------------")
-
-    # --- 调用 Tickets Cog 的函数，并加上保护 ---
-    try:
-        tickets_cog = bot.get_cog("Tickets")
-        if tickets_cog:
-            await tickets_cog.update_ticket_panel()
-            print("🔧 已检查并更新工单面板。")
-        else:
-            print("⚠️ 未找到 Tickets Cog，跳过工单面板更新。")
-    except Exception as e:
-        print(f"❌ 更新工单面板时发生致命错误: {e}")  # 这会将错误打印到日志里！
-
-    # --- 调用 General Cog 的函数，并加上保护 ---
-    try:
-        general_cog = bot.get_cog("General")
-        if general_cog:
-            await general_cog.check_and_post_wish_panel()
-            print("🔧 已检查并更新许愿池面板。")
-        else:
-            print("⚠️ 未找到 General Cog，跳过许愿池面板更新。")
-    except Exception as e:
-        print(f"❌ 更新许愿池面板时发生致命错误: {e}")  # 这会将错误打印到日志里！
+    
+    # 注意：
+    # 这里的 Tickets 和 General 的面板更新逻辑已经移除。
+    # 因为在它们各自的 Cog 文件 (tickets.py, general.py) 的 on_ready 中已经包含了自动启动逻辑。
+    # 这样可以避免机器人启动时重复发送两次面板！
 
     print("========================================")
     print("本大王已经准备好萌翻全场惹！")
@@ -66,9 +50,8 @@ async def on_ready():
 
 
 # --- 启动机器人 ---
-# keep_alive()  # Not needed for Reserved VM deployment
 if __name__ == "__main__":
-    if BOT_TOKEN == "你的机器人TOKEN" or BOT_TOKEN == "":
-        print("错误：请先在 config.py 文件中填写你的机器人TOKEN！")
+    if not BOT_TOKEN:
+        print("错误：请先在 .env 文件或环境变量中配置 Token！")
     else:
         bot.run(BOT_TOKEN)

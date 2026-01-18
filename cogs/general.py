@@ -7,11 +7,10 @@ import random
 from config import IDS, QUOTA, STYLE
 
 # --- 从主文件引用的配置 ---
-# 建议将这些ID统一存放在一个配置文件中，方便管理
-IDS["SUPER_EGG_ROLE_ID"] = 1417724603253395526      # 【超级小蛋】的身份组ID
-SERVER_OWNER_ID = 1353777207042113576        # 服务器主的ID
-WISH_CHANNEL_ID = 1417577014096957554        # 许愿池频道的ID
-VERIFICATION_ROLE_ID = 1417722528574738513   # 【新兵蛋子】(验证成功后发放)的身份组ID
+IDS["SUPER_EGG_ROLE_ID"] = 1417724603253395526      
+SERVER_OWNER_ID = 1353777207042113576        
+WISH_CHANNEL_ID = 1417577014096957554        
+VERIFICATION_ROLE_ID = 1417722528574738513   
 
 TZ_CN = datetime.timezone(datetime.timedelta(hours=8))
 
@@ -20,7 +19,6 @@ STYLE["KIMI_YELLOW"] = 0xFFD700
 KIMI_FOOTER_TEXT = "请遵守社区规则，一起做个乖饱饱嘛~！"
 
 # --- 权限检查魔法 ---
-# 确保只有“超级小蛋”才能使用受限命令
 def is_super_egg():
     async def predicate(ctx: discord.ApplicationContext) -> bool:
         if not isinstance(ctx.author, discord.Member) or not hasattr(ctx.author, 'roles'):
@@ -36,7 +34,6 @@ def is_super_egg():
 
 # --- 时间转换小工具 ---
 def parse_duration(duration_str: str) -> int:
-    """将时间字符串 (e.g., '1d', '2h', '30m') 转换为秒数。"""
     try:
         unit = duration_str[-1].lower()
         value = int(duration_str[:-1])
@@ -49,14 +46,12 @@ def parse_duration(duration_str: str) -> int:
     return 0
 
 def generate_progress_bar(percent: float, length: int = 15) -> str:
-    """生成文本进度条"""
     filled_length = int(length * percent // 100)
     bar = '█' * filled_length + '░' * (length - filled_length)
     return bar
 
 # --- 功能所需的视图和弹窗 (Views & Modals) ---
 
-# 公告弹窗 (已修复 @everyone 问题)
 class AnnouncementModal(discord.ui.Modal):
     def __init__(self, channel, mention_role, attachments):
         super().__init__(title="📝 奇米大王公告编辑器")
@@ -74,30 +69,26 @@ class AnnouncementModal(discord.ui.Modal):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         original_content = self.children[0].value
-        content_outside_embed = ""  # 默认消息内容为空
-        description_for_embed = original_content  # Embed描述就是公告内容
+        content_outside_embed = ""
+        description_for_embed = original_content
         allowed_mentions = discord.AllowedMentions.none()
 
         if self.mention_role:
             is_everyone_ping = (self.mention_role.id == interaction.guild.id)
-            is_here_ping = ('@here' in self.mention_role.name) # 检查是否是 @here
+            is_here_ping = ('@here' in self.mention_role.name)
 
-            # 检查是否有权限 @everyone 或 @here
             if (is_everyone_ping or is_here_ping) and interaction.user.guild_permissions.mention_everyone:
                 content_outside_embed = "@everyone" if is_everyone_ping else "@here"
-                allowed_mentions = discord.AllowedMentions(everyone=True) # everyone=True 同时也允许了 @here
-            # 如果是普通的身份组提及
+                allowed_mentions = discord.AllowedMentions(everyone=True)
             elif not is_everyone_ping and not is_here_ping:
                 content_outside_embed = self.mention_role.mention
                 allowed_mentions = discord.AllowedMentions(roles=[self.mention_role])
-            # 如果选择了@everyone但没有权限，则不会发出任何提及
 
         embed = discord.Embed(title="📣 奇米大王特别公告！", description=description_for_embed, color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
         embed.set_author(name=f"发布人：{interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
 
         files = []
         if self.attachments:
-            # 确保附件URL是正确的格式
             if len(self.attachments) > 0:
                 embed.set_image(url=f"attachment://{self.attachments[0].filename}")
             for attachment in self.attachments:
@@ -114,7 +105,6 @@ class AnnouncementModal(discord.ui.Modal):
 
 # 许愿池系统
 
-# 弹窗1：用于填写详细愿望的通用弹窗
 class DetailedWishModal(discord.ui.Modal):
     def __init__(self, wish_type: str):
         self.wish_type = wish_type
@@ -161,13 +151,11 @@ class DetailedWishModal(discord.ui.Modal):
         await thread.send(embed=embed, view=WishActionView())
         await interaction.followup.send(f"你的【{self.wish_type}】愿望已经悄悄地发送给服主惹！快去 {thread.mention} 里看看吧！", ephemeral=True)
 
-# 视图1：当用户选择“预设新功能”后，展示【极光】和【象牙塔】按钮
 class PresetFeatureView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=180) # 3分钟内不操作按钮会自动消失
+        super().__init__(timeout=180)
 
     async def create_preset_wish(self, interaction: discord.Interaction, feature_name: str):
-        """通用函数，用于创建预设功能的愿望帖子"""
         await interaction.response.defer(ephemeral=True)
         try:
             owner = await interaction.client.fetch_user(SERVER_OWNER_ID)
@@ -186,27 +174,26 @@ class PresetFeatureView(discord.ui.View):
 
         embed = discord.Embed(title=f"💌 收到了一个新愿望！(预设功能)", description=f"```{wish_content}```", color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
         embed.add_field(name="处理状态", value="⏳ 待受理", inline=False)
-        # 预设功能默认不匿名
         embed.set_author(name=f"来自 {interaction.user.display_name} 的愿望", icon_url=interaction.user.display_avatar.url)
 
         await thread.send(embed=embed, view=WishActionView())
         await interaction.followup.send(f"你的【{feature_name}】愿望已经悄悄地发送给服主惹！快去 {thread.mention} 里看看吧！", ephemeral=True)
         
-        # 禁用所有按钮并停止视图
         for item in self.children:
             item.disabled = True
         await interaction.message.edit(view=self)
         self.stop()
 
+    # 修复：参数顺序调整为 (self, interaction, button)
     @discord.ui.button(label="🌌 极光", style=discord.ButtonStyle.primary)
-    async def wish_aurora(self, button: discord.ui.Button, interaction: discord.Interaction):
+    async def wish_aurora(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_preset_wish(interaction, "极光")
 
+    # 修复：参数顺序调整为 (self, interaction, button)
     @discord.ui.button(label="🏛️ 象牙塔", style=discord.ButtonStyle.secondary)
-    async def wish_ivory_tower(self, button: discord.ui.Button, interaction: discord.Interaction):
+    async def wish_ivory_tower(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.create_preset_wish(interaction, "象牙塔")
 
-# 下拉菜单：许愿的主选择菜单
 class WishSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -216,25 +203,28 @@ class WishSelect(discord.ui.Select):
             discord.SelectOption(label="社区建设", description="对社区发展提出建议", emoji="🏗️", value="社区建设"),
             discord.SelectOption(label="其他", description="许一个天马行空的愿望", emoji="💭", value="其他"),
         ]
-        super().__init__(placeholder="👇 请选择你的愿望类型...", min_values=1, max_values=1, options=options)
+        # 修复：必须添加 custom_id 才能用于持久化视图 (add_view)
+        super().__init__(
+            placeholder="👇 请选择你的愿望类型...", 
+            min_values=1, 
+            max_values=1, 
+            options=options,
+            custom_id="wish_panel_select_menu" 
+        )
 
     async def callback(self, interaction: discord.Interaction):
         choice = self.values[0]
         if choice == "preset_feature":
-            # 如果选择预设功能，发送带有两个按钮的新消息
             await interaction.response.send_message("请选择你想要的预设功能：", view=PresetFeatureView(), ephemeral=True)
         else:
-            # 其他选项则弹出对应的填写框
             modal = DetailedWishModal(wish_type=choice)
             await interaction.response.send_modal(modal)
 
-# 视图2：包含下拉菜单的主许愿面板
 class WishPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(WishSelect()) # 将下拉菜单添加到视图中
+        self.add_item(WishSelect())
 
-# 视图3：服主在愿望帖内的操作按钮（这个类保持不变）
 class WishActionView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -260,33 +250,34 @@ class WishActionView(discord.ui.View):
             await asyncio.sleep(10)
             await interaction.channel.edit(archived=True, locked=True)
 
+    # 修复：参数顺序调整为 (self, interaction, button)
     @discord.ui.button(label="✅ 受理", style=discord.ButtonStyle.success, custom_id="wish_accept")
-    async def accept(self, button, interaction):
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.update_wish_status(interaction, "✅ 已受理")
 
+    # 修复：参数顺序调整为 (self, interaction, button)
     @discord.ui.button(label="🤔 暂不考虑", style=discord.ButtonStyle.secondary, custom_id="wish_reject")
-    async def reject(self, button, interaction):
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.update_wish_status(interaction, "🤔 暂不考虑", close_thread=True)
 
+    # 修复：参数顺序调整为 (self, interaction, button)
     @discord.ui.button(label="🎉 已实现", style=discord.ButtonStyle.primary, custom_id="wish_done")
-    async def done(self, button, interaction):
+    async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.update_wish_status(interaction, "🎉 已实现！", close_thread=True)
 
 class PollView(discord.ui.View):
     def __init__(self, question: str, options: list, end_time: datetime.datetime, creator_id: int):
-        super().__init__(timeout=None) # 设置为None，我们将手动处理超时
+        super().__init__(timeout=None) 
         self.question = question
-        self.options = options # list of option strings
+        self.options = options
         self.end_time = end_time
         self.creator_id = creator_id
         
-        # 存储投票数据: {user_id: option_index}
         self.votes = {} 
         
-        # 动态创建按钮
         for index, option in enumerate(options):
             button = discord.ui.Button(
-                label=f"{index + 1}. {option[:70]}", # 按钮文字限制长度
+                label=f"{index + 1}. {option[:70]}",
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"poll_btn_{index}"
             )
@@ -294,28 +285,22 @@ class PollView(discord.ui.View):
             self.add_item(button)
 
     def create_callback(self, index):
-        """为每个按钮创建独立的回调函数"""
         async def callback(interaction: discord.Interaction):
-            # 1. 检查是否过期 (虽然有后台任务，但双重保险)
             if datetime.datetime.now(TZ_CN) > self.end_time:
                 await interaction.response.send_message("⏳ 投票已经截止啦！不能再投了哦~", ephemeral=True)
                 await self.end_poll(interaction.message)
                 return
 
-            # 2. 处理投票逻辑 (单选：如果投过别的，先移除旧的)
             user_id = interaction.user.id
             current_choice = self.votes.get(user_id)
 
             if current_choice == index:
-                # 如果点击已投的选项，视为取消投票
                 del self.votes[user_id]
                 msg = "🗑️ 你取消了投票。"
             else:
-                # 记录新投票
                 self.votes[user_id] = index
                 msg = f"✅ 你投给了：**{self.options[index]}**"
 
-            # 3. 更新面板
             embed = self.build_embed()
             await interaction.response.edit_message(embed=embed, view=self)
             await interaction.followup.send(msg, ephemeral=True)
@@ -323,10 +308,7 @@ class PollView(discord.ui.View):
         return callback
 
     def build_embed(self, is_ended=False):
-        """根据当前投票数据构建 Embed"""
         total_votes = len(self.votes)
-        
-        # 统计每个选项的票数
         counts = [0] * len(self.options)
         for uid, opt_idx in self.votes.items():
             if 0 <= opt_idx < len(self.options):
@@ -337,13 +319,10 @@ class PollView(discord.ui.View):
             count = counts[i]
             percent = (count / total_votes * 100) if total_votes > 0 else 0.0
             bar = generate_progress_bar(percent)
-            
-            # 格式：1. 选项名
-            # █░░░░░░ 20.0% (5票)
             description += f"**{i+1}. {option}**\n`{bar}` **{percent:.1f}%** ({count}票)\n\n"
 
         status_text = "🔴 已截止" if is_ended else "🟢 进行中"
-        color = 0x99AAB5 if is_ended else STYLE["KIMI_YELLOW"] # 截止变灰，进行中为黄色
+        color = 0x99AAB5 if is_ended else STYLE["KIMI_YELLOW"]
 
         embed = discord.Embed(title=f"📊 {self.question}", description=description, color=color)
         embed.set_author(name=f"发起人 ID: {self.creator_id}")
@@ -356,16 +335,15 @@ class PollView(discord.ui.View):
         return embed
 
     async def end_poll(self, message: discord.Message):
-        """结束投票：禁用所有按钮并更新 Embed"""
         for child in self.children:
             child.disabled = True
-            child.style = discord.ButtonStyle.secondary # 变灰
+            child.style = discord.ButtonStyle.secondary
         
         final_embed = self.build_embed(is_ended=True)
         try:
             await message.edit(embed=final_embed, view=self)
         except discord.NotFound:
-            pass # 消息可能已被删除
+            pass 
         except Exception as e:
             print(f"结束投票时出错: {e}")
         
@@ -377,14 +355,15 @@ class General(commands.Cog):
         self.bot = bot
         self.wish_panel_message_id = None
 
-    # 创建一个新的异步函数来处理需要事件循环的操作
     @commands.Cog.listener()
     async def on_ready(self):
-        # 这个事件触发时，可以保证机器人已准备好且事件循环正在运行
+        # 注册持久化视图
         self.bot.add_view(WishPanelView())
         self.bot.add_view(WishActionView())
         print("唷呐！通用功能模块的永久视图已成功注册！")
-        asyncio.create_task(self.setup_persistent_wish_panel())
+        
+        # 修复：调用重命名后的函数 check_and_post_wish_panel
+        asyncio.create_task(self.check_and_post_wish_panel())
 
     # --- 事件监听器 (Listeners) ---
     @commands.Cog.listener()
@@ -392,7 +371,6 @@ class General(commands.Cog):
         if member.bot:
             return
 
-        # 自动发放"新兵蛋子"身份组
         new_recruit_role = member.guild.get_role(VERIFICATION_ROLE_ID)
         if new_recruit_role:
             try:
@@ -424,30 +402,22 @@ class General(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """监听许愿频道的新消息，自动刷新面板到最底部。"""
-        # 1. 如果消息不是来自许愿频道，或者发消息的是机器人自己，就直接忽略
         if message.channel.id != WISH_CHANNEL_ID or message.author == self.bot.user:
             return
 
-        # 2. 确认我们有一个旧面板的ID可以删除
         if self.wish_panel_message_id:
             try:
-                # 获取频道对象
                 channel = self.bot.get_channel(WISH_CHANNEL_ID)
                 if not channel: return
-                
-                # 根据ID找到旧的面板消息并删除它
                 old_panel_message = await channel.fetch_message(self.wish_panel_message_id)
                 await old_panel_message.delete()
             except discord.NotFound:
-                # 如果消息已经被手动删了，就忽略错误
                 print("旧的许愿面板消息找不到了，可能已被删除。")
             except discord.Forbidden:
                 print("错误：本大王没有权限删除许愿频道的消息！")
             except Exception as e:
                 print(f"删除旧许愿面板时发生未知错误: {e}")
 
-        # 3. 无论之前是否成功删除，都重新发送一个新的面板
         await self.post_wish_panel()
 
     # --- 许愿池相关辅助函数 ---
@@ -461,21 +431,19 @@ class General(commands.Cog):
             description="有什么想要的新功能、角色卡、或者对社区的建议吗？\n\n**点击下方的菜单选择你的愿望类型，然后告诉本大王吧！**",
             color=STYLE["KIMI_YELLOW"]
         )
-        # 发送新的面板，并把它的ID存到变量里
         panel_message = await channel.send(embed=embed, view=WishPanelView())
         self.wish_panel_message_id = panel_message.id
 
-    # 新的启动设置函数
-    async def setup_persistent_wish_panel(self):
+    # 修复：重命名函数以匹配 main.py 的调用和报错日志
+    async def check_and_post_wish_panel(self):
         """机器人启动时运行，清理所有旧面板并发送一个新的。"""
-        await self.bot.wait_until_ready() # 确保机器人已完全连接
+        await self.bot.wait_until_ready()
         channel = self.bot.get_channel(WISH_CHANNEL_ID)
         if not channel:
             print("错误：找不到许愿池频道，无法设置持久化面板！")
             return
 
         try:
-            # 遍历频道历史记录，删除所有由机器人自己发送的、且包含特定标题的旧面板
             async for message in channel.history(limit=100):
                 if message.author == self.bot.user and message.embeds:
                     if "奇米大王的许愿池" in message.embeds[0].title:
@@ -488,7 +456,6 @@ class General(commands.Cog):
         except Exception as e:
             print(f"清理旧许愿面板时发生错误: {e}")
 
-        # 清理完毕后，发送一个全新的面板
         await self.post_wish_panel()
         print("已成功发送全新的许愿面板到频道底部。")
 
@@ -568,7 +535,7 @@ class General(commands.Cog):
         if seconds < 0:
             await ctx.respond("秒数不能是负数啦，笨蛋饱饱！", ephemeral=True)
             return
-        if seconds > 21600: # Discord 限制为 6 小时
+        if seconds > 21600: 
             await ctx.respond("最长时间不能超过6小时(21600秒)哦！", ephemeral=True)
             return
 
@@ -588,7 +555,6 @@ class General(commands.Cog):
         options_text: Option(str, "选项列表 (用 | 竖线分隔，最多20个)", required=True),
         duration: Option(str, "持续时间 (例如: 10m, 1h, 24h)", required=True)
     ):
-        # 1. 解析时间
         seconds = parse_duration(duration)
         if seconds <= 0:
             await ctx.respond("呜...时间格式不对哦！请用 '10m', '1h' 这种格式捏！", ephemeral=True)
@@ -597,7 +563,6 @@ class General(commands.Cog):
             await ctx.respond("投票时间太短啦！至少要1分钟哦！", ephemeral=True)
             return
 
-        # 2. 解析选项
         options = [opt.strip() for opt in options_text.split('|') if opt.strip()]
         if len(options) < 2:
             await ctx.respond("投票至少要有两个选项嘛！笨蛋！", ephemeral=True)
@@ -608,33 +573,23 @@ class General(commands.Cog):
 
         await ctx.defer()
 
-        # 3. 计算截止时间 (东八区)
         now_cn = datetime.datetime.now(TZ_CN)
         end_time = now_cn + datetime.timedelta(seconds=seconds)
 
-        # 4. 创建视图和 Embed
         view = PollView(question, options, end_time, ctx.author.id)
         embed = view.build_embed(is_ended=False)
 
-        # 5. 发送消息
         message = await ctx.respond(embed=embed, view=view)
         
-        # 获取原始消息对象 (respond 返回的是 InteractionWebhookMessage，有时需要 fetch 才能保证后续编辑)
         if isinstance(message, discord.Interaction):
              message = await message.original_response()
 
-        # 6. 创建后台倒计时任务
         self.bot.loop.create_task(self.poll_timer(view, message, seconds))
 
     async def poll_timer(self, view: PollView, message: discord.Message, duration: int):
-        """后台计时器，等待时间结束后自动关闭投票"""
         try:
             await asyncio.sleep(duration)
-            # 时间到，执行结束逻辑
             await view.end_poll(message)
-            
-            # 发送一条提醒消息 (可选)
-            
         except Exception as e:
             print(f"投票计时器出错: {e}")
 
@@ -656,13 +611,11 @@ class General(commands.Cog):
             await ctx.respond("这个投票已经结束了呀！", ephemeral=True)
             return
 
-        # 禁用所有按钮
         new_view = discord.ui.View.from_message(message)
         for child in new_view.children:
             child.disabled = True
             child.style = discord.ButtonStyle.secondary
         
-        # 更新 Embed 颜色和文字
         embed.color = 0x99AAB5
         embed.title = f"🔴 (管理员强制结束) {embed.title.strip('📊 ')}"
         embed.set_footer(text=f"被管理员 {ctx.author.display_name} 强制截止")
@@ -671,6 +624,5 @@ class General(commands.Cog):
         await ctx.respond("好哒！本大王已经把这个投票强制关掉惹！😤", ephemeral=True)
 
 
-# 固定的setup函数，用于主文件加载Cog
 def setup(bot):
     bot.add_cog(General(bot))
