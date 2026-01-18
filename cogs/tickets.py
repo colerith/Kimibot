@@ -883,6 +883,51 @@ class Tickets(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"录入失败，发生未知错误: {e}", ephemeral=True)
 
+    # ======================================================================================
+    # --- 右键菜单命令 (Context Menu) ---
+    # ======================================================================================
+
+    @discord.message_command(name="🚫 超时归档此工单")
+    @is_reviewer_egg()
+    async def timeout_archive_ctx(self, ctx: discord.ApplicationContext, message: discord.Message):
+        """
+        右键点击消息 -> Apps -> 🚫 超时归档此工单
+        功能：等同于 /ticket 超时归档，通知用户并删除频道。
+        """
+        # 1. 基础检查
+        channel = ctx.channel
+        if not channel.topic or "工单ID" not in channel.topic:
+            await ctx.respond("❌ 只能在有效的工单频道内使用此功能！", ephemeral=True)
+            return
+
+        await ctx.defer(ephemeral=True)
+
+        # 2. 获取工单信息
+        info = get_ticket_info(channel)
+        ticket_id = info.get("工单ID", "未知")
+        creator_id = info.get("创建者ID")
+        creator_name = info.get("创建者", "未知用户")
+
+        # 3. 记录日志 (保持与Slash命令一致)
+        archive_log_channel = self.bot.get_channel(1419652525249794128) # 你的日志频道ID
+        log_content = f"🚫 **超时归档 (右键命令)**\n工单: `{ticket_id}`\n用户: `{creator_name}` (`{creator_id}`)\n操作人: {ctx.author.mention}"
+        
+        if archive_log_channel: 
+            await archive_log_channel.send(log_content)
+        
+        # 4. 私信通知用户
+        if creator_id:
+            try:
+                user = await self.bot.fetch_user(int(creator_id))
+                dm_content = f"不好意思你在🔮LOFI-加载中申请的审核工单 `{ticket_id}` 已超时，所以先做关闭处理惹😱欢迎重新申请~"
+                await user.send(dm_content)
+            except Exception: 
+                pass # 用户关闭私信或已退群
+            
+        # 5. 执行删除
+        await ctx.followup.send(f"正在处理工单 `{ticket_id}` 的超时归档...", ephemeral=True)
+        await channel.delete(reason=f"右键手动超时归档 - {ctx.author.name}")
+
     quota_mg = discord.SlashCommandGroup("名额管理", "（仅限审核小蛋）手动调整工单名额~", checks=[is_reviewer_egg()])
     @quota_mg.command(name="重置", description="将今天的剩余名额恢复到最大值！")
     async def reset_quota(self, ctx: discord.ApplicationContext):
