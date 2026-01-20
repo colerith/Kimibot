@@ -33,9 +33,16 @@ TIMEOUT_HOURS_REMIND = 6
 def is_reviewer_egg():
     """权限检查：判断命令使用者是否为指定的【审核小蛋】"""
     async def predicate(ctx: discord.ApplicationContext) -> bool:
+        # 1. 防止在私信中使用导致 ctx.guild 为 None
+        if not ctx.guild:
+            await ctx.respond("该命令只能在服务器中使用。", ephemeral=True)
+            return False
+
+        # 2. 直接检查用户ID
         if ctx.author.id == SPECIFIC_REVIEWER_ID:
             return True
         
+        # 3. 检查身份组
         super_egg_role = ctx.guild.get_role(IDS.get("SUPER_EGG_ROLE_ID", 0))
         if super_egg_role and super_egg_role in ctx.author.roles:
             return True
@@ -127,19 +134,19 @@ class TimeoutOptionView(discord.ui.View):
         self.cog = cog
         self.channel = channel
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="📝 填写备注并归档", style=discord.ButtonStyle.primary)
-    async def note_archive(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def note_archive(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.send_modal(TimeoutNoteModal(self.cog, self.channel))
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="🚀 直接归档 (无备注)", style=discord.ButtonStyle.danger)
-    async def quick_archive(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def quick_archive(self, button: discord.ui.Button, interaction: discord.Interaction):
         await execute_timeout_archive(self.cog, interaction, self.channel, note="无 (管理员选择直接归档)")
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.edit_message(content="操作已取消。", view=None)
 
 # ======================================================================================
@@ -168,14 +175,14 @@ class ArchiveRequestView(discord.ui.View):
         notify_text += f"{reviewer_mention}，这位小饱饱已经确认完毕，可以进行归档操作啦！"
         await interaction.channel.send(notify_text)
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="已申请加群", style=discord.ButtonStyle.primary, custom_id="req_archive_1")
-    async def applied(self, interaction: discord.Interaction, button: discord.ui.Button): 
+    async def applied(self, button: discord.ui.Button, interaction: discord.Interaction): 
         await self.button_callback(interaction, "已申请加群")
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="不打算加群，没有别的问题了", style=discord.ButtonStyle.secondary, custom_id="req_archive_2")
-    async def no_problem(self, interaction: discord.Interaction, button: discord.ui.Button): 
+    async def no_problem(self, button: discord.ui.Button, interaction: discord.Interaction): 
         await self.button_callback(interaction, "不打算加群，没有别的问题了")
 
 class NotifyReviewerView(discord.ui.View):
@@ -183,9 +190,9 @@ class NotifyReviewerView(discord.ui.View):
         super().__init__(timeout=None)
         self.reviewer_id = reviewer_id
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="✅ 材料已备齐，呼叫审核小蛋", style=discord.ButtonStyle.primary, custom_id="notify_reviewer_button")
-    async def notify_reviewer(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def notify_reviewer(self, button: discord.ui.Button, interaction: discord.Interaction):
         ticket_info = get_ticket_info(interaction.channel)
         creator_id = ticket_info.get("创建者ID")
         if str(interaction.user.id) != creator_id:
@@ -217,9 +224,9 @@ class TicketActionView(discord.ui.View):
         await interaction.response.send_message("呜...只有【审核小蛋】才能操作审核按钮哦！", ephemeral=True)
         return False
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="▶️ 进入二审", style=discord.ButtonStyle.primary, custom_id="ticket_review2")
-    async def review2(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def review2(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.defer()
         second_review_category = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
         if not second_review_category:
@@ -257,9 +264,9 @@ class TicketActionView(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"移动到二审时发生未知错误: {e}", ephemeral=True)
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="🎉 已过审", style=discord.ButtonStyle.success, custom_id="ticket_approved")
-    async def approved(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def approved(self, button: discord.ui.Button, interaction: discord.Interaction):
         info = get_ticket_info(interaction.channel)
         creator_id = int(info.get("创建者ID", 0))
         creator = interaction.guild.get_member(creator_id)
@@ -275,7 +282,7 @@ class TicketActionView(discord.ui.View):
                 await interaction.response.send_message("呜哇！本大王没有权限修改身份组！", ephemeral=True)
                 return
             
-            # --- ✨ 新增：发送过审私信提醒 ✨ ---
+            # --- ✨ 发送过审私信提醒 ✨ ---
             try:
                 dm_embed = discord.Embed(
                     title="🎉 恭喜！审核通过啦！",
@@ -287,7 +294,6 @@ class TicketActionView(discord.ui.View):
                     ),
                     color=STYLE["KIMI_YELLOW"]
                 )
-                # 尝试获取服务器图标
                 if interaction.guild.icon:
                     dm_embed.set_thumbnail(url=interaction.guild.icon.url)
                 
@@ -295,23 +301,17 @@ class TicketActionView(discord.ui.View):
                 
                 await creator.send(embed=dm_embed)
             except discord.Forbidden:
-                # 如果用户关闭了私信，不报错，只是默默跳过
                 print(f"用户 {creator.name} 关闭了私信，无法发送过审通知。")
             except Exception as e:
                 print(f"发送过审私信时发生未知错误: {e}")
             # -------------------------------------
 
-        # 2. 发送频道内的庆祝消息
         embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩...\n## 对审核过程没有异议，同意并且阅读完全部东西后请点击下方按钮~", color=STYLE["KIMI_YELLOW"])
         embed.set_image(url="https://files.catbox.moe/2tytko.jpg")
         embed.set_footer(text="宝宝如果已申请/不打算加群/没有别的问题了，请点击下方对应按钮")
-        
         msg_content = f"恭喜 {creator.mention} 通过审核！" if creator else "恭喜通过审核！(用户已不在服务器)"
-        
-        # 注意：这里 view 传入 interaction.user 作为 reviewer
         await interaction.channel.send(msg_content, embed=embed, view=ArchiveRequestView(reviewer=interaction.user))
 
-        # 3. 更新按钮状态
         button.disabled = True
         button.style = discord.ButtonStyle.secondary
         for child in self.children:
@@ -320,9 +320,9 @@ class TicketActionView(discord.ui.View):
                 child.style = discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="📦 工单归档", style=discord.ButtonStyle.secondary, custom_id="ticket_archive")
-    async def archive(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def archive(self, button: discord.ui.Button, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True) 
         channel = interaction.channel
         archive_category = interaction.guild.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
@@ -362,9 +362,9 @@ class TicketPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog_instance
 
-    # 修复：参数调整为 (self, interaction, button)
+    # 修复：参数顺序 (self, button, interaction)
     @discord.ui.button(label="🥚 创建审核工单", style=discord.ButtonStyle.primary, custom_id="create_ticket_panel_button")
-    async def create_ticket_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def create_ticket_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
         # --- 时间检查 ---
         now = datetime.datetime.now(QUOTA["TIMEZONE"])
         if not (8 <= now.hour < 23):
