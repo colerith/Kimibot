@@ -586,31 +586,97 @@ class Tickets(commands.Cog):
             super_egg_role = guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
 
             for channel in category.text_channels:
+                # 过滤掉不相关的频道，只检查工单
                 if not ("待接单-" in channel.name or "一审中-" in channel.name or "二审中-" in channel.name):
                     continue
+                
                 try:
-                    # 1. 获取最后一次有效活动时间
+                    # 获取工单信息
+                    info = get_ticket_info(channel)
+                    creator_id = info.get('创建者ID')
+                    ticket_id = info.get('工单ID', '未知')
+
+                    # 1. 获取最后一条消息（用于判断状态）
+                    last_msg = None
+                    # 只取最后一条消息即可判断当前状态
+                    async for msg in channel.history(limit=1):
+                        last_msg = msg
+                        break
+                    
+                    if not last_msg: continue # 空频道跳过
+
+                    # ------------------------------------------------------------------
+                    # 🌟 新增逻辑：检查是否为“已过审但未确认”状态 (3小时超时)
+                    # ------------------------------------------------------------------
+                    is_approved_waiting = False
+                    # 判断条件：最后一条消息是机器人发的，且Embed标题包含庆祝词
+                    if last_msg.author.id == self.bot.user.id and last_msg.embeds:
+                        embed_title = last_msg.embeds[0].title or ""
+                        if "恭喜小宝加入社区" in embed_title:
+                            is_approved_waiting = True
+                    
+                    time_diff = now - last_msg.created_at
+
+                    if is_approved_waiting:
+                        # 如果处于等待确认状态，且超过 3 小时
+                        if time_diff > datetime.timedelta(hours=3):
+                            print(f"频道 '{channel.name}' 已过审但用户3小时未操作，执行自动归档...")
+                            
+                            # 1. 发送频道通知
+                            await channel.send("⏳ **自动归档**\n检测到宝宝通过审核后超过 **3小时** 未点击确认按钮。\n为节省资源，本大王已自动帮你完成归档流程啦！(身份组已发放，不影响正常游玩)")
+                            
+                            # 2. 尝试私信用户
+                            if creator_id:
+                                try:
+                                    member = await guild.fetch_member(int(creator_id))
+                                    dm_embed = discord.Embed(
+                                        title="📦 工单自动归档通知",
+                                        description=(
+                                            f"你好呀！你在 **{guild.name}** 的审核工单 `#{ticket_id}` 已经通过审核。\n"
+                                            "由于你超过 **3小时** 没有点击最后的确认按钮，本大王已经帮你自动归档啦！\n\n"
+                                            "✅ **你的身份组已经正常发放，不影响在社区内玩耍哦！**"
+                                        ),
+                                        color=STYLE["KIMI_YELLOW"]
+                                    )
+                                    await member.send(embed=dm_embed)
+                                except: pass
+
+                            # 3. 执行归档移动
+                            new_name = f"已过审-{ticket_id}-{info.get('创建者', '未知')}"
+                            
+                            overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False)}
+                            if specific_reviewer: overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True)
+                            if super_egg_role: overwrites[super_egg_role] = discord.PermissionOverwrite(read_messages=True)
+
+                            await channel.edit(name=new_name, category=archive_category, overwrites=overwrites, reason="已过审3小时无响应自动归档")
+                            continue # 处理完这个特殊情况后，跳过后续的常规检查
+
+                    # ------------------------------------------------------------------
+                    # 🌟 原有逻辑：常规活动超时 (12小时归档 / 6小时提醒)
+                    # ------------------------------------------------------------------
+                    
+                    # 重新计算最后有效活动时间（排除机器人的提醒消息）
                     last_active_time = channel.created_at
-                    has_already_reminded = False 
+                    has_already_reminded = False
                     
                     async for msg in channel.history(limit=20):
                         if msg.author.bot:
+                            # 如果是提醒消息，标记已提醒
                             if "温馨提醒" in msg.content or (msg.embeds and "温馨提醒" in (msg.embeds[0].title or "")):
                                 has_already_reminded = True
                         else:
+                            # 找到用户或管理员的发言，视为有效活动
                             last_active_time = msg.created_at
                             break
                     
-                    time_diff = now - last_active_time
-                    info = get_ticket_info(channel)
-                    creator_id = info.get('创建者ID')
+                    time_diff_active = now - last_active_time
 
-                    # 2. 检查是否超过 12 小时 (归档)
-                    if time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
+                    # 2. 检查是否超过 12 小时 (常规归档)
+                    if time_diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
                         print(f"频道 '{channel.name}' 超过{TIMEOUT_HOURS_ARCHIVE}小时无有效活动，执行归档...")
-                        new_name = f"超时归档-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}"
+                        new_name = f"超时归档-{ticket_id}-{info.get('创建者', '未知')}"
                         
-                        await channel.send("呜...这个频道超过12小时没有动静惹，本大王先把它归档保管起来咯！")
+                        await channel.send(f"呜...这个频道超过{TIMEOUT_HOURS_ARCHIVE}小时没有动静惹，本大王先把它归档保管起来咯！")
                         
                         overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False)}
                         if specific_reviewer: overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True)
@@ -621,23 +687,25 @@ class Tickets(commands.Cog):
                         if creator_id:
                             try:
                                 member = await guild.fetch_member(int(creator_id))
-                                await member.send(f"你的工单 `{info.get('工单ID')}` 因超过12小时未活动已被归档。如需继续请重新创建工单哦！")
+                                await member.send(f"你的工单 `{ticket_id}` 因超过{TIMEOUT_HOURS_ARCHIVE}小时未活动已被归档。如需继续请重新创建工单哦！")
                             except: pass
 
                     # 3. 检查是否超过 6 小时 (提醒)
-                    elif time_diff > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND) and not has_already_reminded:
-                        print(f"频道 '{channel.name}' 超过{TIMEOUT_HOURS_REMIND}小时无有效活动，发送首次提醒...")
-                        
-                        mention_str = ""
-                        if creator_id:
-                            mention_str = f"<@{creator_id}>"
-                            try:
-                                member = await guild.fetch_member(int(creator_id))
-                                await member.send(f"👋 饱饱，你的审核工单 `{info.get('工单ID')}` 已经6小时没有变动了哦！如果材料准备好了请尽快提交，超过12小时会自动关闭工单哒！")
-                            except: pass
-                        
-                        embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已经沉睡超过 **6小时** 啦！\n请注意：**超过12小时无响应** 将会自动归档哦！\n如果需要审核，请尽快回复~", color=0xFFA500)
-                        await channel.send(content=mention_str, embed=embed)
+                    elif time_diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND) and not has_already_reminded:
+                        # 确保不是“已过审”状态才催促（已过审的走上面的3小时逻辑）
+                        if not is_approved_waiting:
+                            print(f"频道 '{channel.name}' 超过{TIMEOUT_HOURS_REMIND}小时无有效活动，发送首次提醒...")
+                            
+                            mention_str = ""
+                            if creator_id:
+                                mention_str = f"<@{creator_id}>"
+                                try:
+                                    member = await guild.fetch_member(int(creator_id))
+                                    await member.send(f"👋 饱饱，你的审核工单 `{ticket_id}` 已经{TIMEOUT_HOURS_REMIND}小时没有变动了哦！如果材料准备好了请尽快提交，超过{TIMEOUT_HOURS_ARCHIVE}小时会自动关闭工单哒！")
+                                except: pass
+                            
+                            embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已经沉睡超过 **{TIMEOUT_HOURS_REMIND}小时** 啦！\n请注意：**超过{TIMEOUT_HOURS_ARCHIVE}小时无响应** 将会自动归档哦！\n如果需要审核，请尽快回复~", color=0xFFA500)
+                            await channel.send(content=mention_str, embed=embed)
 
                 except Exception as e:
                     print(f"检查频道 '{channel.name}' 时发生错误: {e}")
