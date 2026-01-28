@@ -729,7 +729,134 @@ class Tickets(commands.Cog):
     # --- 命令组定义 ---
     # ======================================================================================
 
-    ticket = discord.SlashCommandGroup("ticket", "工单相关指令")
+    ticket = discord.SlashCommandGroup("工单", "工单相关指令")
+
+    @ticket.command(name="恢复工单状态", description="（审核小蛋用）误操作恢复！将工单恢复到指定状态并通知用户。")
+    @is_reviewer_egg()
+    async def recover_ticket(self, ctx: discord.ApplicationContext,
+                             state: discord.Option(str, "选择恢复到的状态", choices=["一审中", "二审中", "已过审", "归档", "超时归档"]),
+                             reason: discord.Option(str, "给用户的解释（会私信发送）", required=False, default="管理员手动调整了工单状态。")):
+        """
+        核心恢复功能：
+        1. 识别当前频道信息
+        2. 根据选择的状态，移动分类、重命名、重置权限
+        3. 发送 DM 通知用户
+        """
+        await ctx.defer(ephemeral=True)
+        channel = ctx.channel
+        
+        # 1. 获取工单信息
+        info = get_ticket_info(channel)
+        if not info or "工单ID" not in info:
+            await ctx.followup.send("❌ 这里似乎不是一个有效的工单频道（无法读取Topic信息）！", ephemeral=True)
+            return
+
+        ticket_id = info.get("工单ID", "未知")
+        creator_id_str = info.get("创建者ID")
+        creator_name = info.get("创建者", "未知用户")
+        
+        # 2. 准备配置参数
+        target_category_id = None
+        name_prefix = ""
+        is_active_state = False # 活跃状态用户可读写，归档状态不可
+        
+        if state == "一审中":
+            target_category_id = IDS["FIRST_REVIEW_CHANNEL_ID"]
+            name_prefix = "一审中"
+            is_active_state = True
+        elif state == "二审中":
+            target_category_id = IDS["SECOND_REVIEW_CHANNEL_ID"]
+            name_prefix = "二审中"
+            is_active_state = True
+        elif state == "已过审":
+            # 已过审通常也放在二审分类等待归档，或者可以直接放归档分类但名字带已过审
+            # 这里逻辑设定为：恢复到二审分类，让用户可以看最后一眼或操作
+            target_category_id = IDS["SECOND_REVIEW_CHANNEL_ID"] 
+            name_prefix = "已过审"
+            is_active_state = True
+        elif state == "归档":
+            target_category_id = IDS["ARCHIVE_CHANNEL_ID"]
+            name_prefix = "已过审" # 通常手动归档是成功的，或者可以是 "归档"
+            is_active_state = False
+        elif state == "超时归档":
+            target_category_id = IDS["ARCHIVE_CHANNEL_ID"]
+            name_prefix = "超时归档"
+            is_active_state = False
+
+        target_category = ctx.guild.get_channel(target_category_id)
+        if not target_category:
+            await ctx.followup.send(f"❌ 找不到目标分类 (ID: {target_category_id})，请检查配置！", ephemeral=True)
+            return
+
+        # 3. 构建权限
+        overwrites = {
+            ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        }
+        
+        # 审核员权限
+        specific_reviewer = ctx.guild.get_member(SPECIFIC_REVIEWER_ID)
+        if specific_reviewer:
+            overwrites[specific_reviewer] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        super_egg_role = ctx.guild.get_role(IDS.get("SUPER_EGG_ROLE_ID", 0))
+        if super_egg_role:
+             overwrites[super_egg_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        
+        # 用户权限
+        creator = None
+        if creator_id_str:
+            creator = ctx.guild.get_member(int(creator_id_str))
+            if creator:
+                if is_active_state:
+                    overwrites[creator] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                else:
+                    overwrites[creator] = discord.PermissionOverwrite(read_messages=False) # 归档后不可见
+
+        # 4. 执行频道修改
+        new_name = f"{name_prefix}-{ticket_id}-{creator_name}"
+        # 截断过长的名字以防报错
+        if len(new_name) > 100: new_name = new_name[:100]
+
+        try:
+            await channel.edit(name=new_name, category=target_category, overwrites=overwrites, reason=f"工单恢复: {state} - {ctx.author.name}")
+            
+            # 5. 发送频道内提示
+            embed_notify = discord.Embed(
+                title="🔄 工单状态已恢复",
+                description=f"管理员 **{ctx.author.name}** 已将此工单恢复为：**{state}**\n说明: {reason}",
+                color=STYLE["KIMI_YELLOW"]
+            )
+            await channel.send(embed=embed_notify)
+            
+            # 如果是恢复到二审，贴心地补发一下答题面板（可选）
+            if state == "二审中":
+                await channel.send("检测到恢复为二审，正在重新加载答题面板...", view=QuizStartView())
+
+            # 6. 发送 DM 提醒用户
+            if creator:
+                try:
+                    dm_embed = discord.Embed(
+                        title="🎫 工单状态更新通知",
+                        description=f"你好呀！你在 **{ctx.guild.name}** 的工单 `#{ticket_id}` 状态发生了变化。",
+                        color=STYLE["KIMI_YELLOW"]
+                    )
+                    dm_embed.add_field(name="当前状态", value=state, inline=True)
+                    dm_embed.add_field(name="操作原因", value=reason, inline=True)
+                    
+                    if is_active_state:
+                        dm_embed.add_field(name="🔗 前往工单频道", value=channel.mention, inline=False)
+                        dm_embed.set_footer(text="请点击上方链接回到频道继续操作哦！")
+                    else:
+                        dm_embed.set_footer(text="工单已归档/关闭。")
+
+                    await creator.send(embed=dm_embed)
+                    await ctx.followup.send(f"✅ 成功恢复工单状态为 **{state}** 并已通知用户！", ephemeral=True)
+                except discord.Forbidden:
+                    await ctx.followup.send(f"✅ 工单已恢复为 **{state}**，但用户关闭了私信，无法通知。", ephemeral=True)
+            else:
+                await ctx.followup.send(f"✅ 工单已恢复为 **{state}**，但用户已不在服务器内。", ephemeral=True)
+
+        except Exception as e:
+            await ctx.followup.send(f"❌ 恢复失败: {e}", ephemeral=True)
 
     @ticket.command(name="超时归档", description="（审核小蛋用）将当前工单标记为超时，通知用户并删除。")
     @is_reviewer_egg()
