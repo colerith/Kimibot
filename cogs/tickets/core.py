@@ -531,39 +531,48 @@ class Tickets(commands.Cog):
         em.set_footer(text=ap_data["footer"])
         await ctx.send(embed=em, view=ArchiveRequestView(ctx.author))
 
-    @ticket.command(name="批量导出", description="（服主用）将已归档的过审频道打包成网页快照并删除！")
+    @ticket.command(name="批量导出", description="（服主用）将二审区已过审的频道打包并删除！")
     @is_reviewer_egg()
     async def bulk_export_and_archive(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
-        archive_category = self.bot.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
-        log_channel = self.bot.get_channel(IDS["TICKET_LOG_CHANNEL_ID"])
-        
-        if not archive_category: await ctx.followup.send("呜...找不到配置的【归档】分类！", ephemeral=True); return
-        if not log_channel: await ctx.followup.send("呜...找不到存放日志的频道！", ephemeral=True); return
-        
-        await ctx.followup.send(f"收到！开始扫描 “{archive_category.name}” 中带 “已过审” 的频道...", ephemeral=True)
-        
-        channels_to_process = [ch for ch in archive_category.text_channels if "已过审" in ch.name]
-        if not channels_to_process:
-            await ctx.followup.send("在归档区没找到带“已过审”的频道哦~", ephemeral=True); return
 
+        target_category = self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
+        log_channel = self.bot.get_channel(IDS["TICKET_LOG_CHANNEL_ID"])
+
+        if not target_category:
+            await ctx.followup.send("呜...找不到配置的【二审】分类！请检查 ID 配置。", ephemeral=True); return
+        if not log_channel:
+            await ctx.followup.send("呜...找不到存放日志的频道！", ephemeral=True); return
+
+        await ctx.followup.send(f"收到！开始扫描 “{target_category.name}” 中带 “已过审” 的频道...", ephemeral=True)
+
+        # 在目标分类下筛选名字里包含 "已过审" 的文字频道
+        channels_to_process = [ch for ch in target_category.text_channels if "已过审" in ch.name]
+
+        if not channels_to_process:
+            await ctx.followup.send(f"在 {target_category.name} 里没找到带“已过审”的频道哦~", ephemeral=True); return
+
+        # 按创建时间排序
         channels_to_process.sort(key=lambda x: x.created_at)
 
         exported_count = 0
-        current_date_header = "" 
+        current_date_header = ""
 
         for channel in channels_to_process:
             try:
+                # 获取频道创建日期用于日志分割
                 channel_date = channel.created_at.astimezone(QUOTA["TIMEZONE"]).strftime('%Y%m%d')
                 if channel_date != current_date_header:
                     current_date_header = channel_date
-                    await log_channel.send(f"## 📅 {current_date_header}") 
+                    await log_channel.send(f"## 📅 {current_date_header}")
 
+                # 提取工单信息
                 info = get_ticket_info(channel)
-                qq_number = info.get("QQ", "未录入") 
+                qq_number = info.get("QQ", "未录入")
                 ticket_id = info.get("工单ID", "未知")
                 creator_name = info.get("创建者", "未知")
 
+                # HTML 模板构建
                 html_template = """
                 <!DOCTYPE html><html><head><title>Log for {channel_name}</title><meta charset="UTF-8"><style>
                 body {{ background-color: #313338; color: #dbdee1; font-family: 'Whitney', 'Helvetica Neue', sans-serif; padding: 20px; }}
@@ -584,39 +593,48 @@ class Tickets(commands.Cog):
                 <hr>
                 """
                 html_content = html_template.format(
-                    channel_name=channel.name, 
+                    channel_name=channel.name,
                     embed_color=hex(STYLE['KIMI_YELLOW']).replace('0x', '#'),
                     ticket_id=ticket_id,
                     creator_name=creator_name,
                     qq_number=qq_number
                 )
-                
+
+                # 读取历史消息
                 async for message in channel.history(limit=None, oldest_first=True):
                     message_text = message.clean_content.replace('\n', '<br>')
                     timestamp = message.created_at.astimezone(QUOTA["TIMEZONE"]).strftime('%Y-%m-%d %H:%M:%S')
                     html_content += f'<div class="message-group"><div class="avatar"><img src="{message.author.display_avatar.url}"></div>'
                     html_content += f'<div class="message-content"><span class="author">{message.author.display_name}</span><span class="timestamp">{timestamp}</span>'
                     html_content += f'<div class="text">{message_text}</div>'
+
+                    # 处理附件
                     for attachment in message.attachments:
-                        if "image" in attachment.content_type: html_content += f'<div class="attachment"><img src="{attachment.url}"></div>'
+                        if "image" in attachment.content_type:
+                            html_content += f'<div class="attachment"><img src="{attachment.url}"></div>'
+
+                    # 处理 Embed
                     for embed in message.embeds:
                         html_content += f'<div class="embed">'
                         if embed.title: html_content += f'<div class="embed-title">{embed.title}</div>'
-                        if embed.description: 
+                        if embed.description:
                             description_text = embed.description.replace("\n", "<br>")
                             html_content += f'<div class="embed-description">{description_text}</div>'
                         html_content += '</div>'
                     html_content += '</div></div>'
                 html_content += "</body></html>"
-                
+
+                # 压缩为 ZIP
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                     zip_file.writestr(f'{channel.name}.html', html_content.encode('utf-8'))
                 zip_buffer.seek(0)
-                
+
+                # 发送日志
                 await log_channel.send(f"📄 归档记录: `{channel.name}` (QQ: {qq_number})")
                 await log_channel.send(file=discord.File(zip_buffer, filename=f"{channel.name}.zip"))
-                
+
+                # 删除原频道
                 await channel.delete(reason="批量导出并归档")
                 exported_count += 1
                 await asyncio.sleep(1) 
@@ -654,6 +672,52 @@ class Tickets(commands.Cog):
             await c.delete(reason="批量清理")
             await asyncio.sleep(1)
         await ctx.followup.send("清理完成", ephemeral=True)
+    
+    @ticket.command(name="批量更名", description="（管理用）一键将【一审中】前缀修正为【审核中】")
+    @is_reviewer_egg()
+    async def bulk_rename_tickets(self, ctx: discord.ApplicationContext):
+        # 因为改名操作比较慢，我们要先告诉 Discord 稍微等一下
+        await ctx.defer(ephemeral=True)
+
+        # 获取一审分类（如果是二审区也要改，可以把这里换成 SECOND_REVIEW_CHANNEL_ID）
+        target_category = self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
+
+        if not target_category:
+            await ctx.followup.send("呜...找不到配置的【一审分类】！请检查 ID 配置。", ephemeral=True); return
+
+        await ctx.followup.send(f"收到！正在扫描 “{target_category.name}” 中需要更名的频道...", ephemeral=True)
+
+        # 筛选出名字里包含 "一审中" 的频道
+        channels_to_rename = [ch for ch in target_category.text_channels if "一审中" in ch.name]
+
+        if not channels_to_rename:
+            await ctx.followup.send("在这个分类下没有发现带“一审中”前缀的频道哦~", ephemeral=True); return
+
+        success_count = 0
+
+        # 发送一个初始进度提示
+        progress_msg = await ctx.followup.send(f"开始处理... 预计需要 {len(channels_to_rename) * 2} 秒完成", ephemeral=True)
+
+        for index, channel in enumerate(channels_to_rename):
+            try:
+                # 生成新名字：把 "一审中" 替换为 "审核中"
+                old_name = channel.name
+                new_name = old_name.replace("一审中", "审核中")
+
+                if old_name != new_name:
+                    await channel.edit(name=new_name)
+                    success_count += 1
+                    # 打印一下日志方便后台看
+                    print(f"[批量更名] {old_name} -> {new_name}")
+
+                    # 这一点非常重要：Discord 对改名有限速，如果不休息会被临时封禁接口
+                    # 妈妈为了你的安全，设置了1.5秒的间隔
+                    await asyncio.sleep(1.5)
+
+            except Exception as e:
+                print(f"更名频道 {channel.name} 时出错: {e}")
+
+        await progress_msg.edit(content=f"✅ 处理完成！\n共扫描: {len(channels_to_rename)} 个\n成功更名: {success_count} 个")
 
     # 上下文菜单：右键消息超时归档
     @discord.message_command(name="超时归档此工单")
