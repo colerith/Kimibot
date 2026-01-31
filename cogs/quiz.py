@@ -213,7 +213,7 @@ class Quiz(commands.Cog):
         self.bot.add_view(QuizStartView())
         print("Quiz views registered.")
 
-    @discord.slash_command(name="setup_quiz_panel", description="（管理员）发送入站答题面板")
+    @discord.slash_command(name="入站答题面板", description="（管理员）发送入站答题面板")
     async def setup_quiz_panel(self, ctx):
         if not ctx.guild.get_role(SUPER_EGG_ROLE_ID) in ctx.author.roles:
             return await ctx.respond("无权操作", ephemeral=True)
