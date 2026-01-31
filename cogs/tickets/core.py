@@ -123,8 +123,7 @@ class Tickets(commands.Cog):
         await self.update_panel_message()
 
         tid = random.randint(100000, 999999)
-
-        # 🟢 【修改 1】名称格式修正：只保留“审核中”，删除了原来覆盖它的“一审中”
+        # 🟢 名字是“审核中”
         c_name = f"审核中-{tid}-{interaction.user.name}"
 
         overwrites = {
@@ -143,10 +142,14 @@ class Tickets(commands.Cog):
                 topic=f"创建者ID: {interaction.user.id} | 创建者: {interaction.user.name} | 工单ID: {tid}"
             )
 
-            # 🟢 【修改 2】报错修复：在替换文字前，先轻轻检查一下描述是不是存在
+            # 🟢 【修改重点】这里是修复 Title 无法显示 ID 的地方
             e_create = discord.Embed.from_dict(STRINGS["embeds"]["ticket_created"])
 
-            # 如果配置里有 description 并且不为空，我们才执行替换
+            # 1. 替换标题里的占位符
+            if e_create.title:
+                e_create.title = e_create.title.replace("{ticket_id}", str(tid))
+
+            # 2. 替换描述里的占位符（如果有的话）
             if e_create.description:
                 e_create.description = e_create.description.replace("{ticket_id}", str(tid))
 
@@ -182,6 +185,7 @@ class Tickets(commands.Cog):
             save_quota_data(q_data)
             await self.update_panel_message()
             await interaction.followup.send(f"创建失败: {e}", ephemeral=True)
+
 
 
     async def approve_ticket_logic(self, interaction_or_ctx):
