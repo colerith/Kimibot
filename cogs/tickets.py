@@ -470,6 +470,7 @@ class Tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # 审核暂停状态
+        self.audit_suspended = False
         self.audit_suspended_until = None # None: 正常, "infinite": 无限暂停, datetime: 暂停截止时间
         self.audit_suspend_reason = None
 
@@ -506,10 +507,18 @@ class Tickets(commands.Cog):
         quota_left = data.get("daily_quota_left", 0)
         
         embed = discord.Embed(title="🥚 全区权限申请 (人工审核)", color=STYLE["KIMI_YELLOW"])
-        description = "点击下方按钮创建人工审核工单，解锁【卡区】等所有区域\n\n"
-        description += f"**⚠️ 前置要求：需先拥有【新兵蛋子】身份 (请先去答题)**\n"
-        description += f"**-` 审核开放时间: 每日 08:00 - 23:00 `**\n"
-        description += f"**-` 今日剩余名额: {quota_left}/{QUOTA['DAILY_TICKET_LIMIT']} `**"
+        description = (
+            "**在创建工单前，请您仔细阅读并确认遵守以下社区核心原则：**\n\n"
+            "1.  **社区定位**：我们是 **非商业化SillyTavern女性社区**，仅欢迎有酒馆使用经验的同好加入。\n"
+            "2.  **资源使用**：社区内所有资源、技术与讨论，**严禁**用于商业云酒馆、付费服务或Tavo、Omate等第三方软件。\n"
+            "3.  **反商业化**：我们坚决反对任何形式的商业化行为，请勿在社区内推荐或使用非官方的付费API、付费节点等服务。\n\n"
+            "----------------------------------------------------\n"
+            "未通过审核的用户仅能浏览有限的公共频道。如您已阅读并同意以上所有条款，请点击下方按钮创建工单以验证身份、解锁全部内容。\n\n"
+            f"**⚠️ 前置要求：需先拥有【新兵蛋子】身份 (请先去答题)**\n"
+            f"**-` 审核开放时间: 每日 08:00 - 23:00 `**\n"
+            f"**-` 今日剩余名额: {quota_left}/{QUOTA['DAILY_TICKET_LIMIT']} `**"
+        )
+
         
         embed.description = description
         view = TicketPanelView(self)
