@@ -394,10 +394,10 @@ class Tickets(commands.Cog):
 
         # 2. 尝试寻找并修复旧消息
         fixed = False
-        target_titles = ["工单已创建", "管理员操作面板", "一审中", "审核中"]  # 识别面板的关键词
+        target_titles = ["已创建", "管理员操作面板", "一审中", "审核中"]  # 识别面板的关键词
 
         try:
-            async for message in ctx.channel.history(limit=30):  # 搜索最近30条消息
+            async for message in ctx.channel.history(limit=50):  # 搜索最近50条消息
                 if message.author.id == self.bot.user.id and message.embeds:
                     embed_title = message.embeds[0].title or ""
                     # 只要标题匹配或者是工单初始消息，就尝试修复View
@@ -415,7 +415,7 @@ class Tickets(commands.Cog):
             # 如果实在找不到旧面板，作为兜底方案才发一个新的
             embed = discord.Embed(
                 title="🔧 管理员操作面板 (补发)",
-                description="呜...妈妈没找到旧的面板消息，所以给你补发了一个新的。",
+                description="呜...本蛋没找到旧的面板消息，所以给你补发了一个新的！",
                 color=STYLE["KIMI_YELLOW"]
             )
             await ctx.channel.send(embed=embed, view=TicketActionView())
