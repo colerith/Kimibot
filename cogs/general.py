@@ -375,9 +375,7 @@ class General(commands.Cog):
         print(f"检测到新成员加入: {member.name} (ID: {member.id})") # 妈妈加的调试日志
 
         # 1. 尝试获取配置的频道，如果没有就尝试系统频道，再没有就放弃
-        # 假设这里填你希望发欢迎消息的文字频道ID，比如闲聊区或大厅
-        # 如果你想用配置里的ID，可以写成 targeted_channel_id = IDS.get("LOBBY_CHANNEL_ID")
-        targeted_channel_id = 1417568378889175071 # 这里妈妈先填一个你的通用ID，你需要改成实际的欢迎频道ID
+        targeted_channel_id = 1397629013152894978 
 
         channel = member.guild.get_channel(targeted_channel_id)
 
@@ -479,7 +477,7 @@ class General(commands.Cog):
 
     # --- 斜杠命令 (Slash Commands) ---
 
-    @discord.slash_command(name="setup_wish_panel", description="（仅限超级小蛋）手动发送或刷新许愿面板！")
+    @discord.slash_command(name="刷新许愿面板", description="（仅限超级小蛋）手动发送或刷新许愿面板！")
     @is_super_egg()
     async def setup_wish_panel(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)

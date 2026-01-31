@@ -1229,7 +1229,7 @@ class Tickets(commands.Cog):
         data = self.load_quota_data(); data["daily_quota_left"] += amount; self.save_quota_data(data); await self.update_ticket_panel()
         await ctx.followup.send(f"好嘞！本大王刚刚变出了 **{amount}** 个新名额，现在还剩 **{data['daily_quota_left']}** 个！", ephemeral=True)
 
-    @discord.slash_command(name="setup_ticket_panel", description="（仅限审核小蛋）手动发送或刷新工单创建面板！")
+    @discord.slash_command(name="刷新工单创建面板", description="（仅限审核小蛋）手动发送或刷新工单创建面板！")
     @is_reviewer_egg()
     async def setup_ticket_panel(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
