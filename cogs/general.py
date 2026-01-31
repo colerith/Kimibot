@@ -369,37 +369,32 @@ class General(commands.Cog):
     # --- 事件监听器 (Listeners) ---
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        if member.bot:
-            return
+        if member.bot: return
 
-        new_recruit_role = member.guild.get_role(VERIFICATION_ROLE_ID)
-        if new_recruit_role:
-            try:
-                await member.add_roles(new_recruit_role, reason="新成员自动发放身份组")
-            except discord.Forbidden:
-                print(f"错误：本大王没有权限给 {member.name} 添加身份组！")
-            except Exception as e:
-                print(f"添加身份组时发生错误: {e}")
-
+        # 获取欢迎频道 (通常是 System Channel)
         channel = member.guild.system_channel
-        if not channel:
-            print(f"错误：服务器 {member.guild.name} 没有设置系统欢迎频道！")
-            return
+        if not channel: return
 
-        rules_channel_url = "https://discord.com/channels/1397629012292931726/1417568378889175071" 
-        verify_channel_url = "https://discord.com/channels/1397629012292931726/1417572579304013885" 
+        # 答题频道 ID: 1467034060026286090
+        quiz_channel_id = 1467034060026286090
+        ticket_channel_id = IDS["TICKET_PANEL_CHANNEL_ID"]
 
         embed = discord.Embed(
             title="🎉 欢迎来到\"🔮LOFI-加载中\"社区！",
-            description=f"你好呀，{member.mention}！本大王是奇米大王，欢迎你加入我们温暖的大家庭！\n\n"
-                        f"为了让大家都能愉快地玩耍，请先阅读我们的[**📜 社区守则**]({rules_channel_url})哦！\n\n"
-                        f"阅读完毕后，请前往[**✅ 身份审核频道**]({verify_channel_url})进行身份审核，审核通过后才能解锁社区的全部内容捏！",
+            description=f"你好呀，{member.mention}！欢迎你加入🔮LOFI-加载中大家庭！\n\n"
+                        f"🚪 **第一步：获取基础权限**\n"
+                        f"请前往 <#{quiz_channel_id}> 参与答题，答对后即可获得【新兵蛋子】身份。\n\n"
+                        f"🔑 **第二步：解锁全区**\n"
+                        f"获得身份后，如需访问卡区等更多内容，请前往 <#{ticket_channel_id}> 申请人工审核。\n\n"
+                        f"祝你玩得开心捏！✨",
             color=STYLE["KIMI_YELLOW"]
         )
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="期待与你一起玩耍！")
+        embed.set_footer(text="记得先看社区守则哦~")
 
-        await channel.send(embed=embed)
+        try:
+            await channel.send(embed=embed)
+        except: pass
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -475,19 +470,41 @@ class General(commands.Cog):
         else:
             await ctx.followup.send("呜...找不到许愿池频道！", ephemeral=True)
 
+   # ======================================================================================
+    # --- 辅助工具命令 (回顶) ---
+    # ======================================================================================
+
+    # 1. 斜杠命令版本 (/回顶)
     @discord.slash_command(name="回顶", description="本大王带你坐穿梭机回到帖子最顶上！咻~")
     async def back_to_top(self, ctx: discord.ApplicationContext):
+        await self._back_to_top_logic(ctx)
+
+    # 2. 右键菜单版本 (右键消息 -> Apps -> 🚀 回到帖子顶部)
+    @discord.message_command(name="🚀 回到帖子顶部")
+    async def back_to_top_ctx(self, ctx: discord.ApplicationContext, message: discord.Message):
+        await self._back_to_top_logic(ctx)
+
+    # 共用逻辑函数
+    async def _back_to_top_logic(self, ctx: discord.ApplicationContext):
+        # 检查是否在帖子频道 (Thread)
         if not isinstance(ctx.channel, discord.Thread):
             await ctx.respond("呜...这个魔法只能在帖子频道里用啦！", ephemeral=True)
             return
+        
         try:
+            # 帖子的ID通常就是起始消息的ID
             starter_message = await ctx.channel.fetch_message(ctx.channel.id)
+            
             view = discord.ui.View()
             button = discord.ui.Button(label="🚀 点我回到顶部！", style=discord.ButtonStyle.link, url=starter_message.jump_url)
             view.add_item(button)
+            
             await ctx.respond("顶！🆙 本大王帮你创建了回到顶部嘟快速通道惹！", view=view, ephemeral=True)
+            
         except discord.NotFound:
             await ctx.respond("咦？本大王找不到这个帖子的第一条消息惹...好奇怪！", ephemeral=True)
+        except Exception as e:
+            await ctx.respond(f"呜...发生错误惹: {e}", ephemeral=True)
 
     @discord.slash_command(name="发布公告", description="奇米大王的特别广播时间到惹！(会弹出编辑器哦)")
     @is_super_egg()

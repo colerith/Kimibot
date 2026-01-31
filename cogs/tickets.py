@@ -12,9 +12,6 @@ import zipfile
 # 从中央配置文件导入所有配置
 from config import IDS, QUOTA, STYLE
 
-# 从quiz模块导入答题视图
-from cogs.quiz import QuizStartView
-
 # ======================================================================================
 # --- 常量定义 ---
 # ======================================================================================
@@ -230,49 +227,6 @@ class TicketActionView(discord.ui.View):
         return False
 
     # 自动适配参数
-    @discord.ui.button(label="▶️ 进入二审", style=discord.ButtonStyle.primary, custom_id="ticket_review2")
-    async def review2(self, arg1, arg2):
-        interaction = arg1 if isinstance(arg1, discord.Interaction) else arg2
-        button = arg1 if isinstance(arg1, discord.ui.Button) else arg2
-
-        await interaction.response.defer()
-        second_review_category = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
-        if not second_review_category:
-            await interaction.followup.send("呜...找不到【二审】的频道分类！", ephemeral=True)
-            return
-        try:
-            info = get_ticket_info(interaction.channel)
-            creator_id = int(info.get("创建者ID", 0))
-            creator = interaction.guild.get_member(creator_id)
-            reviewer_name = interaction.user.name
-            new_name = f"二审中-{info.get('工单ID', '未知')}-{info.get('创建者', '未知')}-{reviewer_name}"
-            await interaction.channel.edit(name=new_name, category=second_review_category)
-            
-            embed = discord.Embed(
-                title="🎯 二审答题验证",
-                description="恭喜通过一审！现在需要完成身份确认答题~",
-                color=STYLE["KIMI_YELLOW"]
-            )
-            embed.add_field(
-                name="📝 答题说明",
-                value="• 随机抽取10道题，每题10分，满分100分\n• 限时2分钟完成\n• 需要达到60分以上才能通过\n• **请认真作答，祝你好运！**",
-                inline=False
-            )
-            embed.set_footer(text="准备好后，请点击下方按钮开始答题")
-            content = f"叮咚！{creator.mention} 小宝，请开始你的二审答题吧~" if creator else None
-            await interaction.channel.send(content=content, embed=embed, view=QuizStartView())
-            
-            button.disabled = True
-            button.style = discord.ButtonStyle.secondary
-            for child in self.children:
-                if child.custom_id == "ticket_approved":
-                    child.disabled = False
-                    child.style = discord.ButtonStyle.success
-            await interaction.message.edit(view=self)
-        except Exception as e:
-            await interaction.followup.send(f"移动到二审时发生未知错误: {e}", ephemeral=True)
-
-    # 自动适配参数
     @discord.ui.button(label="🎉 已过审", style=discord.ButtonStyle.success, custom_id="ticket_approved")
     async def approved(self, arg1, arg2):
         interaction = arg1 if isinstance(arg1, discord.Interaction) else arg2
@@ -318,7 +272,7 @@ class TicketActionView(discord.ui.View):
             # -------------------------------------
 
         embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩...\n## 对审核过程没有异议，同意并且阅读完全部东西后请点击下方按钮~", color=STYLE["KIMI_YELLOW"])
-        embed.set_image(url="https://files.catbox.moe/2tytko.jpg")
+        embed.set_image(url="https://i.postimg.cc/sxh3MQkh/2tytko.png")
         embed.set_footer(text="宝宝如果已申请/不打算加群且没有别的问题了，请点击下方对应按钮")
         msg_content = f"恭喜 {creator.mention} 通过审核！" if creator else "恭喜通过审核！(用户已不在服务器)"
         await interaction.channel.send(msg_content, embed=embed, view=ArchiveRequestView(reviewer=interaction.user))
@@ -377,10 +331,18 @@ class TicketPanelView(discord.ui.View):
         self.cog = cog_instance
 
     # 自动适配参数
-    @discord.ui.button(label="🥚 创建审核工单", style=discord.ButtonStyle.primary, custom_id="create_ticket_panel_button")
+    @discord.ui.button(label="🥚 申请全区权限", style=discord.ButtonStyle.primary, custom_id="create_ticket_panel_button")
     async def create_ticket_callback(self, arg1, arg2):
         interaction = arg1 if isinstance(arg1, discord.Interaction) else arg2
         button = arg1 if isinstance(arg1, discord.ui.Button) else arg2
+
+        if self.cog.audit_suspended_until:
+            now = datetime.datetime.now()
+            if self.cog.audit_suspended_until == "infinite" or now < self.cog.audit_suspended_until:
+                reason = self.cog.audit_suspend_reason or "管理员暂停了审核功能"
+                until_str = "恢复时间待定" if self.cog.audit_suspended_until == "infinite" else f"预计 {self.cog.audit_suspended_until.strftime('%H:%M')} 恢复"
+                await interaction.response.send_message(f"🚫 **审核通道已暂时关闭**\n原因：{reason}\n{until_str}", ephemeral=True)
+                return
 
         # --- 时间检查 ---
         now = datetime.datetime.now(QUOTA["TIMEZONE"])
@@ -465,13 +427,13 @@ class TicketPanelView(discord.ui.View):
         mention_text = f"<@&{SPECIFIC_REVIEWER_ID}>"
         await ticket_channel.send(content=f"{interaction.user.mention} {mention_text}", embed=embed, view=TicketActionView())
         
-        embed_req = discord.Embed(title="🔮 LOFI-加载中社区审核要求 【一审】", description="**⚠️ 请在审核时准备好以下材料**", color=STYLE["KIMI_YELLOW"])
-        embed_req.add_field(name="一、成年证明（二选一）", value="1. 身份证**其余信息打码**，只露出身份证的__出生年月日__+__身份证号里出生年月日__部分\n2. 支付宝点击**我的-头像-我的档案-个人信息**，截图露出**生日**部分，其余信息打码", inline=False)
+        embed_req = discord.Embed(title="🔮 LOFI-加载中社区审核要求", description="**⚠️ 请在审核时准备好以下材料**", color=STYLE["KIMI_YELLOW"])
+        embed_req.add_field(name="一、成年&女性证明（二选一）", value="1. 身份证**其余信息打码**，只露出身份证的__出生年月日__+__身份证号里出生年月日__+__性别__部分\n2. 支付宝点击**我的-头像-我的档案-个人信息**，截图露出**生日+性别**部分，其余信息打码", inline=False)
         embed_req.add_field(name="二、使用自建、非商业酒馆证明", value="准备好以下内容，让它们**同屏/同一张图显示**，如果在手机上显示不清/空间不够同屏，可以进行录屏：\n1. 你的酒馆后台（手机Termux、电脑Powershell/cmd、云酒馆1panel/宝塔/抱脸等）\n2. 一个超过100楼以上的女性向卡聊天记录，需要露出楼层编号和卡\n3. 在输入框内输入你的Discord id，格式为`Discord id：id数字`。\n> Discord id 获取方法:\n> 在设置里打开开发者模式-在聊天点击自己的头像-个人界面右上角有一个复制id\n4. 当前你所在的工单审核页面", inline=False)
-        embed_req.add_field(name="三、小红书关注电波系", value="截图对电波系的关注😋需要有点赞留痕，可以直接给置顶帖子点赞", inline=False)
-        embed_req.add_field(name="四、女性证明", value="在工单内发送语音，按照以下格式清晰朗读，审核编号是当前你所在工单频道名称里的6位数字：\n> 现在是xxxx年xx月xx日xx点xx分，我的审核编号是xxxxxx，我确保我是成年女性，并且已仔细阅读过社区守则，保证绝不违反，我会为自己的行为负责\n\n完成以上所有材料提交后，审核员会将你移至二审，届时你将进行自助答题验证~", inline=False)
+        embed_req.add_field(name="三、小红书关注电波系", value="截图对电波系的关注，需要有点赞留痕", inline=False)
+        embed_req.add_field(name="四、语音证明", value="在工单内发送语音（电脑端可以先在手机录制，然后发送文件），按照以下格式清晰朗读，审核编号是当前你所在工单频道名称里的6位数字：\n> 现在是xxxx年xx月xx日xx点xx分，我的审核编号是xxxxxx，我确保我是成年女性，并且已仔细阅读过社区守则，保证绝不违反，我会为自己的行为负责", inline=False)
         embed_req.set_footer(text="🚫 禁止对外泄露任何审核条件或试卷题目，违者直接做永久封禁处理")
-        embed_req.set_image(url="https://files.catbox.moe/r269hz.png")
+        embed_req.set_image(url="https://i.postimg.cc/MGpMv5dr/r269hz.png")
         
         await ticket_channel.send(f"你好呀 {interaction.user.mention}，请按下面的要求提交材料哦~", embed=embed_req)
         
@@ -505,8 +467,12 @@ class TicketPanelView(discord.ui.View):
 # ======================================================================================
 
 class Tickets(commands.Cog):
-    def __init__(self, bot: discord.Bot):
+    def __init__(self, bot):
         self.bot = bot
+        # 审核暂停状态
+        self.audit_suspended_until = None # None: 正常, "infinite": 无限暂停, datetime: 暂停截止时间
+        self.audit_suspend_reason = None
+
     @commands.Cog.listener()
     async def on_ready(self):
         self.bot.add_view(TicketActionView())
@@ -539,17 +505,20 @@ class Tickets(commands.Cog):
         current_hour = now.hour
         quota_left = data.get("daily_quota_left", 0)
         
-        embed = discord.Embed(title="🥚 新蛋身份审核", color=STYLE["KIMI_YELLOW"])
-        description = "点击下方按钮，系统将为您自动开设单独的审核频道\n\n"
+        embed = discord.Embed(title="🥚 全区权限申请 (人工审核)", color=STYLE["KIMI_YELLOW"])
+        description = "点击下方按钮创建人工审核工单，解锁【卡区】等所有区域\n\n"
+        description += f"**⚠️ 前置要求：需先拥有【新兵蛋子】身份 (请先去答题)**\n"
         description += f"**-` 审核开放时间: 每日 08:00 - 23:00 `**\n"
-        description += f"**-` {today_str} `**\n"
-        daily_limit = QUOTA["DAILY_TICKET_LIMIT"]
-        description += f"**-` 今日剩余名额: {quota_left}/{daily_limit} `**"
+        description += f"**-` 今日剩余名额: {quota_left}/{QUOTA['DAILY_TICKET_LIMIT']} `**"
         
         embed.description = description
         view = TicketPanelView(self)
 
-        if quota_left <= 0:
+        # 按钮状态控制
+        if self.audit_suspended:
+            view.children[0].disabled = False # 让用户点，点了之后弹窗提示原因
+            view.children[0].label = "⚠️ 审核暂停中"
+        elif quota_left <= 0:
             view.children[0].disabled = True
             view.children[0].label = "今日名额已满"
         elif not (8 <= current_hour < 23):
@@ -559,7 +528,7 @@ class Tickets(commands.Cog):
 
         try:
             async for message in panel_channel.history(limit=5):
-                if message.author == self.bot.user and message.embeds and "新蛋身份审核" in message.embeds[0].title:
+                if message.author == self.bot.user and message.embeds and "全区权限申请" in message.embeds[0].title:
                     await message.edit(embed=embed, view=view)
                     return
             await panel_channel.send(embed=embed, view=view)
@@ -731,6 +700,55 @@ class Tickets(commands.Cog):
 
     ticket = discord.SlashCommandGroup("工单", "工单相关指令")
 
+    @ticket.command(name="中止新蛋审核", description="（管理员）设置中止工单申请，可设置时长和原因。")
+    @is_reviewer_egg()
+    async def suspend_audit(self, ctx: discord.ApplicationContext,
+                            duration: discord.Option(str, "中止时长 (例如 1h, 30m, 留空或inf为无限期)", required=False) = None,
+                            reason: discord.Option(str, "中止原因 (会显示在公告中)", default="管理员正在进行系统维护") = None):
+        """
+        管理员中止审核。
+        如果 duration 为空或 inf，则是无限期，直到手动解除（暂未实现手动解除，可重启或重新设一个短时间）。
+        """
+        await ctx.defer(ephemeral=True)
+        
+        self.audit_suspended = True
+        self.suspend_reason = reason
+        
+        msg = f"✅ 已中止审核功能。\n原因：{reason}\n"
+        
+        if duration and duration.lower() != "inf":
+            seconds = parse_duration(duration)
+            if seconds > 0:
+                self.suspend_end_time = datetime.datetime.now() + datetime.timedelta(seconds=seconds)
+                msg += f"预计恢复时间：{duration} 后"
+                # 启动自动恢复任务
+                self.bot.loop.create_task(self.auto_resume_audit(seconds))
+            else:
+                self.suspend_end_time = None
+                msg += "时长格式无法识别，默认为无限期中止。"
+        else:
+            self.suspend_end_time = None
+            msg += "时长：无限期 (直到重启或手动恢复)"
+
+        await self.update_ticket_panel()
+        
+        # 发送公告到工单面板频道
+        panel_channel = self.bot.get_channel(IDS["TICKET_PANEL_CHANNEL_ID"])
+        if panel_channel:
+            embed = discord.Embed(title="📢 审核暂停公告", description=f"因 **{reason}**，审核功能暂时关闭。", color=0xFF0000)
+            if self.suspend_end_time:
+                embed.add_field(name="预计恢复", value=f"<t:{int(self.suspend_end_time.timestamp())}:R>")
+            await panel_channel.send(embed=embed)
+            
+        await ctx.followup.send(msg, ephemeral=True)
+
+    async def auto_resume_audit(self, seconds):
+        await asyncio.sleep(seconds)
+        self.audit_suspended = False
+        self.suspend_reason = None
+        self.suspend_end_time = None
+        await self.update_ticket_panel()
+
     @ticket.command(name="恢复工单状态", description="（审核小蛋用）误操作恢复！将工单恢复到指定状态并通知用户。")
     @is_reviewer_egg()
     async def recover_ticket(self, ctx: discord.ApplicationContext,
@@ -858,7 +876,7 @@ class Tickets(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"❌ 恢复失败: {e}", ephemeral=True)
 
-    @ticket.command(name="超时归档", description="（审核小蛋用）将当前工单标记为超时，通知用户并删除。")
+    @ticket.command(name="🚫 超时工单归档", description="（审核小蛋用）将当前工单标记为超时，通知用户并删除。")
     @is_reviewer_egg()
     async def timeout_archive(self, ctx: discord.ApplicationContext, 
                               note: discord.Option(str, "补充备注（可选）", required=False) = None):
@@ -932,22 +950,6 @@ class Tickets(commands.Cog):
         
         await ctx.respond("⚠️ **危险操作！**\n你确定要 **立即删除** 这个工单频道，并 **返还1个审核名额** 吗？此操作无法撤销！", view=confirm_view, ephemeral=True)
 
-    @ticket.command(name="发送一审指引", description="（审核小蛋用）手动在当前频道发送一审指引。")
-    @is_reviewer_egg()
-    async def send_first_review(self, ctx: discord.ApplicationContext):
-        if not ctx.channel.topic or "工单ID" not in ctx.channel.topic:
-            await ctx.respond("呜...这里似乎不是一个有效的工单频道！", ephemeral=True)
-            return
-        await ctx.defer()
-        embed = discord.Embed(title="🔮 LOFI-加载中社区审核要求 【一审】", description="**⚠️ 请在审核时准备好以下材料**", color=STYLE["KIMI_YELLOW"])
-        embed.add_field(name="一、成年证明（二选一）", value="1. 身份证**其余信息打码**，只露出身份证的__出生年月日__+__身份证号里出生年月日__部分\n2. 支付宝点击**我的-头像-我的档案-个人信息**，截图露出**生日**部分，其余信息打码", inline=False)
-        embed.add_field(name="二、使用自建、非商业酒馆证明", value="准备好以下内容，让它们**同屏/同一张图显示**，如果在手机上显示不清/空间不够同屏，可以进行录屏：\n1. 你的酒馆后台（手机Termux、电脑Powershell/cmd、云酒馆1panel/宝塔/抱脸等）\n2. 一个超过100楼以上的女性向卡聊天记录，需要露出楼层编号和卡\n3. 在输入框内输入你的Discord id，格式为`Discord id：id数字`。\n> Discord id 获取方法:\n> 在设置里打开开发者模式-在聊天点击自己的头像-个人界面右上角三个点有一个复制id\n4. 当前你所在的工单审核页面", inline=False)
-        embed.add_field(name="三、小红书关注电波系（可选，非强制）", value="截图对电波系的关注😋需要有点赞留痕，可以直接给置顶帖子点赞", inline=False)
-        embed.add_field(name="四、女性证明", value="在工单内发送语音，按照以下格式清晰朗读，审核编号是当前你所在工单频道名称里的6位数字：\n> 现在是xxxx年xx月xx日xx点xx分，我的审核编号是xxxxxx，我确保我是成年女性，并且已仔细阅读过社区守则，保证绝不违反，我会为自己的行为负责\n\n完成以上所有材料提交后，审核员会将你移至二审，届时你将进行自助答题验证~", inline=False)
-        embed.set_footer(text="🚫 禁止对外泄露任何审核条件或试卷题目，违者直接做永久封禁处理")
-        embed.set_image(url="https://files.catbox.moe/r269hz.png")
-        await ctx.send(f"你好呀！审核员 {ctx.author.mention} 已接单，请按下面的要求提交材料哦~", embed=embed)
-
     @ticket.command(name="发送二审指引", description="（审核小蛋用）手动在当前频道发送二审答题面板。")
     @is_reviewer_egg()
     async def send_second_review(self, ctx: discord.ApplicationContext):
@@ -1003,8 +1005,8 @@ class Tickets(commands.Cog):
             return
 
         await ctx.defer()
-        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩，进群问题也是填写你的【工单编号】就可以惹！\n## 对审核过程没有异议，同意并且阅读完全部东西后@当前审核员/任何审核小蛋来进行归档~身份组已经添加", color=STYLE["KIMI_YELLOW"])
-        embed.set_image(url="https://files.catbox.moe/2tytko.jpg")
+        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩...\n## 对审核过程没有异议，同意并且阅读完全部东西后请点击下方按钮~", color=STYLE["KIMI_YELLOW"])
+        embed.set_image(url="https://i.postimg.cc/sxh3MQkh/2tytko.png")
         embed.set_footer(text="宝宝如果已申请/不打算加群且没有别的问题了，请点击下方对应按钮")
         await ctx.send(f"恭喜 {creator.mention} 通过审核！", embed=embed, view=ArchiveRequestView(reviewer=ctx.author))
 
@@ -1139,7 +1141,7 @@ class Tickets(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"录入失败，发生未知错误: {e}", ephemeral=True)
 
-    @discord.message_command(name="🚫 超时归档此工单")
+    @discord.message_command(name="超时归档此工单")
     @is_reviewer_egg()
     async def timeout_archive_ctx(self, ctx: discord.ApplicationContext, message: discord.Message):
         """右键点击消息 -> Apps -> 🚫 超时归档此工单"""
