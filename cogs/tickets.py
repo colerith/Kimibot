@@ -876,7 +876,7 @@ class Tickets(commands.Cog):
         except Exception as e:
             await ctx.followup.send(f"❌ 恢复失败: {e}", ephemeral=True)
 
-    @ticket.command(name="🚫 超时工单归档", description="（审核小蛋用）将当前工单标记为超时，通知用户并删除。")
+    @ticket.command(name="超时归档", description="（审核小蛋用）将当前工单标记为超时，通知用户并删除。")
     @is_reviewer_egg()
     async def timeout_archive(self, ctx: discord.ApplicationContext, 
                               note: discord.Option(str, "补充备注（可选）", required=False) = None):
@@ -1005,8 +1005,8 @@ class Tickets(commands.Cog):
             return
 
         await ctx.defer()
-        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩...\n## 对审核过程没有异议，同意并且阅读完全部东西后请点击下方按钮~", color=STYLE["KIMI_YELLOW"])
-        embed.set_image(url="https://i.postimg.cc/sxh3MQkh/2tytko.png")
+        embed = discord.Embed(title="🥳 恭喜小宝加入社区", description="如果想来一起闲聊，社区有Q群可以来玩，进群问题也是填写你的【工单编号】就可以惹！\n## 对审核过程没有异议，同意并且阅读完全部东西后@当前审核员/任何审核小蛋来进行归档~身份组已经添加", color=STYLE["KIMI_YELLOW"])
+        embed.set_image(url="https://files.catbox.moe/2tytko.jpg")
         embed.set_footer(text="宝宝如果已申请/不打算加群且没有别的问题了，请点击下方对应按钮")
         await ctx.send(f"恭喜 {creator.mention} 通过审核！", embed=embed, view=ArchiveRequestView(reviewer=ctx.author))
 
@@ -1144,7 +1144,7 @@ class Tickets(commands.Cog):
     @discord.message_command(name="超时归档此工单")
     @is_reviewer_egg()
     async def timeout_archive_ctx(self, ctx: discord.ApplicationContext, message: discord.Message):
-        """右键点击消息 -> Apps -> 🚫 超时归档此工单"""
+        """右键点击消息 -> Apps -> 超时归档此工单"""
         channel = ctx.channel
         if not channel.topic or "工单ID" not in channel.topic:
             await ctx.respond("❌ 只能在有效的工单频道内使用此功能！", ephemeral=True)
