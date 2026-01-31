@@ -369,15 +369,31 @@ class General(commands.Cog):
     # --- 事件监听器 (Listeners) ---
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
+        # 0. 基础过滤：不欢迎机器人
         if member.bot: return
 
-        # 获取欢迎频道 (通常是 System Channel)
-        channel = member.guild.system_channel
-        if not channel: return
+        print(f"检测到新成员加入: {member.name} (ID: {member.id})") # 妈妈加的调试日志
 
-        # 答题频道 ID: 1467034060026286090
-        quiz_channel_id = 1467034060026286090
-        ticket_channel_id = IDS["TICKET_PANEL_CHANNEL_ID"]
+        # 1. 尝试获取配置的频道，如果没有就尝试系统频道，再没有就放弃
+        # 假设这里填你希望发欢迎消息的文字频道ID，比如闲聊区或大厅
+        # 如果你想用配置里的ID，可以写成 targeted_channel_id = IDS.get("LOBBY_CHANNEL_ID")
+        targeted_channel_id = 1417568378889175071 # 这里妈妈先填一个你的通用ID，你需要改成实际的欢迎频道ID
+
+        channel = member.guild.get_channel(targeted_channel_id)
+
+        # 如果找不到指定频道，再尝试系统默认频道
+        if not channel:
+            channel = member.guild.system_channel
+
+        if not channel:
+            print("找不到合适的欢迎频道，放弃发送欢迎消息。")
+            return
+
+        # 2. 准备频道ID
+        # 答题频道 ID
+        quiz_channel_id = IDS.get("QUIZ_CHANNEL_ID", 1467034060026286090)
+        # 审核频道 ID
+        ticket_channel_id = IDS.get("TICKET_PANEL_CHANNEL_ID", 0) # 确保config里有这个
 
         embed = discord.Embed(
             title="🎉 欢迎来到\"🔮LOFI-加载中\"社区！",
@@ -389,12 +405,19 @@ class General(commands.Cog):
                         f"祝你玩得开心捏！✨",
             color=STYLE["KIMI_YELLOW"]
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
+
+        if member.avatar:
+             embed.set_thumbnail(url=member.avatar.url)
         embed.set_footer(text="记得先看社区守则哦~")
 
         try:
-            await channel.send(embed=embed)
-        except: pass
+            await channel.send(content=member.mention, embed=embed) # 加上@提醒，这样他能听到
+            print(f"已向 {channel.name} 发送欢迎消息。")
+        except discord.Forbidden:
+            print(f"权限不足：无法在频道 {channel.name} 发送消息。")
+        except Exception as e:
+            print(f"发送欢迎消息时发生未知错误: {e}")
+
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
