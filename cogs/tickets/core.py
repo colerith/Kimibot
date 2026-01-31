@@ -123,8 +123,9 @@ class Tickets(commands.Cog):
         await self.update_panel_message()
 
         tid = random.randint(100000, 999999)
-        c_name = f"审核中-{tid}-{interaction.user.name}" # 改回你原来的"审核中"还是"一审中"？你原来代码是"一审中"
-        c_name = f"一审中-{tid}-{interaction.user.name}"
+
+        # 🟢 【修改 1】名称格式修正：只保留“审核中”，删除了原来覆盖它的“一审中”
+        c_name = f"审核中-{tid}-{interaction.user.name}"
 
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -142,9 +143,13 @@ class Tickets(commands.Cog):
                 topic=f"创建者ID: {interaction.user.id} | 创建者: {interaction.user.name} | 工单ID: {tid}"
             )
 
-            # 发送初始消息
+            # 🟢 【修改 2】报错修复：在替换文字前，先轻轻检查一下描述是不是存在
             e_create = discord.Embed.from_dict(STRINGS["embeds"]["ticket_created"])
-            e_create.description = e_create.description.replace("{ticket_id}", str(tid))
+
+            # 如果配置里有 description 并且不为空，我们才执行替换
+            if e_create.description:
+                e_create.description = e_create.description.replace("{ticket_id}", str(tid))
+
             e_create.color = STYLE["KIMI_YELLOW"]
             await ch.send(f"{interaction.user.mention} <@&{SPECIFIC_REVIEWER_ID}>", embed=e_create, view=TicketActionView())
 
@@ -177,6 +182,7 @@ class Tickets(commands.Cog):
             save_quota_data(q_data)
             await self.update_panel_message()
             await interaction.followup.send(f"创建失败: {e}", ephemeral=True)
+
 
     async def approve_ticket_logic(self, interaction_or_ctx):
         """核心过审逻辑"""
@@ -308,14 +314,16 @@ class Tickets(commands.Cog):
         await self.bot.wait_until_ready()
         now = discord.utils.utcnow()
 
-        # 你的旧逻辑：遍历一审二审分类
+        # 遍历一审和二审分类
         cats = [self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"]), self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])]
 
         for cat in cats:
             if not cat: continue
             for channel in cat.text_channels:
-                # 过滤
-                if not ("一审中-" in channel.name or "二审中-" in channel.name or "待接单" in channel.name or "已过审" in channel.name):
+                # 修改点：只检查名字里包含 "一审中"、"二审中"、"审核中" 或 "已过审" 的频道
+                # 妈妈把 "待接单" 去掉了，这样这一类的就不会被催了哦
+                valid_prefixes = ["一审中", "二审中", "审核中", "已过审"]
+                if not any(prefix in channel.name for prefix in valid_prefixes):
                     continue
 
                 try:
@@ -331,8 +339,11 @@ class Tickets(commands.Cog):
 
                     # 1. 检查已过审在等待确认的 (3小时自动归档)
                     is_approved_waiting = False
-                    if last_msg.author.id == self.bot.user.id and last_msg.embeds and "恭喜小宝加入社区" in (last_msg.embeds[0].title or ""):
-                        is_approved_waiting = True
+                    # 这里妈妈加了个判定，确保 bot 的消息里有那个特定的 Embed 标题才算
+                    if last_msg.author.id == self.bot.user.id and last_msg.embeds:
+                        embed_title = last_msg.embeds[0].title or ""
+                        if "恭喜小宝加入社区" in embed_title:
+                            is_approved_waiting = True
 
                     if is_approved_waiting and time_diff > datetime.timedelta(hours=3):
                         await channel.send("⏳ **自动归档**\n检测到通过审核后超过 **3小时** 未点击确认。\n本大王已自动归档！")
@@ -341,14 +352,18 @@ class Tickets(commands.Cog):
                         continue
 
                     # 2. 常规超时 (12小时)
-                    # 重新计算最后有效活动 (排除 bot 提醒)
+                    # 重新计算最后有效活动 (排除 bot 的温馨提醒)
                     last_active = channel.created_at
                     has_reminded = False
                     async for m in channel.history(limit=20):
                         if m.author.bot:
-                            if "温馨提醒" in m.content or (m.embeds and "温馨提醒" in (m.embeds[0].title or "")):
+                            # 检查是否发过提醒
+                            content_check = "温馨提醒" in m.content
+                            embed_check = m.embeds and "温馨提醒" in (m.embeds[0].title or "")
+                            if content_check or embed_check:
                                 has_reminded = True
                         else:
+                            # 找到最后一条真人消息（或者非提醒类的 bot 消息）
                             last_active = m.created_at
                             break
 
@@ -359,7 +374,7 @@ class Tickets(commands.Cog):
                         await execute_archive(self.bot, None, channel, f"超过{TIMEOUT_HOURS_ARCHIVE}小时无活动", is_timeout=True)
 
                     elif diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND) and not has_reminded and not is_approved_waiting:
-                        # 提醒
+                        # 发送提醒
                         embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已沉睡超过 {TIMEOUT_HOURS_REMIND} 小时！\n超过 {TIMEOUT_HOURS_ARCHIVE} 小时会自动归档哦！", color=0xFFA500)
                         uid = info.get("创建者ID")
                         txt = f"<@{uid}>" if uid else ""
@@ -367,6 +382,7 @@ class Tickets(commands.Cog):
 
                 except Exception as e:
                     print(f"检查频道 {channel.name} 错误: {e}")
+
 
     # ======================================================================================
     # --- 命令组 (Slash Commands) ---
