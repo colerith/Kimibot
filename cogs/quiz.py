@@ -178,7 +178,7 @@ async def finalize_quiz(interaction, user_id, is_timeout=False):
             
         # 私信通知
         try:
-            dm_embed = discord.Embed(title="🎉 恭喜获得新兵蛋子身份！", description="你已解锁社区基础权限！\n\n如果想查看**酒馆角色卡**等核心资源，请前往 **#申请全区权限** 频道创建工单进行人工审核。", color=STYLE["KIMI_YELLOW"])
+            dm_embed = discord.Embed(title="🎉 恭喜获得新兵蛋子身份！", description="你已解锁社区基础权限！\n\n如果想查看**酒馆角色卡**等核心资源，请前往 <#1417572579304013885> 频道创建工单进行人工审核。", color=STYLE["KIMI_YELLOW"])
             await interaction.user.send(embed=dm_embed)
         except: pass
 
