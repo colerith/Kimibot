@@ -382,15 +382,45 @@ class Tickets(commands.Cog):
             await ctx.followup.send("这里不是工单频道哦！", ephemeral=True); return
         await self.approve_ticket_logic(ctx)
 
-    @ticket.command(name="修复按钮", description="（审核小蛋用）工单按钮坏了？用这个发送一个新的面板！")
+    @ticket.command(name="修复按钮", description="（审核小蛋用）按钮没反应？尝试修复当前频道已有的面板！")
     @is_reviewer_egg()
     async def fix_ticket_button(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
+
+        # 1. 检查是否在工单频道
         if not get_ticket_info(ctx.channel).get("工单ID"):
-            await ctx.followup.send("这里不是工单频道哦！", ephemeral=True); return
-        embed = discord.Embed(title="🔧 管理员操作面板 (已修复)", description="请审核员使用下方的按钮进行操作。", color=STYLE["KIMI_YELLOW"])
-        await ctx.channel.send(embed=embed, view=TicketActionView())
-        await ctx.followup.send("✅ 已发送新的操作面板！", ephemeral=True)
+            await ctx.followup.send("这里不是工单频道哦！", ephemeral=True)
+            return
+
+        # 2. 尝试寻找并修复旧消息
+        fixed = False
+        target_titles = ["工单已创建", "管理员操作面板", "一审中", "审核中"]  # 识别面板的关键词
+
+        try:
+            async for message in ctx.channel.history(limit=30):  # 搜索最近30条消息
+                if message.author.id == self.bot.user.id and message.embeds:
+                    embed_title = message.embeds[0].title or ""
+                    # 只要标题匹配或者是工单初始消息，就尝试修复View
+                    if any(t in embed_title for t in target_titles):
+                        await message.edit(view=TicketActionView())
+                        fixed = True
+                        break  # 修复最新这一个就够了
+        except Exception as e:
+            print(f"修复按钮时出错: {e}")
+
+        # 3. 反馈结果
+        if fixed:
+            await ctx.followup.send("✅ 已成功修复当前频道的旧操作面板！按钮应该能用啦！", ephemeral=True)
+        else:
+            # 如果实在找不到旧面板，作为兜底方案才发一个新的
+            embed = discord.Embed(
+                title="🔧 管理员操作面板 (补发)",
+                description="呜...妈妈没找到旧的面板消息，所以给你补发了一个新的。",
+                color=STYLE["KIMI_YELLOW"]
+            )
+            await ctx.channel.send(embed=embed, view=TicketActionView())
+            await ctx.followup.send("⚠️ 未找到可修复的旧消息，已为你补发新的面板。", ephemeral=True)
+
 
     @ticket.command(name="中止新蛋审核", description="（管理员）设置中止工单申请。")
     @is_reviewer_egg()
