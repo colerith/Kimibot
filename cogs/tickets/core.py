@@ -324,7 +324,6 @@ class Tickets(commands.Cog):
         for cat in cats:
             if not cat: continue
             for channel in cat.text_channels:
-                # 修改点：只检查名字里包含 "一审中"、"二审中"、"审核中" 或 "已过审" 的频道
                 valid_prefixes = ["一审中", "二审中", "审核中", "已过审"]
                 if not any(prefix in channel.name for prefix in valid_prefixes):
                     continue
@@ -332,8 +331,9 @@ class Tickets(commands.Cog):
                 try:
                     info = get_ticket_info(channel)
                     tid = info.get("工单ID")
+                    creator_id = info.get("创建者ID")
 
-                    # 获取最后消息
+                    # 获取最后一条消息用于判断特殊的“已过审”状态
                     last_msg = None
                     async for m in channel.history(limit=1): last_msg = m; break
                     if not last_msg: continue
@@ -342,7 +342,6 @@ class Tickets(commands.Cog):
 
                     # 1. 检查已过审在等待确认的 (3小时自动归档)
                     is_approved_waiting = False
-                    # 这里妈妈加了个判定，确保 bot 的消息里有那个特定的 Embed 标题才算
                     if last_msg.author.id == self.bot.user.id and last_msg.embeds:
                         embed_title = last_msg.embeds[0].title or ""
                         if "恭喜小宝加入社区" in embed_title:
@@ -350,41 +349,78 @@ class Tickets(commands.Cog):
 
                     if is_approved_waiting and time_diff > datetime.timedelta(hours=3):
                         await channel.send("⏳ **自动归档**\n检测到通过审核后超过 **3小时** 未点击确认。\n本大王已自动归档！")
-                        # 移动到归档区
                         await execute_archive(self.bot, None, channel, "已过审3小时无响应自动归档", is_timeout=False)
                         continue
 
-                    # 2. 常规超时 (12小时)
-                    # 重新计算最后有效活动 (排除 bot 的温馨提醒)
+                    # 2. 常规超时判断
                     last_active = channel.created_at
                     has_reminded = False
+                    is_locked = False  # 新增标志位：工单是否已锁定
+
+                    # 遍历最近20条消息，一次性检查 活跃时间、是否提醒过、是否已锁定
                     async for m in channel.history(limit=20):
+                        # 检查消息内容是否包含锁定关键词
+                        content = m.content or ""
+                        embed_title = (m.embeds[0].title or "") if m.embeds else ""
+                        embed_desc = (m.embeds[0].description or "") if m.embeds else ""
+
+                        # 如果在这几处发现了“已锁定”，就标记为锁定状态
+                        if "已锁定" in content or "已锁定" in embed_title or "已锁定" in embed_desc:
+                            is_locked = True
+
                         if m.author.bot:
-                            # 检查是否发过提醒
-                            content_check = "温馨提醒" in m.content
-                            embed_check = m.embeds and "温馨提醒" in (m.embeds[0].title or "")
-                            if content_check or embed_check:
+                            # 检查是否发过温馨提醒
+                            if "温馨提醒" in content or "温馨提醒" in embed_title:
                                 has_reminded = True
                         else:
-                            # 找到最后一条真人消息（或者非提醒类的 bot 消息）
-                            last_active = m.created_at
-                            break
+                            # 找到最后一条真人消息（或者非提醒类的 bot 消息）作为最后活跃时间
+                            if last_active == channel.created_at:
+                                last_active = m.created_at
 
+                    # A. 扫描历史消息
+                    last_active = channel.created_at
+                    found_active = False
+                    has_reminded = False
+                    is_locked = False
+
+                    async for m in channel.history(limit=20):
+                        # 检查内容文本
+                        raw_content = m.content or ""
+                        e_title = (m.embeds[0].title or "") if m.embeds else ""
+                        e_desc = (m.embeds[0].description or "") if m.embeds else ""
+                        full_text = f"{raw_content} {e_title} {e_desc}"
+
+                        # 1. 检测锁定状态
+                        if "已锁定" in full_text:
+                            is_locked = True
+
+                        # 2. 检测是否提醒过
+                        if m.author.bot and ("温馨提醒" in full_text):
+                            has_reminded = True
+
+                        # 3. 寻找最后活跃时间 (非机器人的提醒消息)
+                        if not found_active:
+                            is_bot_remind = m.author.bot and ("温馨提醒" in full_text)
+                            if not is_bot_remind:
+                                last_active = m.created_at
+                                found_active = True
+
+                    # 计算非活跃时长
                     diff_active = now - last_active
 
+                    # B. 执行判断
                     if diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
-                        # 超时归档
                         await execute_archive(self.bot, None, channel, f"超过{TIMEOUT_HOURS_ARCHIVE}小时无活动", is_timeout=True)
 
-                    elif diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND) and not has_reminded and not is_approved_waiting:
-                        # 发送提醒
-                        embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已沉睡超过 {TIMEOUT_HOURS_REMIND} 小时！\n超过 {TIMEOUT_HOURS_ARCHIVE} 小时会自动归档哦！", color=0xFFA500)
-                        uid = info.get("创建者ID")
-                        txt = f"<@{uid}>" if uid else ""
-                        await channel.send(txt, embed=embed)
+                    elif diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND):
+                        if not has_reminded and not is_approved_waiting and not is_locked:
+                            embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已沉睡超过 {TIMEOUT_HOURS_REMIND} 小时！\n超过 {TIMEOUT_HOURS_ARCHIVE} 小时会自动归档哦！", color=0xFFA500)
+                            txt = f"<@{creator_id}>" if creator_id else ""
+                            await channel.send(txt, embed=embed)
 
                 except Exception as e:
                     print(f"检查频道 {channel.name} 错误: {e}")
+
 
 
     # ======================================================================================
