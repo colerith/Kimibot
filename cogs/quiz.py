@@ -49,9 +49,15 @@ class QuizStartView(discord.ui.View):
         
         # 1. 检查是否已有身份组
         newbie_role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
-        if newbie_role in interaction.user.roles:
-            await interaction.response.send_message("你已经是新兵蛋子啦，不需要再答题咯！要去全区审核请前往审核频道~", ephemeral=True)
+        hatched_role = interaction.guild.get_role(IDS.get("HATCHED_ROLE_ID"))
+
+        has_newbie = newbie_role and newbie_role in interaction.user.roles
+        has_hatched = hatched_role and hatched_role in interaction.user.roles
+
+        if has_newbie or has_hatched:
+            await interaction.response.send_message("你已经是新兵蛋子或正式成员啦，不需要再答题咯！要去全区审核请前往审核频道~", ephemeral=True)
             return
+
 
         # 2. 检查是否在进行中
         if user_id in quiz_sessions:

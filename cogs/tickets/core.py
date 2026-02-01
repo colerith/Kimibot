@@ -325,7 +325,6 @@ class Tickets(commands.Cog):
             if not cat: continue
             for channel in cat.text_channels:
                 # 修改点：只检查名字里包含 "一审中"、"二审中"、"审核中" 或 "已过审" 的频道
-                # 妈妈把 "待接单" 去掉了，这样这一类的就不会被催了哦
                 valid_prefixes = ["一审中", "二审中", "审核中", "已过审"]
                 if not any(prefix in channel.name for prefix in valid_prefixes):
                     continue
@@ -502,7 +501,7 @@ class Tickets(commands.Cog):
         # 用户权限
         uid = info.get("创建者ID")
         user = ctx.guild.get_member(int(uid)) if uid else None
-        if user and state != "归档": # 归档不给看
+        if user and state != "归档": 
             overwrites[user] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         new_name = f"{state}-{info.get('工单ID')}-{info.get('创建者')}"
