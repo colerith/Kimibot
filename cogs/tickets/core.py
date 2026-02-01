@@ -321,7 +321,7 @@ class Tickets(commands.Cog):
         # 遍历一审和二审分类
         cats = [self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"]), self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])]
         # 获取归档分类
-        archive_cat = self.bot.get_channel(IDS["ARCHIVE_CATEGORY_ID"])
+        archive_cat = self.bot.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
 
         for cat in cats:
             if not cat: continue
