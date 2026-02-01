@@ -58,8 +58,8 @@ class ArchiveRequestView(discord.ui.View):
         await interaction.channel.send(msg)
 
         # 10秒后自动锁定
-        await interaction.channel.send("⏳ 10秒后自动锁定频道...")
-        await asyncio.sleep(10)
+        await interaction.channel.send("⏳ 30秒后自动锁定频道...")
+        await asyncio.sleep(30)
 
         # 移除用户权限
         info = get_ticket_info(interaction.channel)
