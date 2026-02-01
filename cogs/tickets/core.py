@@ -320,6 +320,8 @@ class Tickets(commands.Cog):
 
         # 遍历一审和二审分类
         cats = [self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"]), self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])]
+        # 获取归档分类
+        archive_cat = self.bot.get_channel(IDS["ARCHIVE_CATEGORY_ID"])
 
         for cat in cats:
             if not cat: continue
@@ -333,85 +335,103 @@ class Tickets(commands.Cog):
                     tid = info.get("工单ID")
                     creator_id = info.get("创建者ID")
 
-                    # 获取最后一条消息用于判断特殊的“已过审”状态
-                    last_msg = None
-                    async for m in channel.history(limit=1): last_msg = m; break
-                    if not last_msg: continue
+                    # 获取该频道的Member对象
+                    member = None
+                    if creator_id:
+                        member = channel.guild.get_member(int(creator_id))
 
-                    time_diff = now - last_msg.created_at
-
-                    # 1. 检查已过审在等待确认的 (3小时自动归档)
-                    is_approved_waiting = False
-                    if last_msg.author.id == self.bot.user.id and last_msg.embeds:
-                        embed_title = last_msg.embeds[0].title or ""
-                        if "恭喜小宝加入社区" in embed_title:
-                            is_approved_waiting = True
-
-                    if is_approved_waiting and time_diff > datetime.timedelta(hours=3):
-                        await channel.send("⏳ **自动归档**\n检测到通过审核后超过 **3小时** 未点击确认。\n本大王已自动归档！")
-                        await execute_archive(self.bot, None, channel, "已过审3小时无响应自动归档", is_timeout=False)
-                        continue
-
-                    # 2. 常规超时判断
-                    last_active = channel.created_at
-                    has_reminded = False
-                    is_locked = False  # 新增标志位：工单是否已锁定
-
-                    # 遍历最近20条消息，一次性检查 活跃时间、是否提醒过、是否已锁定
-                    async for m in channel.history(limit=20):
-                        # 检查消息内容是否包含锁定关键词
-                        content = m.content or ""
-                        embed_title = (m.embeds[0].title or "") if m.embeds else ""
-                        embed_desc = (m.embeds[0].description or "") if m.embeds else ""
-
-                        # 如果在这几处发现了“已锁定”，就标记为锁定状态
-                        if "已锁定" in content or "已锁定" in embed_title or "已锁定" in embed_desc:
-                            is_locked = True
-
-                        if m.author.bot:
-                            # 检查是否发过温馨提醒
-                            if "温馨提醒" in content or "温馨提醒" in embed_title:
-                                has_reminded = True
-                        else:
-                            # 找到最后一条真人消息（或者非提醒类的 bot 消息）作为最后活跃时间
-                            if last_active == channel.created_at:
-                                last_active = m.created_at
-
-                    # A. 扫描历史消息
+                    # 扫描历史消息 & 收集状态
                     last_active = channel.created_at
                     found_active = False
                     has_reminded = False
                     is_locked = False
+                    is_approved_waiting = False
+                    last_msg_time = None
 
+                    # 遍历历史消息
+                    i = 0
                     async for m in channel.history(limit=20):
-                        # 检查内容文本
+                        if i == 0: # 检查最新一条
+                            last_msg_time = m.created_at
+                            if m.author.id == self.bot.user.id and m.embeds:
+                                embed_title = m.embeds[0].title or ""
+                                if "恭喜小宝加入社区" in embed_title:
+                                    is_approved_waiting = True
+
                         raw_content = m.content or ""
                         e_title = (m.embeds[0].title or "") if m.embeds else ""
                         e_desc = (m.embeds[0].description or "") if m.embeds else ""
                         full_text = f"{raw_content} {e_title} {e_desc}"
 
-                        # 1. 检测锁定状态
                         if "已锁定" in full_text:
                             is_locked = True
-
-                        # 2. 检测是否提醒过
                         if m.author.bot and ("温馨提醒" in full_text):
                             has_reminded = True
 
-                        # 3. 寻找最后活跃时间 (非机器人的提醒消息)
                         if not found_active:
                             is_bot_remind = m.author.bot and ("温馨提醒" in full_text)
                             if not is_bot_remind:
                                 last_active = m.created_at
                                 found_active = True
+                        i += 1
 
-                    # 计算非活跃时长
+                    if not last_msg_time: continue
+
+                    diff_approved = now - last_msg_time
                     diff_active = now - last_active
 
-                    # B. 执行判断
+
+                    # --- 逻辑分支 ---
+
+                    # 1. 处理：已过审但在等待确认 (3小时处理)
+                    if is_approved_waiting and diff_approved > datetime.timedelta(hours=3):
+
+                        # a. 尝试发送 DM 私信通知 (新增功能)
+                        if member:
+                            try:
+                                dm_embed = discord.Embed(
+                                    title="✨ 工单自动归档通知",
+                                    description=(
+                                        f"亲爱的小宝，您在 **{channel.guild.name}** 的审核工单 **{channel.name}** "
+                                        f"已通过审核。\n\n"
+                                        f"由于超过 3 小时未确认，系统已自动将其归档保存。\n"
+                                        f"您现在的身份组应该已经更新啦，欢迎正式加入我们！🎉"
+                                    ),
+                                    color=0x4CAF50  # 柔和的绿色
+                                )
+                                dm_embed.set_footer(text=f"工单ID: {tid} | 操作时间: {now.strftime('%Y-%m-%d %H:%M')}")
+                                await member.send(embed=dm_embed)
+                            except discord.Forbidden:
+                                print(f"无法发送私信给用户 {member.display_name} (ID: {member.id}) - 可能已关闭私信")
+                            except Exception as e:
+                                print(f"发送私信时发生未知错误: {e}")
+
+                        # b. 频道内提示
+                        await channel.send("✅ **自动完成**\n检测到通过审核后超过 **3小时** 未操作，系统已默认处理并归档。")
+
+                        # c. 锁定权限
+                        if member:
+                            try:
+                                await channel.set_permissions(member, send_messages=False)
+                            except Exception as e:
+                                print(f"锁定权限失败 {channel.name}: {e}")
+
+                        # d. 移动到归档分类
+                        if archive_cat:
+                            try:
+                                await channel.edit(category=archive_cat, reason="已过审3小时无响应自动完成")
+                            except Exception as e:
+                                print(f"移动频道失败 {channel.name}: {e}")
+
+                        # 保持原名，不发归档报告
+                        continue
+
+
+                    # 2. 常规超时归档 (12小时)
                     if diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
                         await execute_archive(self.bot, None, channel, f"超过{TIMEOUT_HOURS_ARCHIVE}小时无活动", is_timeout=True)
 
+                    # 3. 温馨提醒 (6小时)
                     elif diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_REMIND):
                         if not has_reminded and not is_approved_waiting and not is_locked:
                             embed = discord.Embed(title="⏰ 温馨提醒", description=f"工单已沉睡超过 {TIMEOUT_HOURS_REMIND} 小时！\n超过 {TIMEOUT_HOURS_ARCHIVE} 小时会自动归档哦！", color=0xFFA500)
@@ -420,8 +440,6 @@ class Tickets(commands.Cog):
 
                 except Exception as e:
                     print(f"检查频道 {channel.name} 错误: {e}")
-
-
 
     # ======================================================================================
     # --- 命令组 (Slash Commands) ---
