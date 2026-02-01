@@ -42,7 +42,8 @@
     "approved": {
       "title": "🥳 恭喜小宝加入社区",
       "desc": "如果想来一起闲聊，社区有Q群可以来玩!\n**PS:**Q群群号禁搜索了所以搜索不到，请直接扫码进群\n### 对审核过程没有异议，同意并且阅读完全部东西后请点击下方按钮确认~",
-      "image": "https://i.postimg.cc/sxh3MQkh/2tytko.png"
+      "image": "https://i.postimg.cc/sxh3MQkh/2tytko.png",
+      "footer": "🔮 LO-FI加载中"
     },
     "dm_approved": {
       "title": "🎉 恭喜！审核通过啦！",
