@@ -15,7 +15,7 @@ from .utils import (
 )
 from .views import (
     TicketActionView, TimeoutOptionView, ArchiveRequestView,
-    NotifyReviewerView
+    NotifyReviewerView, SuspendAuditModal
 )
 
 class TicketPanelView(discord.ui.View):
@@ -531,7 +531,6 @@ class Tickets(commands.Cog):
     @ticket.command(name="中止新蛋审核", description="（管理员）弹出面板，设置定时或立即中止工单申请。")
     @is_reviewer_egg()
     async def suspend_audit(self, ctx: discord.ApplicationContext):
-        # 直接弹出 Modal，参数逻辑移到 Modal 内处理
         modal = SuspendAuditModal(self)
         await ctx.send_modal(modal)
 
