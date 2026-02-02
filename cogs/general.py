@@ -108,12 +108,18 @@ class AnnouncementModal(discord.ui.Modal):
 class DetailedWishModal(discord.ui.Modal):
     def __init__(self, wish_type: str):
         self.wish_type = wish_type
-        super().__init__(title=f"📝 许愿: {self.wish_type}")
+        # 动态调整标题，如果名字太长Discord可能会报错，控制一下长度
+        title_str = f"📝 许愿: {self.wish_type}"
+        if len(title_str) > 45: title_str = title_str[:42] + "..."
+
+        super().__init__(title=title_str)
+
+        # 这里的Label根据 wish_type 动态变化
         self.add_item(discord.ui.InputText(
-            label=f"详细描述你的愿望 ({self.wish_type})",
-            placeholder=f"请在这里详细描述你关于【{self.wish_type}】的愿望或建议嘛~！",
+            label=f"详细描述你的愿望/建议",
+            placeholder=f"请在这里详细描述你关于【{self.wish_type}】的具体想法、功能建议或愿望细节嘛~！",
             style=discord.InputTextStyle.paragraph,
-            min_length=10, max_length=2000, required=True
+            min_length=5, max_length=2000, required=True
         ))
         self.add_item(discord.ui.InputText(
             label="是否匿名？(填 是/否)",
@@ -124,7 +130,7 @@ class DetailedWishModal(discord.ui.Modal):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         wish_content = self.children[0].value
-        is_anonymous_raw = self.children[1].value.lower()
+        is_anonymous_raw = self.children[1].value.lower() if self.children[1].value else ""
         is_anonymous = not (is_anonymous_raw == '否' or is_anonymous_raw == 'n')
 
         try:
@@ -134,13 +140,25 @@ class DetailedWishModal(discord.ui.Modal):
             return
 
         wish_id = random.randint(100000, 999999)
-        thread = await interaction.channel.create_thread(name=f"💌-{self.wish_type}-{wish_id}", type=discord.ChannelType.private_thread, invitable=False)
+        # 创建帖子名称：去除空格和特殊字符，保持整洁
+        safe_type_name = self.wish_type.replace(" ", "")
+        thread = await interaction.channel.create_thread(
+            name=f"💌-{safe_type_name}-{wish_id}",
+            type=discord.ChannelType.private_thread,
+            invitable=False
+        )
 
         await thread.add_user(interaction.user)
         if owner:
             await thread.add_user(owner)
 
-        embed = discord.Embed(title=f"💌 收到了一个新愿望！({self.wish_type})", description=f"```{wish_content}```", color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
+        # 构建 Embed
+        embed = discord.Embed(
+            title=f"💌 收到了一个新愿望！",
+            description=f"**类型：** {self.wish_type}\n\n**内容：**\n```{wish_content}```",
+            color=STYLE["KIMI_YELLOW"],
+            timestamp=datetime.datetime.now()
+        )
         embed.add_field(name="处理状态", value="⏳ 待受理", inline=False)
 
         if is_anonymous:
@@ -149,74 +167,55 @@ class DetailedWishModal(discord.ui.Modal):
             embed.set_author(name=f"来自 {interaction.user.display_name} 的愿望", icon_url=interaction.user.display_avatar.url)
 
         await thread.send(embed=embed, view=WishActionView())
-        await interaction.followup.send(f"你的【{self.wish_type}】愿望已经悄悄地发送给服主惹！快去 {thread.mention} 里看看吧！", ephemeral=True)
+
+        # 反馈给用户
+        await interaction.followup.send(f"好惹！你关于【{self.wish_type}】的愿望已经悄悄发送给服主惹！\n快去 {thread.mention} 里看看吧！", ephemeral=True)
+
 
 class PresetFeatureView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=180)
 
-    async def create_preset_wish(self, interaction: discord.Interaction, feature_name: str):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            owner = await interaction.client.fetch_user(SERVER_OWNER_ID)
-        except discord.NotFound:
-            await interaction.followup.send("呜...找不到服主大人！愿望无法送达！", ephemeral=True)
-            return
+    # 这里不再直接发帖，而是弹出 Modal 让用户填详情
+    # 直接复用 DetailedWishModal 即可，非常方便~
 
-        wish_id = random.randint(100000, 999999)
-        thread_name = f"💌-预设功能-{feature_name}-{wish_id}"
-        thread = await interaction.channel.create_thread(name=thread_name, type=discord.ChannelType.private_thread, invitable=False)
-
-        await thread.add_user(interaction.user)
-        if owner: await thread.add_user(owner)
-        
-        wish_content = f"我希望社区能够实装预设新功能：**{feature_name}**！"
-
-        embed = discord.Embed(title=f"💌 收到了一个新愿望！(预设功能)", description=f"```{wish_content}```", color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
-        embed.add_field(name="处理状态", value="⏳ 待受理", inline=False)
-        embed.set_author(name=f"来自 {interaction.user.display_name} 的愿望", icon_url=interaction.user.display_avatar.url)
-
-        await thread.send(embed=embed, view=WishActionView())
-        await interaction.followup.send(f"你的【{feature_name}】愿望已经悄悄地发送给服主惹！快去 {thread.mention} 里看看吧！", ephemeral=True)
-        
-        for item in self.children:
-            item.disabled = True
-        await interaction.message.edit(view=self)
-        self.stop()
-
-    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="🌌 极光", style=discord.ButtonStyle.primary)
     async def wish_aurora(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await self.create_preset_wish(interaction, "极光")
+        # 弹出模态框，类型设定为“预设功能-极光”
+        modal = DetailedWishModal(wish_type="预设功能-极光")
+        await interaction.response.send_modal(modal)
 
-    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="🏛️ 象牙塔", style=discord.ButtonStyle.secondary)
     async def wish_ivory_tower(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await self.create_preset_wish(interaction, "象牙塔")
+        # 弹出模态框，类型设定为“预设功能-象牙塔”
+        modal = DetailedWishModal(wish_type="预设功能-象牙塔")
+        await interaction.response.send_modal(modal)
+
 
 class WishSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="预设新功能", description="许愿【极光】或【象牙塔】功能", emoji="💡", value="preset_feature"),
+            discord.SelectOption(label="预设新功能", description="想要【极光】还是【象牙塔】？", emoji="💡", value="preset_feature"),
             discord.SelectOption(label="角色卡", description="许愿一张新的角色卡", emoji="🎭", value="角色卡"),
             discord.SelectOption(label="社区美化", description="许愿新的图标、表情或美化素材", emoji="🎨", value="社区美化"),
             discord.SelectOption(label="社区建设", description="对社区发展提出建议", emoji="🏗️", value="社区建设"),
             discord.SelectOption(label="其他", description="许一个天马行空的愿望", emoji="💭", value="其他"),
         ]
-        # 必须保持 custom_id 以支持持久化
         super().__init__(
-            placeholder="👇 请选择你的愿望类型...", 
-            min_values=1, 
-            max_values=1, 
+            placeholder="👇 请选择你的愿望类型...",
+            min_values=1,
+            max_values=1,
             options=options,
-            custom_id="wish_panel_select_menu" 
+            custom_id="wish_panel_select_menu"
         )
 
     async def callback(self, interaction: discord.Interaction):
         choice = self.values[0]
         if choice == "preset_feature":
-            await interaction.response.send_message("请选择你想要的预设功能：", view=PresetFeatureView(), ephemeral=True)
+            # 如果选了预设功能，先弹出 View 让你选是哪一个
+            await interaction.response.send_message("💡 请先选择你想要许愿的预设功能：", view=PresetFeatureView(), ephemeral=True)
         else:
+            # 其他选项直接弹出填写框
             modal = DetailedWishModal(wish_type=choice)
             await interaction.response.send_modal(modal)
 
@@ -251,20 +250,18 @@ class WishActionView(discord.ui.View):
             await asyncio.sleep(10)
             await interaction.channel.edit(archived=True, locked=True)
 
-    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="✅ 受理", style=discord.ButtonStyle.success, custom_id="wish_accept")
     async def accept(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.update_wish_status(interaction, "✅ 已受理")
 
-    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="🤔 暂不考虑", style=discord.ButtonStyle.secondary, custom_id="wish_reject")
     async def reject(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.update_wish_status(interaction, "🤔 暂不考虑", close_thread=True)
 
-    # 修复：参数顺序恢复为 (self, button, interaction)
     @discord.ui.button(label="🎉 已实现", style=discord.ButtonStyle.primary, custom_id="wish_done")
     async def done(self, button: discord.ui.Button, interaction: discord.Interaction):
         await self.update_wish_status(interaction, "🎉 已实现！", close_thread=True)
+
 
 class PollView(discord.ui.View):
     def __init__(self, question: str, options: list, end_time: datetime.datetime, creator_id: int):
