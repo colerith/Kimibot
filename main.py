@@ -7,14 +7,12 @@ load_dotenv()
 # 从环境变量读取 Bot Token
 BOT_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
 
-# 安全起见，不要在日志里直接打印完整的 Token，只显示前几位
 if BOT_TOKEN:
     print(f"成功读取 Token: {BOT_TOKEN[:5]}...******")
 else:
     print("❌ 未检测到 Token！请检查环境变量或 .env 文件")
 
 # --- 机器人本体创建 ---
-# 确保所有需要的 Intents 都已开启
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -38,11 +36,15 @@ async def on_ready():
     print(f"唷呐！我是 {bot.user.name}，最可爱的美少年来捉！")
     print(f"机器人ID: {bot.user.id}")
     print("----------------------------------------")
-    
-    # 注意：
-    # 这里的 Tickets 和 General 的面板更新逻辑已经移除。
-    # 因为在它们各自的 Cog 文件 (tickets.py, general.py) 的 on_ready 中已经包含了自动启动逻辑。
-    # 这样可以避免机器人启动时重复发送两次面板！
+
+    print("⏳ 正在强制同步所有斜杠命令，请稍候...")
+    try:
+
+        await bot.sync_commands()
+        print("✅ 斜杠命令同步完成！所有的指令应该都生效啦！")
+    except Exception as e:
+        print(f"⚠️ 同步命令时遇到了一点小波折: {e}")
+
 
     print("========================================")
     print("本大王已经准备好萌翻全场惹！")
