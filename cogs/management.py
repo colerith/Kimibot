@@ -155,6 +155,5 @@ class Management(commands.Cog):
         except Exception as e:
             await ctx.respond(f"呜...出错了惹: {e}", ephemeral=True)
 
-# 这是一个固定的函数，用于让你的主文件(main.py)能够加载这个Cog
 def setup(bot):
     bot.add_cog(Management(bot))

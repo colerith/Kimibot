@@ -813,6 +813,61 @@ class Tickets(commands.Cog):
         if not get_ticket_info(ctx.channel).get("工单ID"): return await ctx.respond("无效频道", ephemeral=True)
         await ctx.respond("确认归档？", view=TimeoutOptionView(self.bot, ctx.channel), ephemeral=True)
 
+    # --- 工单计划管理组 ---
+    schedule_group = discord.SlashCommandGroup("工单计划", "管理工单/审核系统的维护计划", checks=[is_reviewer_egg()])
+
+    @schedule_group.command(name="查看", description="查看当前工单审核的自动暂停计划")
+    async def view_audit_schedule(self, ctx: discord.ApplicationContext):
+        await ctx.defer(ephemeral=True)
+
+        if not self.audit_suspended:
+            desc = "🟢 **当前工单系统正常开放**\n没有检测到预设的暂停计划。"
+            color = 0x00FF00
+        else:
+            now = datetime.datetime.now(QUOTA["TIMEZONE"])
+            desc = "🔴 **检测到维护/暂停计划**\n"
+
+            # 显示预设的原因
+            reason = self.audit_suspend_reason or "未填写原因"
+            desc += f"原因: {reason}\n"
+
+            start_str = self.suspend_start_dt.strftime('%m-%d %H:%M') if self.suspend_start_dt else "立即生效"
+            end_str = self.suspend_end_dt.strftime('%m-%d %H:%M') if self.suspend_end_dt else "手动恢复"
+
+            desc += f"📅 **计划时间表**:\nStart: `{start_str}`\nEnd: `{end_str}`\n\n"
+
+            # 判断当前这一秒是否真的暂停了
+            is_active_now = False
+            if not self.suspend_start_dt:
+                is_active_now = True
+            elif now >= self.suspend_start_dt:
+                if not self.suspend_end_dt or now < self.suspend_end_dt:
+                    is_active_now = True
+
+            status_text = "⛔ **服务已暂停** (当前生效中)" if is_active_now else "⏳ **计划等待执行中** (尚未开始)"
+            desc += f"⚡ **当前状态**: {status_text}"
+            color = 0xFF0000
+
+        await ctx.followup.send(embed=discord.Embed(title="📅 工单计划管理器", description=desc, color=color), ephemeral=True)
+
+    @schedule_group.command(name="清除", description="移除所有定时计划并立即恢复工单系统")
+    async def clear_audit_schedule(self, ctx: discord.ApplicationContext):
+        await ctx.defer(ephemeral=True)
+
+        # 重置所有状态
+        self.audit_suspended = False
+        self.suspend_start_dt = None
+        self.suspend_end_dt = None
+        self.audit_suspend_reason = None
+
+        # 立即更新面板显示
+        await self.update_panel_message()
+
+        await ctx.followup.send(
+            embed=discord.Embed(description="✅ **已清除所有计划任务！**\n工单系统已强制恢复为开放状态，面板已刷新。", color=0x00FF00),
+            ephemeral=True
+        )
+
     # --- 名额管理组 ---
     quota_mg = discord.SlashCommandGroup("名额管理", "（仅限审核小蛋）手动调整工单名额~", checks=[is_reviewer_egg()])
 
