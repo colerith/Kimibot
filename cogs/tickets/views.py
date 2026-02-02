@@ -1,7 +1,7 @@
 import discord
 import asyncio
 import datetime
-from config import IDS, STYLE
+from config import IDS, STYLE, QUOTA
 from .utils import (
     STRINGS, SPECIFIC_REVIEWER_ID, get_ticket_info,
     execute_archive, load_quota_data, save_quota_data
