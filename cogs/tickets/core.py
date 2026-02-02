@@ -17,8 +17,6 @@ from .views import (
     TicketActionView, TimeoutOptionView, ArchiveRequestView,
     NotifyReviewerView
 )
-# 注意：为了解决循环引用，TicketPanelView 有时会放在这里定义，或者通过传递 Cog 实例解决。
-# 这里我们在本文件定义它，以确保它能直接调用 Cog 的方法。
 
 class TicketPanelView(discord.ui.View):
     def __init__(self, cog):
@@ -35,18 +33,14 @@ class Tickets(commands.Cog):
         self.audit_suspended = False
         self.audit_suspend_reason = None
         self.suspend_end_time = None
-        self.audit_suspended_until = None # 兼容你旧代码里的变量名
+        self.audit_suspended_until = None
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # 注册所有 Persistent Views
         self.bot.add_view(TicketActionView())
         self.bot.add_view(TicketPanelView(self))
         self.bot.add_view(ArchiveRequestView())
         self.bot.add_view(NotifyReviewerView(SPECIFIC_REVIEWER_ID))
-        # 你的旧代码里可能还有 TimeoutOptionView 需要持久化吗？通常这种是临时的，但如果它是发在消息里的，重启后失效也没关系。
-        # 如果需要持久化，也可以添加
-        # self.bot.add_view(TimeoutOptionView(self.bot, None)) # 这需要改写 View 逻辑以支持无参数初始化
 
         print("Tickets Cog Loaded & Views Registered.")
 
@@ -64,17 +58,14 @@ class Tickets(commands.Cog):
         if self.audit_suspended:
             if self.audit_suspended_until:
                 now = datetime.datetime.now()
-                # 检查是否已过暂停时间
                 if self.audit_suspended_until != "infinite" and now >= self.audit_suspended_until:
                     self.audit_suspended = False
                     self.audit_suspended_until = None
-                    # 恢复了，继续往下走
                 else:
                     reason = self.audit_suspend_reason or "管理员暂停了审核功能"
                     until_str = "恢复时间待定" if self.audit_suspended_until == "infinite" else f"预计 {self.audit_suspended_until.strftime('%H:%M')} 恢复"
                     return await interaction.response.send_message(f"🚫 **审核通道已暂时关闭**\n原因：{reason}\n{until_str}", ephemeral=True)
             else:
-                 # 简单的暂停
                  return await interaction.response.send_message(f"🚫 审核暂停中: {self.audit_suspend_reason}", ephemeral=True)
 
         # 2. 检查时间 (08:00 - 23:00)
@@ -93,18 +84,27 @@ class Tickets(commands.Cog):
 
         # 4. 检查重复 & 额度
         c1 = interaction.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
+        # 🟢 新增：获取备用分类
+        c1_extra = interaction.guild.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"))
         c2 = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
 
-        # 检查分类是否存在
         if not c1 or not isinstance(c1, discord.CategoryChannel):
              return await interaction.response.send_message("呜...找不到【一审】的频道分类！请服主检查配置！", ephemeral=True)
 
-        # 检查分类容量
+        # 🟢 逻辑修改：智能选择分类 (主 -> 备用)
+        target_category = c1
         if len(c1.channels) >= 50:
-             return await interaction.response.send_message("🚫 **无法创建工单**\n呜...当前的审核队列（一审分类）已经满了（50/50）！", ephemeral=True)
+            if c1_extra and isinstance(c1_extra, discord.CategoryChannel) and len(c1_extra.channels) < 50:
+                target_category = c1_extra
+            else:
+                # 主分类满了，且 (备用不存在 或 备用也满了)
+                return await interaction.response.send_message("🚫 **无法创建工单**\n呜...当前的审核队列太火爆了，所有窗口都满了（50/50）！请稍后再试或联系管理员清理。", ephemeral=True)
 
-        # 检查是否已有工单
-        for c in [c1, c2]:
+        # 🟢 逻辑修改：检查是否已有工单 (需扫描 c1, c1_extra, c2)
+        check_cats = [c1, c2]
+        if c1_extra: check_cats.append(c1_extra)
+
+        for c in check_cats:
             if not c: continue
             for ch in c.text_channels:
                 if str(interaction.user.id) in (ch.topic or ""):
@@ -117,46 +117,35 @@ class Tickets(commands.Cog):
         # 5. 执行创建
         await interaction.response.defer(ephemeral=True)
 
-        # 先扣额度
         q_data["daily_quota_left"] -= 1
         save_quota_data(q_data)
         await self.update_panel_message()
 
         tid = random.randint(100000, 999999)
-        # 🟢 名字是“审核中”
         c_name = f"审核中-{tid}-{interaction.user.name}"
 
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
-        # 添加管理员权限
         staff = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
         if staff: overwrites[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
         super_egg = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
         if super_egg: overwrites[super_egg] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         try:
+            # 🟢 使用选定的 target_category 创建频道
             ch = await interaction.guild.create_text_channel(
-                name=c_name, category=c1, overwrites=overwrites,
+                name=c_name, category=target_category, overwrites=overwrites,
                 topic=f"创建者ID: {interaction.user.id} | 创建者: {interaction.user.name} | 工单ID: {tid}"
             )
 
-            # 🟢 【修改重点】这里是修复 Title 无法显示 ID 的地方
             e_create = discord.Embed.from_dict(STRINGS["embeds"]["ticket_created"])
-
-            # 1. 替换标题里的占位符
-            if e_create.title:
-                e_create.title = e_create.title.replace("{ticket_id}", str(tid))
-
-            # 2. 替换描述里的占位符（如果有的话）
-            if e_create.description:
-                e_create.description = e_create.description.replace("{ticket_id}", str(tid))
-
+            if e_create.title: e_create.title = e_create.title.replace("{ticket_id}", str(tid))
+            if e_create.description: e_create.description = e_create.description.replace("{ticket_id}", str(tid))
             e_create.color = STYLE["KIMI_YELLOW"]
             await ch.send(f"{interaction.user.mention} <@&{SPECIFIC_REVIEWER_ID}>", embed=e_create, view=TicketActionView())
 
-            # 发送要求
             req_data = STRINGS["embeds"]["requirements"]
             e_req = discord.Embed(title=req_data["title"], description=req_data["desc"], color=STYLE["KIMI_YELLOW"])
             for f in req_data["fields"]: e_req.add_field(name=f["name"], value=f["value"], inline=False)
@@ -164,11 +153,9 @@ class Tickets(commands.Cog):
             e_req.set_footer(text=req_data["footer"])
             await ch.send(f"你好呀 {interaction.user.mention}，请按下面的要求提交材料哦~", embed=e_req)
 
-            # 发送唤起按钮
             rem_text = STRINGS["messages"]["reminder_text"].format(ticket_id=tid, user_id=interaction.user.id)
             await ch.send(embed=discord.Embed(description=rem_text, color=STYLE["KIMI_YELLOW"]), view=NotifyReviewerView(SPECIFIC_REVIEWER_ID))
 
-            # 私信
             try:
                 msg = STRINGS["messages"]["dm_create_success"].format(guild_name=interaction.guild.name, channel_mention=ch.mention)
                 await interaction.user.send(msg)
@@ -179,7 +166,6 @@ class Tickets(commands.Cog):
             await interaction.followup.send(f"好惹！你的审核频道 {ch.mention} 已经创建好惹！审核要求已发送到频道内~ {msg_status}", ephemeral=True)
 
         except Exception as e:
-            # 失败回滚
             print(f"创建工单失败: {e}")
             q_data["daily_quota_left"] += 1
             save_quota_data(q_data)
@@ -319,7 +305,10 @@ class Tickets(commands.Cog):
         now = discord.utils.utcnow()
 
         # 遍历一审和二审分类
-        cats = [self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"]), self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])]
+        cats = [
+            self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"]), 
+            self.bot.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID")),
+            self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])]
         # 获取归档分类
         archive_cat = self.bot.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
 
@@ -477,7 +466,7 @@ class Tickets(commands.Cog):
                     if any(t in embed_title for t in target_titles):
                         await message.edit(view=TicketActionView())
                         fixed = True
-                        break  # 修复最新这一个就够了
+                        break
         except Exception as e:
             print(f"修复按钮时出错: {e}")
 
@@ -485,7 +474,6 @@ class Tickets(commands.Cog):
         if fixed:
             await ctx.followup.send("✅ 已成功修复当前频道的旧操作面板！按钮应该能用啦！", ephemeral=True)
         else:
-            # 如果实在找不到旧面板，作为兜底方案才发一个新的
             embed = discord.Embed(
                 title="🔧 管理员操作面板 (补发)",
                 description="呜...本蛋没找到旧的面板消息，所以给你补发了一个新的！",
@@ -538,24 +526,32 @@ class Tickets(commands.Cog):
         info = get_ticket_info(channel)
         if not info.get("工单ID"): return await ctx.followup.send("无效工单頻道", ephemeral=True)
 
-        # 确定目标分类
-        tid_prefix = state
-        target_id = IDS["FIRST_REVIEW_CHANNEL_ID"]
-        if state in ["二审中", "已过审"]: target_id = IDS["SECOND_REVIEW_CHANNEL_ID"]
-        elif state == "归档": target_id = IDS["ARCHIVE_CHANNEL_ID"]
+        # 🟢 逻辑完善：根据状态确定目标位置，如果是恢复到一审，需要考虑容量
+        if state == "一审中":
+             c1 = ctx.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
+             c1_extra = ctx.guild.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"))
 
-        target_cat = ctx.guild.get_channel(target_id)
-        if not target_cat: return await ctx.followup.send("找不到目标分类配置", ephemeral=True)
+             target_cat = c1
+             # 如果主分类满了，且有备用分类，则放到备用
+             if len(c1.channels) >= 50:
+                 if c1_extra and len(c1_extra.channels) < 50:
+                     target_cat = c1_extra
+        elif state in ["二审中", "已过审"]:
+            target_cat = ctx.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
+        elif state == "归档":
+            target_cat = ctx.guild.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
+        else:
+            target_cat = None
 
-        # 确定权限
+        if not target_cat: return await ctx.followup.send("找不到目标分类配置或分类已满", ephemeral=True)
+
         overwrites = {ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False)}
         spec = ctx.guild.get_member(SPECIFIC_REVIEWER_ID)
         if spec: overwrites[spec] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        # 用户权限
         uid = info.get("创建者ID")
         user = ctx.guild.get_member(int(uid)) if uid else None
-        if user and state != "归档": 
+        if user and state != "归档":
             overwrites[user] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         new_name = f"{state}-{info.get('工单ID')}-{info.get('创建者')}"
@@ -563,11 +559,9 @@ class Tickets(commands.Cog):
 
         embed = discord.Embed(title="🔄 工单状态已恢复", description=f"恢复为：**{state}**\n原因: {reason}", color=STYLE["KIMI_YELLOW"])
         await channel.send(embed=embed)
-
         if user:
             try: await user.send(f"你的工单 `{info.get('工单ID')}` 状态已变更为: {state}。")
             except: pass
-
         await ctx.followup.send("恢复完成！", ephemeral=True)
 
     @ticket.command(name="超时归档", description="（审核小蛋用）手动标记超时。")
@@ -581,7 +575,6 @@ class Tickets(commands.Cog):
     @ticket.command(name="删除并释放名额", description="（审核小蛋用）删除工单并返还名额。")
     @is_reviewer_egg()
     async def delete_and_refund(self, ctx: discord.ApplicationContext):
-        # 简单做: 直接弹确认
         await ctx.defer(ephemeral=True)
         channel = ctx.channel
         if not get_ticket_info(channel).get("工单ID"): return await ctx.followup.send("无效频道", ephemeral=True)
@@ -592,7 +585,6 @@ class Tickets(commands.Cog):
         await self.update_panel_message()
 
         await channel.delete(reason=f"管理员 {ctx.author.name} 删除并返还名额")
-        # 由于频道删了，followup可能会报错，忽略即可或者在日志频道发
 
     @ticket.command(name="发送过审祝贺", description="手动发送过审消息")
     @is_reviewer_egg()
@@ -749,48 +741,37 @@ class Tickets(commands.Cog):
     @ticket.command(name="批量更名", description="（管理用）一键将【一审中】前缀修正为【审核中】")
     @is_reviewer_egg()
     async def bulk_rename_tickets(self, ctx: discord.ApplicationContext):
-        # 因为改名操作比较慢，我们要先告诉 Discord 稍微等一下
         await ctx.defer(ephemeral=True)
 
-        # 获取一审分类（如果是二审区也要改，可以把这里换成 SECOND_REVIEW_CHANNEL_ID）
-        target_category = self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
+        # 🟢 逻辑修改：同时扫描主分类和备用分类
+        categories = [
+            self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"]),
+            self.bot.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"))
+        ]
 
-        if not target_category:
-            await ctx.followup.send("呜...找不到配置的【一审分类】！请检查 ID 配置。", ephemeral=True); return
-
-        await ctx.followup.send(f"收到！正在扫描 “{target_category.name}” 中需要更名的频道...", ephemeral=True)
-
-        # 筛选出名字里包含 "一审中" 的频道
-        channels_to_rename = [ch for ch in target_category.text_channels if "一审中" in ch.name]
+        channels_to_rename = []
+        for cat in categories:
+            if not cat: continue
+            channels_to_rename.extend([ch for ch in cat.text_channels if "一审中" in ch.name])
 
         if not channels_to_rename:
-            await ctx.followup.send("在这个分类下没有发现带“一审中”前缀的频道哦~", ephemeral=True); return
+            await ctx.followup.send("没有发现需要更名的频道哦~", ephemeral=True); return
 
+        progress_msg = await ctx.followup.send(f"开始处理... 预计需要 {len(channels_to_rename) * 2} 秒", ephemeral=True)
         success_count = 0
 
-        # 发送一个初始进度提示
-        progress_msg = await ctx.followup.send(f"开始处理... 预计需要 {len(channels_to_rename) * 2} 秒完成", ephemeral=True)
-
-        for index, channel in enumerate(channels_to_rename):
+        for channel in channels_to_rename:
             try:
-                # 生成新名字：把 "一审中" 替换为 "审核中"
                 old_name = channel.name
                 new_name = old_name.replace("一审中", "审核中")
-
                 if old_name != new_name:
                     await channel.edit(name=new_name)
                     success_count += 1
-                    # 打印一下日志方便后台看
-                    print(f"[批量更名] {old_name} -> {new_name}")
-
-                    # 这一点非常重要：Discord 对改名有限速，如果不休息会被临时封禁接口
-                    # 妈妈为了你的安全，设置了1.5秒的间隔
                     await asyncio.sleep(1.5)
-
             except Exception as e:
-                print(f"更名频道 {channel.name} 时出错: {e}")
+                print(f"更名出错: {e}")
 
-        await progress_msg.edit(content=f"✅ 处理完成！\n共扫描: {len(channels_to_rename)} 个\n成功更名: {success_count} 个")
+        await progress_msg.edit(content=f"✅ 处理完成！\n扫描: {len(channels_to_rename)} 个\n更名: {success_count} 个")
 
     # 上下文菜单：右键消息超时归档
     @discord.message_command(name="超时归档此工单")
