@@ -1,5 +1,6 @@
 import discord
 import asyncio
+import datetime
 from config import IDS, STYLE
 from .utils import (
     STRINGS, SPECIFIC_REVIEWER_ID, get_ticket_info,
@@ -125,3 +126,78 @@ class TicketActionView(discord.ui.View):
     @discord.ui.button(label="📦 工单归档", style=discord.ButtonStyle.secondary, custom_id="ticket_archive")
     async def archive(self, button, interaction):
         await interaction.response.send_modal(TimeoutNoteModal(interaction.client, interaction.channel))
+
+class SuspendAuditModal(discord.ui.Modal):
+    def __init__(self, cog):
+        super().__init__(title="🔧 设置审核中止计划")
+        self.cog = cog
+
+        self.add_item(discord.ui.InputText(
+            label="开始时间 (YYYY-MM-DD HH:MM 或 now)",
+            placeholder="例如: 2024-05-20 12:00 或输入 now 立即开始",
+            required=True
+        ))
+
+        self.add_item(discord.ui.InputText(
+            label="结束时间 (留空代表无限期)",
+            placeholder="例如: 2024-05-21 12:00",
+            required=False
+        ))
+
+        self.add_item(discord.ui.InputText(
+            label="中止原因",
+            placeholder="展示给用户的理由，例如：系统维护中...",
+            style=discord.InputTextStyle.paragraph,
+            required=False,
+            value="管理员正在进行系统维护" # 默认值
+        ))
+
+    async def callback(self, interaction: discord.Interaction):
+        start_str = self.children[0].value.strip()
+        end_str = self.children[1].value.strip()
+        reason = self.children[2].value.strip()
+
+        # 解析时间
+        now = datetime.datetime.now(QUOTA["TIMEZONE"])
+        start_dt = None
+        end_dt = None
+
+        try:
+            # 解析开始时间
+            if start_str.lower() == "now":
+                start_dt = now
+            else:
+                # 尝试解析 'YYYY-MM-DD HH:MM'
+                # 假设输入的时间是配置文件里设定的时区
+                dt_naive = datetime.datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+                start_dt = dt_naive.replace(tzinfo=QUOTA["TIMEZONE"])
+
+            # 解析结束时间
+            if end_str:
+                dt_naive = datetime.datetime.strptime(end_str, "%Y-%m-%d %H:%M")
+                end_dt = dt_naive.replace(tzinfo=QUOTA["TIMEZONE"])
+
+                if end_dt <= start_dt:
+                    return await interaction.response.send_message("❌ **结束时间必须晚于开始时间！**", ephemeral=True)
+
+        except ValueError:
+            return await interaction.response.send_message("❌ **时间格式错误！**\n请使用 `YYYY-MM-DD HH:MM` 格式 (例如 2024-05-20 12:00) 或 `now`。", ephemeral=True)
+
+        # 保存状态到 Cog
+        self.cog.suspend_start_dt = start_dt
+        self.cog.suspend_end_dt = end_dt
+        self.cog.audit_suspend_reason = reason
+        # 强制开启标记，具体的逻辑判断交给 create_ticket_logic
+        self.cog.audit_suspended = True
+
+        # 构建反馈消息
+        msg = f"✅ **已设置审核中止计划**\n"
+        msg += f"📅 **开始**: {start_dt.strftime('%Y-%m-%d %H:%M')}\n"
+        if end_dt:
+            msg += f"📅 **结束**: {end_dt.strftime('%Y-%m-%d %H:%M')}\n"
+        else:
+            msg += f"📅 **结束**: 无限期（需手动恢复）\n"
+        msg += f"📝 **原因**: {reason}"
+
+        await self.cog.update_panel_message()
+        await interaction.response.send_message(msg, ephemeral=True)

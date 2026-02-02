@@ -32,8 +32,8 @@ class Tickets(commands.Cog):
         self.bot = bot
         self.audit_suspended = False
         self.audit_suspend_reason = None
-        self.suspend_end_time = None
-        self.audit_suspended_until = None
+        self.suspend_start_dt = None
+        self.suspend_end_dt = None
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -54,19 +54,41 @@ class Tickets(commands.Cog):
     # ======================================================================================
 
     async def create_ticket_logic(self, interaction):
-        # 1. 检查暂停状态
+        # 1. 检查暂停状态 (升级版逻辑)
         if self.audit_suspended:
-            if self.audit_suspended_until:
-                now = datetime.datetime.now()
-                if self.audit_suspended_until != "infinite" and now >= self.audit_suspended_until:
-                    self.audit_suspended = False
-                    self.audit_suspended_until = None
-                else:
-                    reason = self.audit_suspend_reason or "管理员暂停了审核功能"
-                    until_str = "恢复时间待定" if self.audit_suspended_until == "infinite" else f"预计 {self.audit_suspended_until.strftime('%H:%M')} 恢复"
-                    return await interaction.response.send_message(f"🚫 **审核通道已暂时关闭**\n原因：{reason}\n{until_str}", ephemeral=True)
+            now = datetime.datetime.now(QUOTA["TIMEZONE"])
+            is_active_suspension = False
+
+            if not self.suspend_start_dt:
+                is_active_suspension = True
             else:
-                 return await interaction.response.send_message(f"🚫 审核暂停中: {self.audit_suspend_reason}", ephemeral=True)
+                if self.suspend_start_dt <= now:
+                    if self.suspend_end_dt:
+                        if now < self.suspend_end_dt:
+                            is_active_suspension = True # 在区间内
+                        else:
+                            is_active_suspension = False
+                    else:
+                        is_active_suspension = True
+                else:
+                    is_active_suspension = False
+
+            if is_active_suspension:
+                reason = self.audit_suspend_reason or "管理员暂停了审核功能"
+
+                # 计算剩余时间提示
+                until_str = "恢复时间待定"
+                if self.suspend_end_dt:
+                     # 简单的倒计时格式化
+                    diff = self.suspend_end_dt - now
+                    hours, remainder = divmod(int(diff.total_seconds()), 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    if hours > 24:
+                        until_str = f"预计 {self.suspend_end_dt.strftime('%m-%d %H:%M')} 恢复"
+                    else:
+                        until_str = f"预计 {hours}小时{minutes}分 后恢复"
+
+                return await interaction.response.send_message(f"🚫 **审核通道已暂时关闭**\n原因：{reason}\n{until_str}", ephemeral=True)
 
         # 2. 检查时间 (08:00 - 23:00)
         now = datetime.datetime.now(QUOTA["TIMEZONE"])
@@ -84,23 +106,19 @@ class Tickets(commands.Cog):
 
         # 4. 检查重复 & 额度
         c1 = interaction.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
-        # 🟢 新增：获取备用分类
         c1_extra = interaction.guild.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"))
         c2 = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
 
         if not c1 or not isinstance(c1, discord.CategoryChannel):
              return await interaction.response.send_message("呜...找不到【一审】的频道分类！请服主检查配置！", ephemeral=True)
 
-        # 🟢 逻辑修改：智能选择分类 (主 -> 备用)
         target_category = c1
         if len(c1.channels) >= 50:
             if c1_extra and isinstance(c1_extra, discord.CategoryChannel) and len(c1_extra.channels) < 50:
                 target_category = c1_extra
             else:
-                # 主分类满了，且 (备用不存在 或 备用也满了)
                 return await interaction.response.send_message("🚫 **无法创建工单**\n呜...当前的审核队列太火爆了，所有窗口都满了（50/50）！请稍后再试或联系管理员清理。", ephemeral=True)
 
-        # 🟢 逻辑修改：检查是否已有工单 (需扫描 c1, c1_extra, c2)
         check_cats = [c1, c2]
         if c1_extra: check_cats.append(c1_extra)
 
@@ -134,7 +152,6 @@ class Tickets(commands.Cog):
         if super_egg: overwrites[super_egg] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         try:
-            # 🟢 使用选定的 target_category 创建频道
             ch = await interaction.guild.create_text_channel(
                 name=c_name, category=target_category, overwrites=overwrites,
                 topic=f"创建者ID: {interaction.user.id} | 创建者: {interaction.user.name} | 工单ID: {tid}"
@@ -249,10 +266,38 @@ class Tickets(commands.Cog):
         desc = p_data["description_head"] + "\n" + p_data["req_newbie"] + "\n"
         desc += f"**-` 审核开放时间: 每日 08:00 - 23:00 `**\n**-` 今日剩余名额: {d['daily_quota_left']}/{QUOTA['DAILY_TICKET_LIMIT']} `**"
 
-        # 状态判断
+        is_active_suspension = False
+
         if self.audit_suspended:
+            # 只有当管理员下达了暂停指令(audit_suspended=True)时，才进行计算
+
+            if not self.suspend_start_dt:
+                # 情况A: 管理员没设时间（或者是旧命令），那是立即生效
+                is_active_suspension = True
+
+            else:
+                # 情况B: 管理员设了定时计划
+
+                # 1. 先看开始时间到了没？
+                if now >= self.suspend_start_dt:
+                    # 2. 如果开始了，再看结束时间（如果有的话）到了没？
+                    if self.suspend_end_dt:
+                        if now < self.suspend_end_dt:
+                            # 还没到结束时间 -> 正在暂停中
+                            is_active_suspension = True
+                        else:
+                            # 已经过了结束时间 -> 实际上已经恢复了（虽然变量可能还没重置）
+                            is_active_suspension = False
+                    else:
+                        # 没设结束时间（无限期） -> 正在暂停中
+                        is_active_suspension = True
+                else:
+                    # 还没到开始时间 -> 面板还是正常的
+                    is_active_suspension = False
+
+        if is_active_suspension:
             label = p_data["btn_suspended"]
-            disabled = False # 允许点击看原因
+            disabled = False
         elif d["daily_quota_left"] <= 0:
             label = p_data["btn_full"]
             disabled = True
@@ -483,38 +528,27 @@ class Tickets(commands.Cog):
             await ctx.followup.send("⚠️ 未找到可修复的旧消息，已为你补发新的面板。", ephemeral=True)
 
 
-    @ticket.command(name="中止新蛋审核", description="（管理员）设置中止工单申请。")
+    @ticket.command(name="中止新蛋审核", description="（管理员）弹出面板，设置定时或立即中止工单申请。")
     @is_reviewer_egg()
-    async def suspend_audit(self, ctx: discord.ApplicationContext,
-                            duration: discord.Option(str, "中止时长 (例如 1h, 30m, 留空或inf为无限期)", required=False) = None,
-                            reason: discord.Option(str, "中止原因", default="管理员正在进行系统维护") = None):
+    async def suspend_audit(self, ctx: discord.ApplicationContext):
+        # 直接弹出 Modal，参数逻辑移到 Modal 内处理
+        modal = SuspendAuditModal(self)
+        await ctx.send_modal(modal)
+
+    @ticket.command(name="恢复新蛋审核", description="（管理员）手动立即恢复审核功能。")
+    @is_reviewer_egg()
+    async def resume_audit(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
-        self.audit_suspended = True
-        self.audit_suspend_reason = reason
-        self.audit_suspended_until = "infinite" # 默认
 
-        msg = f"✅ 已中止审核功能。\n原因：{reason}\n"
-
-        # 简单的时长解析逻辑
-        if duration and duration.lower() != "inf":
-            seconds = 0
-            if duration.endswith('h'): seconds = int(duration[:-1]) * 3600
-            elif duration.endswith('m'): seconds = int(duration[:-1]) * 60
-
-            if seconds > 0:
-                self.audit_suspended_until = datetime.datetime.now() + datetime.timedelta(seconds=seconds)
-                msg += f"预计恢复时间：{duration} 后"
-                # 自动恢复Task
-                self.bot.loop.create_task(self.auto_resume_audit(seconds))
-
-        await self.update_panel_message()
-        await ctx.followup.send(msg, ephemeral=True)
-
-    async def auto_resume_audit(self, seconds):
-        await asyncio.sleep(seconds)
+        # 清除所有暂停状态
         self.audit_suspended = False
-        self.audit_suspended_until = None
+        self.suspend_start_dt = None
+        self.suspend_end_dt = None
+        self.audit_suspend_reason = None
+
         await self.update_panel_message()
+        await ctx.followup.send("✅ **已手动恢复审核功能！**\n现在大家可以正常创建工单了。", ephemeral=True)
+
 
     @ticket.command(name="恢复工单状态", description="（审核小蛋用）误操作恢复！")
     @is_reviewer_egg()
