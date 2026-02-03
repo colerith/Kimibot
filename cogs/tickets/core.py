@@ -161,7 +161,7 @@ class Tickets(commands.Cog):
             if e_create.title: e_create.title = e_create.title.replace("{ticket_id}", str(tid))
             if e_create.description: e_create.description = e_create.description.replace("{ticket_id}", str(tid))
             e_create.color = STYLE["KIMI_YELLOW"]
-            await ch.send(f"{interaction.user.mention} <@&{SPECIFIC_REVIEWER_ID}>", embed=e_create, view=TicketActionView())
+            await ch.send(f"{interaction.user.mention}", embed=e_create, view=TicketActionView())
 
             req_data = STRINGS["embeds"]["requirements"]
             e_req = discord.Embed(title=req_data["title"], description=req_data["desc"], color=STYLE["KIMI_YELLOW"])
