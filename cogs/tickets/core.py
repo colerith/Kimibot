@@ -7,6 +7,8 @@ import datetime
 import random
 import io
 import zipfile
+import json
+import os
 
 from config import IDS, QUOTA, STYLE
 from .utils import (
@@ -17,6 +19,29 @@ from .views import (
     TicketActionView, TimeoutOptionView, ArchiveRequestView,
     NotifyReviewerView, SuspendAuditModal
 )
+
+# --- 持久化工具函数 (新增) ---
+AUDIT_SCHEDULE_FILE = "data/audit_schedule.json"
+
+def load_audit_schedule():
+    if not os.path.exists(AUDIT_SCHEDULE_FILE):
+        return {
+            "suspended": False,
+            "reason": None,
+            "start_dt": None, # 存时间戳
+            "end_dt": None
+        }
+    try:
+        with open(AUDIT_SCHEDULE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"suspended": False, "reason": None, "start_dt": None, "end_dt": None}
+
+def save_audit_schedule(data):
+    # 确保存储目录存在
+    os.makedirs(os.path.dirname(AUDIT_SCHEDULE_FILE), exist_ok=True)
+    with open(AUDIT_SCHEDULE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 class TicketPanelView(discord.ui.View):
     def __init__(self, cog):
@@ -30,10 +55,13 @@ class TicketPanelView(discord.ui.View):
 class Tickets(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.audit_suspended = False
-        self.audit_suspend_reason = None
-        self.suspend_start_dt = None
-        self.suspend_end_dt = None
+
+        # 加载持久化的暂停计划
+        self.schedule_data = load_audit_schedule()
+
+        # 内存锁：防止同一用户并发创建
+        # 集合中存储正在处理中的 user_id
+        self.creating_lock = set()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -43,6 +71,7 @@ class Tickets(commands.Cog):
         self.bot.add_view(NotifyReviewerView(SPECIFIC_REVIEWER_ID))
 
         print("Tickets Cog Loaded & Views Registered.")
+        print(f"当前审核暂停状态: {self.schedule_data.get('suspended')}")
 
         # 启动定时任务
         if not self.reset_daily_quota.is_running(): self.reset_daily_quota.start()
@@ -53,116 +82,149 @@ class Tickets(commands.Cog):
     # --- 核心逻辑方法 (供 View 调用) ---
     # ======================================================================================
 
-    async def create_ticket_logic(self, interaction):
-        # 1. 检查暂停状态 (升级版逻辑)
-        if self.audit_suspended:
-            now = datetime.datetime.now(QUOTA["TIMEZONE"])
-            is_active_suspension = False
+    async def create_ticket_logic(self, interaction: discord.Interaction):
+        user = interaction.user
 
-            if not self.suspend_start_dt:
-                is_active_suspension = True
-            else:
-                if self.suspend_start_dt <= now:
-                    if self.suspend_end_dt:
-                        if now < self.suspend_end_dt:
-                            is_active_suspension = True # 在区间内
-                        else:
-                            is_active_suspension = False
-                    else:
-                        is_active_suspension = True
-                else:
-                    is_active_suspension = False
+        # [0] 并发锁检查：如果该用户正在创建中，直接阻止
+        if user.id in self.creating_lock:
+            return await interaction.response.send_message("🚧 **正在处理中...**\n请不要频繁点击按钮哦，正在为你创建这里！", ephemeral=True)
 
-            if is_active_suspension:
-                reason = self.audit_suspend_reason or "管理员暂停了审核功能"
-
-                # 计算剩余时间提示
-                until_str = "恢复时间待定"
-                if self.suspend_end_dt:
-                     # 简单的倒计时格式化
-                    diff = self.suspend_end_dt - now
-                    hours, remainder = divmod(int(diff.total_seconds()), 3600)
-                    minutes, _ = divmod(remainder, 60)
-                    if hours > 24:
-                        until_str = f"预计 {self.suspend_end_dt.strftime('%m-%d %H:%M')} 恢复"
-                    else:
-                        until_str = f"预计 {hours}小时{minutes}分 后恢复"
-
-                return await interaction.response.send_message(f"🚫 **审核通道已暂时关闭**\n原因：{reason}\n{until_str}", ephemeral=True)
-
-        # 2. 检查时间 (08:00 - 23:00)
-        now = datetime.datetime.now(QUOTA["TIMEZONE"])
-        if not (8 <= now.hour < 23):
-             return await interaction.response.send_message(STRINGS["messages"]["err_time_limit"], ephemeral=True)
-
-        # 3. 检查资格 (Role & ID)
-        user_roles = [r.id for r in interaction.user.roles]
-        has_perm = (IDS["VERIFICATION_ROLE_ID"] in user_roles) or \
-                   (IDS["SUPER_EGG_ROLE_ID"] in user_roles) or \
-                   (interaction.user.id == SPECIFIC_REVIEWER_ID)
-
-        if not has_perm:
-            return await interaction.response.send_message(STRINGS["messages"]["err_perm_create"], ephemeral=True)
-
-        # 4. 检查重复 & 额度
-        c1 = interaction.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
-        c1_extra = interaction.guild.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"))
-        c2 = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
-
-        if not c1 or not isinstance(c1, discord.CategoryChannel):
-             return await interaction.response.send_message("呜...找不到【一审】的频道分类！请服主检查配置！", ephemeral=True)
-
-        target_category = c1
-        if len(c1.channels) >= 50:
-            if c1_extra and isinstance(c1_extra, discord.CategoryChannel) and len(c1_extra.channels) < 50:
-                target_category = c1_extra
-            else:
-                return await interaction.response.send_message("🚫 **无法创建工单**\n呜...当前的审核队列太火爆了，所有窗口都满了（50/50）！请稍后再试或联系管理员清理。", ephemeral=True)
-
-        check_cats = [c1, c2]
-        if c1_extra: check_cats.append(c1_extra)
-
-        for c in check_cats:
-            if not c: continue
-            for ch in c.text_channels:
-                if str(interaction.user.id) in (ch.topic or ""):
-                     return await interaction.response.send_message(STRINGS["messages"]["err_already_has"].format(channel=ch.mention), ephemeral=True)
-
-        q_data = load_quota_data()
-        if q_data["daily_quota_left"] <= 0:
-            return await interaction.response.send_message(STRINGS["messages"]["err_quota_limit"], ephemeral=True)
-
-        # 5. 执行创建
-        await interaction.response.defer(ephemeral=True)
-
-        q_data["daily_quota_left"] -= 1
-        save_quota_data(q_data)
-        await self.update_panel_message()
-
-        tid = random.randint(100000, 999999)
-        c_name = f"审核中-{tid}-{interaction.user.name}"
-
-        overwrites = {
-            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-        staff = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
-        if staff: overwrites[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        super_egg = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
-        if super_egg: overwrites[super_egg] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        # 加锁
+        self.creating_lock.add(user.id)
 
         try:
+            # 1. 检查暂停状态 (使用持久化数据)
+            if self.schedule_data.get("suspended", False):
+                now = datetime.datetime.now(QUOTA["TIMEZONE"])
+                is_active_suspension = False
+
+                # 读取时间戳并转换回 datetime 对象
+                start_ts = self.schedule_data.get("start_dt")
+                end_ts = self.schedule_data.get("end_dt")
+
+                start_dt = datetime.datetime.fromtimestamp(start_ts, QUOTA["TIMEZONE"]) if start_ts else None
+                end_dt = datetime.datetime.fromtimestamp(end_ts, QUOTA["TIMEZONE"]) if end_ts else None
+
+                if not start_dt:
+                    is_active_suspension = True
+                else:
+                    if start_dt <= now:
+                        if end_dt:
+                            if now < end_dt:
+                                is_active_suspension = True
+                            else:
+                                is_active_suspension = False
+                        else:
+                            is_active_suspension = True
+                    else:
+                        is_active_suspension = False
+
+                if is_active_suspension:
+                    reason = self.schedule_data.get("reason") or "管理员暂停了审核功能"
+                    until_str = "恢复时间待定"
+                    if end_dt:
+                        diff = end_dt - now
+                        hours, remainder = divmod(int(diff.total_seconds()), 3600)
+                        minutes, _ = divmod(remainder, 60)
+                        if hours > 24:
+                            until_str = f"预计 {end_dt.strftime('%m-%d %H:%M')} 恢复"
+                        else:
+                            until_str = f"预计 {hours}小时{minutes}分 后恢复"
+
+                    # 只要返回，记得解锁
+                    self.creating_lock.discard(user.id)
+                    return await interaction.response.send_message(f"🚫 **审核通道已暂时关闭**\n原因：{reason}\n{until_str}", ephemeral=True)
+
+            # 2. 检查时间
+            now = datetime.datetime.now(QUOTA["TIMEZONE"])
+            if not (8 <= now.hour < 23):
+                self.creating_lock.discard(user.id)
+                return await interaction.response.send_message(STRINGS["messages"]["err_time_limit"], ephemeral=True)
+
+            # 3. 检查资格
+            user_roles = [r.id for r in interaction.user.roles]
+            has_perm = (IDS["VERIFICATION_ROLE_ID"] in user_roles) or \
+                    (IDS["SUPER_EGG_ROLE_ID"] in user_roles) or \
+                    (interaction.user.id == SPECIFIC_REVIEWER_ID)
+
+            if not has_perm:
+                self.creating_lock.discard(user.id)
+                return await interaction.response.send_message(STRINGS["messages"]["err_perm_create"], ephemeral=True)
+
+            # 4. 检查重复 & 额度
+            # 获取所有相关分类
+            c1 = interaction.guild.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"])
+            c1_extra = interaction.guild.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"))
+            c2 = interaction.guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
+
+            if not c1:
+                self.creating_lock.discard(user.id)
+                return await interaction.response.send_message("配置错误：找不到一审分类。", ephemeral=True)
+
+            # 确定目标分类（处理容量50上限）
+            target_category = c1
+            if isinstance(c1, discord.CategoryChannel) and len(c1.channels) >= 50:
+                if c1_extra and isinstance(c1_extra, discord.CategoryChannel) and len(c1_extra.channels) < 50:
+                    target_category = c1_extra
+                else:
+                    self.creating_lock.discard(user.id)
+                    return await interaction.response.send_message("🚫 **无法创建工单**\n所有审核窗口都满员啦（50/50）！请稍后再试。", ephemeral=True)
+
+            # 严查是否已有频道：遍历所有可能存在的分类
+            check_cats = [c1, c2, interaction.guild.get_channel(IDS["ARCHIVE_CHANNEL_ID"])]
+            if c1_extra: check_cats.append(c1_extra)
+
+            for c in check_cats:
+                if not c or not isinstance(c, discord.CategoryChannel): continue
+                for ch in c.text_channels:
+                    # 检查 Topic 里的 ID，且排除归档区（允许归档后重建，但这里根据需求，如果归档区还要查重，可以加上）
+                    # 通常如果之前工单没删（在归档区），也不让建新的？看你的需求。
+                    # 之前的代码是 "除非该工单被删除才能重新申请"，意味着归档了（没删）也不能申请。
+                    if ch.topic and str(interaction.user.id) in ch.topic:
+                        # 再次确认不是误判（检查topic格式）
+                        if f"创建者ID: {interaction.user.id}" in ch.topic:
+                            self.creating_lock.discard(user.id)
+                            return await interaction.response.send_message(STRINGS["messages"]["err_already_has"].format(channel=ch.mention), ephemeral=True)
+
+            # 检查额度
+            q_data = load_quota_data()
+            if q_data["daily_quota_left"] <= 0:
+                self.creating_lock.discard(user.id)
+                return await interaction.response.send_message(STRINGS["messages"]["err_quota_limit"], ephemeral=True)
+
+            # 5. 执行创建 (正式开始耗时操作，Defer)
+            await interaction.response.defer(ephemeral=True)
+
+            # 扣除额度
+            q_data["daily_quota_left"] -= 1
+            save_quota_data(q_data)
+            await self.update_panel_message()
+
+            tid = random.randint(100000, 999999)
+            c_name = f"审核中-{tid}-{interaction.user.name}"
+
+            overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            }
+            staff = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
+            if staff: overwrites[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            super_egg = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
+            if super_egg: overwrites[super_egg] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
             ch = await interaction.guild.create_text_channel(
                 name=c_name, category=target_category, overwrites=overwrites,
                 topic=f"创建者ID: {interaction.user.id} | 创建者: {interaction.user.name} | 工单ID: {tid}"
             )
 
+            # 发送初始消息
             e_create = discord.Embed.from_dict(STRINGS["embeds"]["ticket_created"])
             if e_create.title: e_create.title = e_create.title.replace("{ticket_id}", str(tid))
             if e_create.description: e_create.description = e_create.description.replace("{ticket_id}", str(tid))
             e_create.color = STYLE["KIMI_YELLOW"]
             await ch.send(f"{interaction.user.mention}", embed=e_create, view=TicketActionView())
 
+            # 发送要求
             req_data = STRINGS["embeds"]["requirements"]
             e_req = discord.Embed(title=req_data["title"], description=req_data["desc"], color=STYLE["KIMI_YELLOW"])
             for f in req_data["fields"]: e_req.add_field(name=f["name"], value=f["value"], inline=False)
@@ -170,9 +232,11 @@ class Tickets(commands.Cog):
             e_req.set_footer(text=req_data["footer"])
             await ch.send(f"你好呀 {interaction.user.mention}，请按下面的要求提交材料哦~", embed=e_req)
 
+            # 发送给审核员的提醒
             rem_text = STRINGS["messages"]["reminder_text"].format(ticket_id=tid, user_id=interaction.user.id)
             await ch.send(embed=discord.Embed(description=rem_text, color=STYLE["KIMI_YELLOW"]), view=NotifyReviewerView(SPECIFIC_REVIEWER_ID))
 
+            # 私信通知
             try:
                 msg = STRINGS["messages"]["dm_create_success"].format(guild_name=interaction.guild.name, channel_mention=ch.mention)
                 await interaction.user.send(msg)
@@ -183,11 +247,25 @@ class Tickets(commands.Cog):
             await interaction.followup.send(f"好惹！你的审核频道 {ch.mention} 已经创建好惹！审核要求已发送到频道内~ {msg_status}", ephemeral=True)
 
         except Exception as e:
-            print(f"创建工单失败: {e}")
+            print(f"创建工单逻辑出错: {e}")
+            # 出错回滚额度
+            q_data = load_quota_data() # 重新读一遍防止并发覆盖
             q_data["daily_quota_left"] += 1
             save_quota_data(q_data)
             await self.update_panel_message()
-            await interaction.followup.send(f"创建失败: {e}", ephemeral=True)
+
+            try:
+                # 尝试发送错误信息，如果 interaction 过期可能会失败，所以加 try
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(f"创建失败: {e}", ephemeral=True)
+                else:
+                    await interaction.followup.send(f"创建失败: {e}", ephemeral=True)
+            except:
+                pass
+
+        finally:
+            # 无论成功失败，最后都要释放锁
+            self.creating_lock.discard(user.id)
 
 
 
@@ -268,36 +346,32 @@ class Tickets(commands.Cog):
 
         is_active_suspension = False
 
-        if self.audit_suspended:
-            # 只有当管理员下达了暂停指令(audit_suspended=True)时，才进行计算
+        # 使用持久化数据判断暂停
+        if self.schedule_data.get("suspended", False):
+            # 将时间戳转为 datetime
+            start_ts = self.schedule_data.get("start_dt")
+            end_ts = self.schedule_data.get("end_dt")
 
-            if not self.suspend_start_dt:
-                # 情况A: 管理员没设时间（或者是旧命令），那是立即生效
+            start_dt = datetime.datetime.fromtimestamp(start_ts, QUOTA["TIMEZONE"]) if start_ts else None
+            end_dt = datetime.datetime.fromtimestamp(end_ts, QUOTA["TIMEZONE"]) if end_ts else None
+
+            if not start_dt:
                 is_active_suspension = True
-
             else:
-                # 情况B: 管理员设了定时计划
-
-                # 1. 先看开始时间到了没？
-                if now >= self.suspend_start_dt:
-                    # 2. 如果开始了，再看结束时间（如果有的话）到了没？
-                    if self.suspend_end_dt:
-                        if now < self.suspend_end_dt:
-                            # 还没到结束时间 -> 正在暂停中
+                if now >= start_dt:
+                    if end_dt:
+                        if now < end_dt:
                             is_active_suspension = True
                         else:
-                            # 已经过了结束时间 -> 实际上已经恢复了（虽然变量可能还没重置）
                             is_active_suspension = False
                     else:
-                        # 没设结束时间（无限期） -> 正在暂停中
                         is_active_suspension = True
                 else:
-                    # 还没到开始时间 -> 面板还是正常的
                     is_active_suspension = False
 
         if is_active_suspension:
             label = p_data["btn_suspended"]
-            disabled = False
+            disabled = False # 按钮不禁用，但点进去会提示暂停
         elif d["daily_quota_left"] <= 0:
             label = p_data["btn_full"]
             disabled = True
@@ -548,6 +622,71 @@ class Tickets(commands.Cog):
         await self.update_panel_message()
         await ctx.followup.send("✅ **已手动恢复审核功能！**\n现在大家可以正常创建工单了。", ephemeral=True)
 
+    @ticket.command(name="清理重复工单", description="（慎用）一键删除指定用户所有重复创建的工单，保留最早的一个。")
+    @is_reviewer_egg()
+    async def clean_user_duplicates(self, ctx: discord.ApplicationContext,
+                                    user: discord.Member,
+                                    dry_run: discord.Option(bool, "是否仅模拟（不真删）", default=True)):
+        """
+        查找该用户创建的所有工单频道，保留最早创建的一个，其余删除并返还额度。
+        """
+        await ctx.defer(ephemeral=True)
+
+        # 扫描所有相关分类
+        categories = [
+            self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"]),
+            self.bot.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID")),
+            self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
+        ]
+
+        user_channels = []
+        for cat in categories:
+            if not cat or not isinstance(cat, discord.CategoryChannel): continue
+            for ch in cat.text_channels:
+                # 检查 topic 中的用户ID
+                if ch.topic and f"创建者ID: {user.id}" in ch.topic:
+                    user_channels.append(ch)
+
+        if not user_channels:
+            return await ctx.followup.send(f"✅ 未在审核区发现用户 {user.mention} 的任何工单。", ephemeral=True)
+
+        if len(user_channels) == 1:
+            return await ctx.followup.send(f"✅ 用户 {user.mention} 只有一个工单 {user_channels[0].mention}，无需清理。", ephemeral=True)
+
+        # 按创建时间排序：最早的在前
+        user_channels.sort(key=lambda c: c.created_at)
+
+        keep_channel = user_channels[0]
+        delete_channels = user_channels[1:]
+
+        msg = f"🔍 **发现重复工单！**\n用户: {user.mention}\n共发现: {len(user_channels)} 个\n\n"
+        msg += f"🛡️ **将保留**: {keep_channel.mention} (创建于 {keep_channel.created_at.strftime('%H:%M:%S')})\n"
+        msg += f"🗑️ **将删除**: {len(delete_channels)} 个 (并返还对应额度)\n"
+
+        for c in delete_channels:
+            msg += f"- {c.mention} ({c.created_at.strftime('%H:%M:%S')})\n"
+
+        if dry_run:
+            msg += "\n⚠️ **当前为模拟模式 (Dry Run)**，未执行实际删除。\n如果要执行，请重新运行命令并将 `dry_run` 设为 `False`。"
+            await ctx.followup.send(msg, ephemeral=True)
+        else:
+            # 执行删除
+            d = load_quota_data()
+            count = 0
+            for c in delete_channels:
+                try:
+                    await c.delete(reason=f"清理重复工单 - 操作人: {ctx.author.name}")
+                    count += 1
+                except Exception as e:
+                    msg += f"\n❌ 删除 {c.name} 失败: {e}"
+
+            # 返还额度
+            d["daily_quota_left"] += count
+            save_quota_data(d)
+            await self.update_panel_message()
+
+            msg += f"\n✅ **清理完成！** 已删除 {count} 个频道，并返还了 {count} 个名额。\n当前剩余名额: {d['daily_quota_left']}"
+            await ctx.followup.send(msg, ephemeral=True)
 
     @ticket.command(name="恢复工单状态", description="（审核小蛋用）误操作恢复！")
     @is_reviewer_egg()
