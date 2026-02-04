@@ -23,7 +23,7 @@ class DetailedWishModal(discord.ui.Modal):
         ))
         self.add_item(discord.ui.InputText(
             label="是否匿名？(填 是/否)",
-            placeholder="默认匿名。填“否”让服主知道是你。",
+            placeholder="默认匿名。填“否”则公开许愿者身份。",
             style=discord.InputTextStyle.short, required=False, max_length=1
         ))
 
@@ -232,12 +232,7 @@ class RoleSelect(discord.ui.Select):
         if not target_role:
             return await interaction.followup.send("呜...这个身份组好像被删掉了！", ephemeral=True)
 
-        # 互斥逻辑：检查前缀
-        # 假设前缀分隔符是 "-"，例如 "Color-Red" 的前缀是 "Color"
-        # 如果没有 "-", 以前两个字为前缀？或者整名为前缀？
-        # 按照“同前缀互斥”的要求，我们取 "-" 前的部分。
-
-        prefix = target_role.name.split("·")[0] if "-" in target_role.name else None
+        prefix = target_role.name.split("·")[0] if "·" in target_role.name else None
 
         removed_roles = []
         added_role = target_role.name
@@ -262,8 +257,6 @@ class RoleSelect(discord.ui.Select):
                 await user.remove_roles(*to_remove, reason="身份组切换-互斥移除")
                 removed_roles = [r.name for r in to_remove]
 
-            # 如果点击的是自己已有的，且没有前缀互斥（比如单选开关），是不是该移除？
-            # 这里简单处理：总是添加。
             if target_role not in user.roles:
                 await user.add_roles(target_role, reason="身份组领取")
                 msg = f"✅ 已获得：**{target_role.name}**"
