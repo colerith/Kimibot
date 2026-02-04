@@ -1,3 +1,5 @@
+# cogs/general/core.py
+
 import discord
 from discord import SlashCommandGroup, Option
 from discord.ext import commands
@@ -205,7 +207,7 @@ class General(commands.Cog):
     # ==================== 抽奖 ====================
     lottery_group = SlashCommandGroup("抽奖", "激动人心的抽奖功能！")
 
-    @lottery_group.command(name="发起", description="创建一个新的抽奖活动")
+    @lottery_group.command(name="发起")
     @is_super_egg()
     async def start_lottery(self, ctx):
         await ctx.send_modal(LotteryCreateModal(self))
@@ -218,13 +220,15 @@ class General(commands.Cog):
         # 1. 读数据
         data = load_lottery_data()
         msg_id_str = str(message_id)
-        if msg_id_str not in data["active_lotteries"]: return # 已处理过
+        if msg_id_str not in data["active_lotteries"]: return
 
         lottery = data["active_lotteries"][msg_id_str]
         channel_id = lottery["channel_id"]
         participants = lottery["participants"]
         winners_count = lottery["winners"]
         prize = lottery["prize"]
+        # 兼容旧数据，如果没有provider字段则设为官方
+        provider = lottery.get("provider", "奇米大王官方")
 
         channel = self.bot.get_channel(channel_id)
         if not channel: return
@@ -235,32 +239,49 @@ class General(commands.Cog):
             count = min(len(participants), winners_count)
             winners = random.sample(participants, count)
 
-        # 3. 发送结果
+        # 3. 更新原消息状态
         try:
             msg = await channel.fetch_message(message_id)
 
-            # 更新原消息Embed
+            # 更新原消息Embed：改成灰色，标题加[已结束]
             embed = msg.embeds[0]
             embed.color = 0x99AAB5 # 变灰
+            embed.title = f"🏁 [已结束] {prize}"
+
+            # 移除“点击下方按钮”那行
+            lines = embed.description.split("\n")
+            # 过滤掉包含"⬇️"的行
+            new_lines = [line for line in lines if "⬇️" not in line]
+            embed.description = "\n".join(new_lines)
+
             embed.set_footer(text=f"已结束 | 共 {len(participants)} 人参与")
 
             # 禁用按钮
             view = discord.ui.View.from_message(msg)
-            for child in view.children: child.disabled = True
+            for child in view.children:
+                child.disabled = True
+                child.style = discord.ButtonStyle.secondary # 按钮也变灰
+                child.label = "活动已结束"
+
             await msg.edit(embed=embed, view=view)
 
-            # 发送公告
+            # 4. 发送开奖公告 (引用原消息)
             if winners:
                 winner_mentions = " ".join([f"<@{uid}>" for uid in winners])
-                result_embed = discord.Embed(title="🎉 开奖啦！", description=f"恭喜以下饱饱获得了 **{prize}**！\n\n{winner_mentions}", color=0xFF0000)
-                await channel.send(content=winner_mentions, embed=result_embed, reference=msg)
+                # 构造开奖 Embed
+                result_embed = discord.Embed(
+                    title=f"🎉 恭喜中奖！",
+                    description=f"关于 **{prize}** 的抽奖已经结束啦！\n\n🏆 **获奖者名单**：\n{winner_mentions}\n\n请获奖的小饱饱留意私信或者联系 **{provider}** 领奖哦！",
+                    color=0xFFD700
+                )
+                await channel.send(content=f"开奖啦！{winner_mentions}", embed=result_embed, reference=msg)
             else:
-                await channel.send(f"🥀 抽奖 **{prize}** 结束啦，可惜没人参与...", reference=msg)
+                await channel.send(f"🥀 关于 **{prize}** 的抽奖结束啦，可惜没人参与，奖品只能自己吃掉惹...", reference=msg)
 
         except Exception as e:
             print(f"开奖失败 {message_id}: {e}")
 
-        # 4. 删数据
+        # 5. 删数据
         del data["active_lotteries"][msg_id_str]
         save_lottery_data(data)
 
@@ -268,28 +289,21 @@ class General(commands.Cog):
         await self.bot.wait_until_ready()
         data = load_lottery_data()
         now_ts = datetime.datetime.now(TZ_CN).timestamp()
-
         to_remove = []
         for msg_id, info in data["active_lotteries"].items():
             end_ts = info["end_timestamp"]
             remaining = end_ts - now_ts
-            if remaining <= 0:
-                # 已经过期，立即结束
-                await self.end_lottery(int(msg_id))
-            else:
-                # 恢复计时
-                self.bot.loop.create_task(self.lottery_timer(int(msg_id), remaining))
+            if remaining <= 0: await self.end_lottery(int(msg_id))
+            else: self.bot.loop.create_task(self.lottery_timer(int(msg_id), remaining))
 
     @lottery_group.command(name="结束", description="强制结束某个抽奖")
     @is_super_egg()
     async def force_end_lottery(self, ctx, message_id: str):
         await ctx.defer(ephemeral=True)
         data = load_lottery_data()
-        if message_id not in data["active_lotteries"]:
-            return await ctx.followup.send("找不到这个抽奖数据哦！", ephemeral=True)
-
+        if message_id not in data["active_lotteries"]: return await ctx.followup.send("找不到数据！", ephemeral=True)
         await self.end_lottery(int(message_id))
-        await ctx.followup.send("已强制结束抽奖！", ephemeral=True)
+        await ctx.followup.send("已强制结束！", ephemeral=True)
 
     # ====== 辅助工具命令 (回顶) =======
 

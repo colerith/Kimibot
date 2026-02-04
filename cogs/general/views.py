@@ -468,17 +468,47 @@ class LotteryCreateModal(discord.ui.Modal):
         super().__init__(title="🎁 发起抽奖")
         self.cog = cog
 
-        self.add_item(discord.ui.InputText(label="奖品名称", placeholder="例如: 1个月Nitro", max_length=100))
-        self.add_item(discord.ui.InputText(label="抽奖文案/描述", placeholder="庆祝新功能上线！大家快来...", style=discord.InputTextStyle.paragraph))
-        self.add_item(discord.ui.InputText(label="中奖人数", placeholder="填数字，例如: 1", max_length=5))
-        self.add_item(discord.ui.InputText(label="持续时间", placeholder="例如: 10m, 2h, 1d", max_length=10))
+        # 1. 奖品名称
+        self.add_item(discord.ui.InputText(
+            label="奖品名称",
+            placeholder="例如: 1个月Nitro",
+            max_length=100
+        ))
+        # 2. 奖品提供者 (新)
+        self.add_item(discord.ui.InputText(
+            label="奖品提供者 (选填)",
+            placeholder="例如: 芝士喵喵 / @某人 (留空默认为官方)",
+            max_length=50,
+            required=False
+        ))
+        # 3. 描述
+        self.add_item(discord.ui.InputText(
+            label="抽奖文案/描述",
+            placeholder="庆祝新功能上线！大家快来...",
+            style=discord.InputTextStyle.paragraph
+        ))
+        # 4. 人数
+        self.add_item(discord.ui.InputText(
+            label="中奖人数 (数字)",
+            placeholder="例如: 1",
+            max_length=5
+        ))
+        # 5. 时间
+        self.add_item(discord.ui.InputText(
+            label="持续时间",
+            placeholder="例如: 10m, 2h, 1d",
+            max_length=10
+        ))
 
     async def callback(self, interaction):
         prize = self.children[0].value
-        desc = self.children[1].value
+        provider_raw = self.children[1].value
+        provider = provider_raw if provider_raw and provider_raw.strip() else "奇米大王官方"
+        desc = self.children[2].value
+
         try:
-            winners = int(self.children[2].value)
-            duration_str = self.children[3].value
+            winners = int(self.children[3].value)
+            duration_str = self.children[4].value
             from .utils import parse_duration
             seconds = parse_duration(duration_str)
             if seconds < 60: raise ValueError("时间太短")
@@ -492,10 +522,26 @@ class LotteryCreateModal(discord.ui.Modal):
         end_time = now + datetime.timedelta(seconds=seconds)
         end_timestamp = end_time.timestamp()
 
-        embed = discord.Embed(title=f"🎁 {prize}", description=desc, color=STYLE["KIMI_YELLOW"])
-        embed.add_field(name="🏆名额", value=str(winners), inline=True)
-        embed.add_field(name="⏳开奖时间", value=f"<t:{int(end_timestamp)}:R>", inline=True)
-        embed.set_footer(text="点击下方按钮参与 | 0 人已参与")
+        # === 构建美化版的 Embed ===
+        # 标题带上状态
+        embed = discord.Embed(title=f"🎆 [进行中] {prize}", color=STYLE["KIMI_YELLOW"])
+
+        # 构造正文内容
+        content_lines = []
+        content_lines.append(f"**🎁 奖品** : {prize}")
+        content_lines.append(f"**💖 提供者** : {provider}")
+        content_lines.append("") # 空行
+        content_lines.append(f"{desc}") # 描述
+        content_lines.append("") # 空行
+        content_lines.append(f"🏆 将抽取 **{winners}** 位幸运饱饱，中奖后请留意私信！")
+        content_lines.append("")
+        content_lines.append("⬇️ ⬇️ **点击下方按钮即可参与** ⬇️ ⬇️")
+
+        embed.description = "\n".join(content_lines)
+
+        # 底部状态栏
+        embed.set_footer(text=f"正在进行 • 0 人已参与 | 结束时间")
+        embed.timestamp = end_time # 使用 timestamp 显示本地化时间
 
         msg = await interaction.followup.send(embed=embed, view=LotteryJoinView(prize))
 
@@ -504,6 +550,7 @@ class LotteryCreateModal(discord.ui.Modal):
         data["active_lotteries"][str(msg.id)] = {
             "channel_id": interaction.channel_id,
             "prize": prize,
+            "provider": provider, # 存入提供者
             "text": desc,
             "winners": winners,
             "end_timestamp": end_timestamp,
@@ -518,14 +565,19 @@ class LotteryCreateModal(discord.ui.Modal):
 class LotteryJoinView(discord.ui.View):
     def __init__(self, prize_name):
         super().__init__(timeout=None)
-        # 必须给 custom_id 否则重启后按钮失效
-        self.add_item(discord.ui.Button(label="🎉 参与抽奖", style=discord.ButtonStyle.primary, custom_id="lottery_join_btn"))
+        # 按钮样式调整
+        btn = discord.ui.Button(
+            label="🎉 立即参与抽奖",
+            style=discord.ButtonStyle.primary, # 蓝色按钮比较显眼
+            custom_id="lottery_join_btn",
+            emoji="🎁"
+        )
+        self.add_item(btn)
 
     async def interaction_check(self, interaction):
-        # 处理参与逻辑
         if interaction.data["custom_id"] == "lottery_join_btn":
             await self.join_lottery(interaction)
-            return False # 阻止后续默认处理，虽然这里没别的
+            return False
         return True
 
     async def join_lottery(self, interaction):
@@ -544,10 +596,11 @@ class LotteryJoinView(discord.ui.View):
         participants.append(uid)
         save_lottery_data(data)
 
-        # 更新 Embed 显示人数
+        # 实时更新 Footer 人数
         embed = interaction.message.embeds[0]
-        # 修改 footer
-        embed.set_footer(text=f"点击下方按钮参与 | {len(participants)} 人已参与")
+        # 保持原本的文字前缀，只改人数
+        # 此时 title 应该是 [进行中]
+        embed.set_footer(text=f"正在进行 • {len(participants)} 人已参与 | 结束时间")
         await interaction.message.edit(embed=embed)
 
         await interaction.response.send_message("🎉 参与成功！祝你好运哦！", ephemeral=True)
