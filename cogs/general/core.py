@@ -320,16 +320,16 @@ class General(commands.Cog):
     @is_super_egg()
     async def publish_announcement(self, ctx: discord.ApplicationContext, 
         channel: discord.TextChannel, 
-        mention_role: Option(discord.Role, "要@的身份组", required=False) = None, 
-        image1: Option(discord.Attachment, "图片附件1", required=False) = None, 
-        image2: Option(discord.Attachment, "图片附件2", required=False) = None,
-        image3: Option(discord.Attachment, "图片附件3", required=False) = None,
-        image4: Option(discord.Attachment, "图片附件4", required=False) = None,
-        image5: Option(discord.Attachment, "图片附件5", required=False) = None,
-        image6: Option(discord.Attachment, "图片附件6", required=False) = None,
-        image7: Option(discord.Attachment, "图片附件7", required=False) = None,
-        image8: Option(discord.Attachment, "图片附件8", required=False) = None,
-        image9: Option(discord.Attachment, "图片附件9", required=False) = None
+        mention_role: Option(discord.Role, "要@的身份组", required=False) = None,  # pyright: ignore[reportInvalidTypeForm]
+        image1: Option(discord.Attachment, "图片附件1", required=False) = None,  # type: ignore
+        image2: Option(discord.Attachment, "图片附件2", required=False) = None, # type: ignore
+        image3: Option(discord.Attachment, "图片附件3", required=False) = None, # pyright: ignore[reportInvalidTypeForm]
+        image4: Option(discord.Attachment, "图片附件4", required=False) = None, # pyright: ignore[reportInvalidTypeForm]
+        image5: Option(discord.Attachment, "图片附件5", required=False) = None, # pyright: ignore[reportInvalidTypeForm]
+        image6: Option(discord.Attachment, "图片附件6", required=False) = None, # pyright: ignore[reportInvalidTypeForm]
+        image7: Option(discord.Attachment, "图片附件7", required=False) = None, # pyright: ignore[reportInvalidTypeForm]
+        image8: Option(discord.Attachment, "图片附件8", required=False) = None, # pyright: ignore[reportInvalidTypeForm]
+        image9: Option(discord.Attachment, "图片附件9", required=False) = None # pyright: ignore[reportInvalidTypeForm]
     ):
         attachments = [img for img in [image1, image2, image3, image4, image5, image6, image7, image8, image9] if img]
         modal = AnnouncementModal(channel, mention_role, attachments)
@@ -339,8 +339,8 @@ class General(commands.Cog):
     @is_super_egg()
     async def clear_messages(self, ctx: discord.ApplicationContext, 
         channel: discord.TextChannel, 
-        amount: Option(int, "要删除的消息数量", required=True), 
-        schedule: Option(str, "延迟执行 (例如: 10s, 5m, 1h)", required=False) = None
+        amount: Option(int, "要删除的消息数量", required=True),  # pyright: ignore[reportInvalidTypeForm]
+        schedule: Option(str, "延迟执行 (例如: 10s, 5m, 1h)", required=False) = None # pyright: ignore[reportInvalidTypeForm]
     ):
         await ctx.defer(ephemeral=True) 
         if schedule:
@@ -378,9 +378,9 @@ class General(commands.Cog):
 
     @vote.command(name="发起", description="创建一个支持多选项、自动截止的投票！")
     async def start_vote(self, ctx: discord.ApplicationContext,
-        question: Option(str, "投票的问题是什么呢？", required=True),
-        options_text: Option(str, "选项列表 (用 | 竖线分隔，最多20个)", required=True),
-        duration: Option(str, "持续时间 (例如: 10m, 1h, 24h)", required=True)
+        question: Option(str, "投票的问题是什么呢？", required=True), # pyright: ignore[reportInvalidTypeForm]
+        options_text: Option(str, "选项列表 (用 | 竖线分隔，最多20个)", required=True), # pyright: ignore[reportInvalidTypeForm]
+        duration: Option(str, "持续时间 (例如: 10m, 1h, 24h)", required=True) # pyright: ignore[reportInvalidTypeForm]
     ):
         seconds = parse_duration(duration)
         if seconds <= 0:
