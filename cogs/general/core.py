@@ -10,7 +10,7 @@ from .utils import parse_duration, is_super_egg, TZ_CN
 from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data
 from .views import (
     WishPanelView, WishActionView, AnnouncementModal, PollView,
-    RoleClaimView, LotteryCreateModal, LotteryJoinView
+    RoleClaimView, LotteryCreateModal, LotteryJoinView, RoleManagerView
 )
 
 class General(commands.Cog):
@@ -152,34 +152,32 @@ class General(commands.Cog):
         else:
             await ctx.followup.send("呜...找不到许愿池频道！", ephemeral=True)
 
-    # ==================== 身份组领取 ====================
-    role_group = SlashCommandGroup("身份组面板", "管理自助领取的身份组")
+    # ==================== 身份组领取 (Refactored) ====================
+    role_group = SlashCommandGroup("百变小蛋", "管理自助领取的装饰身份组")
 
-    @role_group.command(name="添加", description="增加一个可领取的身份组")
+    @role_group.command(name="管理", description="打开身份组管理控制台（添加/移除身份组）")
     @is_super_egg()
-    async def add_claim_role(self, ctx, role: discord.Role):
-        data = load_role_data()
-        if role.id not in data["claimable_roles"]:
-            data["claimable_roles"].append(role.id)
-            save_role_data(data)
-            await ctx.respond(f"✅ 已添加身份组 **{role.name}** 到领取列表。", ephemeral=True)
+    async def manage_roles(self, ctx):
+        # 初始化 View
+        view = RoleManagerView(ctx)
+
+        # 初始 Embed
+        roles = view.get_current_roles()
+        embed = discord.Embed(title="⚙️ 身份组池管理控制台", color=discord.Color.blue())
+        desc = "**当前已上架的身份组：**\n"
+        if roles:
+            desc += "\n".join([f"• {r.mention} (ID: {r.id})" for r in roles])
         else:
-            await ctx.respond("这个身份组已经在列表里惹！", ephemeral=True)
+            desc += "*(空空如也，快添加一些吧！)*"
 
-    @role_group.command(name="移除", description="从列表移除身份组")
-    @is_super_egg()
-    async def remove_claim_role(self, ctx, role: discord.Role):
-        data = load_role_data()
-        if role.id in data["claimable_roles"]:
-            data["claimable_roles"].remove(role.id)
-            save_role_data(data)
-            await ctx.respond(f"🗑️ 已移除身份组 **{role.name}**。", ephemeral=True)
-        else:
-            await ctx.respond("列表里没这个身份组哦。", ephemeral=True)
+        desc += "\n\n**操作说明：**\n➕ 使用第一行菜单添加新身份组\n➖ 使用第二行菜单移除已有身份组"
+        embed.description = desc
 
-    @role_group.command(name="发送", description="在当前频道发送身份组领取面板")
+        await ctx.respond(embed=embed, view=view, ephemeral=True)
+
+    @role_group.command(name="发送", description="直接在当前频道发送用户领取面板")
     @is_super_egg()
-    async def send_role_panel(self, ctx):
+    async def send_role_panel_cmd(self, ctx):
         data = load_role_data()
         roles = []
         for rid in data["claimable_roles"]:
@@ -187,9 +185,20 @@ class General(commands.Cog):
             if r: roles.append(r)
 
         if not roles:
-            return await ctx.respond("还没有配置任何身份组哦！先用 `/身份组面板 添加` 吧。", ephemeral=True)
+            return await ctx.respond("还没上架任何身份组呢！请先使用 `/装饰中心 管理` 添加。", ephemeral=True)
 
-        embed = discord.Embed(title="🏷️ 身份组自助领取", description="请在下方选择你想要的身份组！\n注：相同前缀的身份组会自动替换哦（比如换颜色）。", color=STYLE["KIMI_YELLOW"])
+        embed = discord.Embed(
+            title="🎨 装饰身份组中心",
+            description="欢迎来到装饰中心！\n请在下方选择心仪的 **装饰身份组** 来装点你的个人资料卡吧！\n\n"
+                        "💡 **操作指南**：\n"
+                        "• 点击下拉框选择一个款式穿戴。\n"
+                        "• 再次选择已拥有的款式即可卸下。\n"
+                        "• 同系列装饰（例如颜色）会自动替换，无需手动卸载。",
+            color=STYLE["KIMI_YELLOW"]
+        )
+        embed.set_thumbnail(url=ctx.me.display_avatar.url) # 放 Bot 头像或者特定的图
+        embed.set_footer(text="选择下方菜单即可体验 ✨")
+
         await ctx.channel.send(embed=embed, view=RoleClaimView(roles))
         await ctx.respond("面板已发送！", ephemeral=True)
 
