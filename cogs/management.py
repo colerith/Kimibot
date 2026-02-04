@@ -7,21 +7,19 @@ import datetime
 import io
 from config import IDS, STYLE
 
-# --- 辅助常量与函数 ---
-KIMI_FOOTER_TEXT = "请遵守社区规则，一起做个乖饱饱嘛~！"
+# --- 辅助常量 ---
 TZ_CN = datetime.timezone(datetime.timedelta(hours=8))
 
 # 简单的权限检查装饰器
 def is_super_egg():
     async def predicate(ctx: discord.ApplicationContext) -> bool:
-        if not isinstance(ctx.author, discord.Member) or not hasattr(ctx.author, 'roles'):
-             await ctx.respond("呜...无法识别你的身份组信息！", ephemeral=True)
+        if not isinstance(ctx.author, discord.Member):
+             await ctx.respond("呜...无法识别你的身份信息！", ephemeral=True)
              return False
 
         # 从配置中获取管理员 ID
         super_egg_role_id = IDS.get("SUPER_EGG_ROLE_ID")
         if not super_egg_role_id:
-             # 如果配置没加载成功，为了安全先拒绝
              await ctx.respond("系统配置加载异常(ID缺失)，请联系开发者。", ephemeral=True)
              return False
 
@@ -34,6 +32,7 @@ def is_super_egg():
 
 def parse_duration(duration_str: str) -> int:
     try:
+        if not duration_str: return 0
         unit = duration_str[-1].lower()
         value = int(duration_str[:-1])
         if unit == 's': return value
@@ -44,409 +43,379 @@ def parse_duration(duration_str: str) -> int:
         return 0
     return 0
 
-# --- 通用 Modal 组件 ---
-# 用于处理各种弹窗输入，保持在主 View 逻辑之外
-class CommonModal(ui.Modal):
-    def __init__(self, title, input_fields, callback_func):
-        super().__init__(title=title)
-        self.callback_func = callback_func
-        self.fields_map = input_fields # 记录字段名和组件对象的映射
+# ======================================================
+# 新版 Modal 组件 (完全复刻 Label + Component 结构)
+# ======================================================
 
-        # 动态添加组件到 Modal
-        for key, item in input_fields.items():
-            self.add_item(item)
-
-    async def callback(self, interaction: discord.Interaction):
-        # 1. 立即 Defer，防止因为处理时间过长导致 Modal 报错
-        await interaction.response.defer(ephemeral=True)
-
-        data = {}
-        # 遍历我们定义的字段表来提取数据
-        for key, item in self.fields_map.items():
-            # 普通文本框
-            if isinstance(item, ui.InputText):
-                data[key] = item.value
-
-            # Label 包裹的组件 (如下拉框、文件上传)
-            elif isinstance(item, ui.Label):
-                comp = item.component
-
-                # 下拉框 (Select)
-                if hasattr(comp, "values"):
-                    data[key] = comp.values
-
-                # 文件上传 (FileUpload)
-                elif isinstance(comp, ui.FileUpload):
-                    # Pycord Modal 中的文件上传数据获取方式
-                    # 通常需要检查该组件的 uploaded_attachments 属性
-                     data[key] = comp.uploaded_attachments
-
-                # 其他情况
-                elif hasattr(comp, "value"):
-                    data[key] = comp.value
-
-        # 如果上述方式没取到文件（有时 Pycord 行为略有不同），兜底检查一遍 children
-        for child in self.children:
-            if isinstance(child, ui.Label) and isinstance(child.component, ui.FileUpload):
-                # 如果这个组件对应我们需要的 key
-                for k, v in self.fields_map.items():
-                     if v == child:
-                         current_attachments = child.component.uploaded_attachments
-                         if current_attachments:
-                             data[k] = current_attachments
-
-        # 调用外部传入的回调函数处理业务逻辑
-        if self.callback_func:
-            await self.callback_func(data, interaction)
-
-# --- 特殊 Modal: ID 输入 ---
-class IDInputModal(discord.ui.Modal):
-    def __init__(self, view_ref):
-        super().__init__(title="🔍 手动输入用户ID")
-        self.view_ref = view_ref
-        self.add_item(discord.ui.InputText(
-            label="用户ID",
-            placeholder="请输入一串数字ID...",
+# 1. ID 输入弹窗
+class IDInputModal(ui.Modal, title="🔍 手动输入用户ID"):
+    # 使用 Label 包裹 TextInput
+    id_ui = ui.Label(
+        text="用户ID",
+        component=ui.TextInput(
+            label="请输入一串数字ID...", # 注意：在Label结构下，TextInput自身的label属性可能不显示，主要靠Label text
+            placeholder="例如: 123456789012345678",
             min_length=15, max_length=20, required=True
-        ))
+        )
+    )
 
-    async def callback(self, interaction: discord.Interaction):
-        # defer 更新
-        await interaction.response.defer(ephemeral=True)
+    def __init__(self, view_ref):
+        super().__init__()
+        self.view_ref = view_ref
 
-        user_id_str = self.children[0].value.strip()
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True) # 仅仅defer，不发消息，靠view刷新
+
+        user_id_str = self.id_ui.component.value.strip()
         if not user_id_str.isdigit():
-            return await interaction.followup.send("❌ ID必须是纯数字唷！", ephemeral=True)
+            await interaction.followup.send("❌ ID必须是纯数字唷！", ephemeral=True)
+            return
 
         user_id = int(user_id_str)
         try:
-            # 尝试获取用户对象以便显示头像和名称
             user = await interaction.client.fetch_user(user_id)
             self.view_ref.selected_user = user
             self.view_ref.selected_user_id = user_id
-            await self.view_ref.update_panel(interaction) # 刷新主面板
+            # 刷新父视图
+            await self.view_ref.refresh_view(interaction)
         except discord.NotFound:
-            # 找不到用户对象，但也记录 ID（比如已经退服的人）
             self.view_ref.selected_user = None
             self.view_ref.selected_user_id = user_id
-            await self.view_ref.update_panel(interaction, override_desc=f"⚠️ 未在Discord找到该用户资料，但已选定ID: {user_id}")
+            await self.view_ref.refresh_view(interaction, temp_notify=f"⚠️ 未找到用户，但已锁定ID: {user_id}")
         except Exception as e:
             await interaction.followup.send(f"出错惹: {e}", ephemeral=True)
 
-# --- 特殊 Modal: 理由输入 ---
-class ReasonInputModal(discord.ui.Modal):
-    def __init__(self, view_ref):
-        super().__init__(title="📝 填写/修改处罚理由")
-        self.view_ref = view_ref
-        # 预填入当前的理由
-        self.add_item(discord.ui.InputText(
-            label="处罚理由",
-            placeholder="请输入详细的理由...",
-            style=discord.InputTextStyle.paragraph,
+# 2. 证据上传弹窗
+class EvidenceUploadModal(ui.Modal, title="📸 上传证据"):
+    upload_ui = ui.Label(
+        text="请上传截图 (最多9张)",
+        component=ui.FileUpload(
+            custom_id="ev_upload_comp",
+            max_values=9,
             required=True,
-            value=view_ref.reason
-        ))
-        # 如果是禁言，额外显示时间输入框
-        if view_ref.action_type == "mute":
-             self.add_item(discord.ui.InputText(
-                label="禁言时间 (仅禁言模式有效)",
-                placeholder="例如: 10m, 1h, 1d",
-                min_length=2, max_length=10, required=False,
-                value=str(view_ref.duration_str) if view_ref.duration_str else ""
-            ))
+        )
+    )
 
-    async def callback(self, interaction: discord.Interaction):
+    def __init__(self, view_ref):
+        super().__init__()
+        self.view_ref = view_ref
+
+    async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        self.view_ref.reason = self.children[0].value
-        if self.view_ref.action_type == "mute" and len(self.children) > 1:
-            self.view_ref.duration_str = self.children[1].value
+        attachments = self.upload_ui.component.uploaded_attachments
+        if not attachments:
+            return await interaction.followup.send("❌ 未检测到文件。", ephemeral=True)
 
-        await self.view_ref.update_panel(interaction) # 刷新主面板
+        count = 0
+        for att in attachments:
+            try:
+                # 转换为 File 对象并缓存到 View 中
+                f = await att.to_file()
+                self.view_ref.evidence_files.append(f)
+                count += 1
+            except Exception as e:
+                print(f"File error: {e}")
+
+        await self.view_ref.refresh_view(interaction, temp_notify=f"✅ 成功添加 {count} 张证据！当前共 {len(self.view_ref.evidence_files)} 张。")
+
+# 3. 理由填写弹窗
+class ReasonInputModal(ui.Modal, title="📝 处罚理由"):
+    reason_ui = ui.Label(
+        text="详细理由",
+        component=ui.TextInput(
+            style=discord.InputTextStyle.paragraph,
+            placeholder="请输入违规详情...",
+            required=True,
+            max_length=500
+        )
+    )
+
+    duration_ui = ui.Label(
+        text="时长 (仅禁言模式生效)",
+        description="格式: 10m, 1h, 1d",
+        component=ui.TextInput(
+            style=discord.InputTextStyle.short,
+            required=False,
+            max_length=10,
+            placeholder="留空默认1h"
+        )
+    )
+
+    def __init__(self, view_ref):
+        super().__init__()
+        self.view_ref = view_ref
+        # 预填默认值
+        self.reason_ui.component.default_value = view_ref.reason
+        if view_ref.duration_str:
+            self.duration_ui.component.default_value = view_ref.duration_str
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        self.view_ref.reason = self.reason_ui.component.value
+        dur = self.duration_ui.component.value
+        if dur:
+            self.view_ref.duration_str = dur
+
+        await self.view_ref.refresh_view(interaction)
 
 # ======================================================
-# 核心视图：全能管理面板 (Container)
+# 核心视图：ManagementControlView (LayoutView 重构版)
 # ======================================================
-class ManagementControlView(discord.ui.View):
+
+class ManagementControlView(ui.LayoutView):
     def __init__(self, ctx):
-        super().__init__(timeout=900) # 15分钟超时
+        super().__init__(timeout=900)
         self.ctx = ctx
 
-        # --- 面板状态数据 ---
-        self.selected_user = None       # Discord User 对象
-        self.selected_user_id = None    # int ID
-        self.action_type = None         # str: warn, mute, etc.
-        self.reason = "违反社区规范"      # str
-        self.duration_str = "1h"        # str
+        # --- 内部状态 ---
+        self.selected_user = None       # Discord User
+        self.selected_user_id = None    # Int ID
+        self.action_type = None         # Str
+        self.reason = "违反社区规范"
+        self.duration_str = "1h"
+        self.evidence_files = []        # List[discord.File]
 
-        # 证据缓存: list[discord.File]
-        # 注意: discord.File 读取过一次后指针会到末尾，需要seek(0)
-        self.evidence_files = []
+        # --- 预定义组件 (Interactive Components) ---
+        # 1. 动作类型选择
+        self.sel_action = ui.Select(
+            placeholder="🔨 选择处理方式...",
+            options=[
+                discord.SelectOption(label="警告 (Warn)", value="warn", emoji="⚠️"),
+                discord.SelectOption(label="禁言 (Mute)", value="mute", emoji="🤐"),
+                discord.SelectOption(label="踢出 (Kick)", value="kick", emoji="🚀"),
+                discord.SelectOption(label="封禁 (Ban)", value="ban", emoji="🚫"),
+                discord.SelectOption(label="解除禁言 (Unmute)", value="unmute", emoji="🎤"),
+                discord.SelectOption(label="解除封禁 (Unban)", value="unban", emoji="🔓"),
+            ],
+            custom_id="sel_action"
+        )
+        self.sel_action.callback = self.on_action_select
 
-        # 初始化按钮状态
-        self.refresh_buttons_state()
+        # 2. 用户选择 (UserSelect)
+        self.sel_user = ui.UserSelect(
+            placeholder="👥 点击选择目标成员...",
+            min_values=1, max_values=1,
+            custom_id="sel_user"
+        )
+        self.sel_user.callback = self.on_user_select
 
-    def refresh_buttons_state(self):
-        """根据当前选中的数据，决定哪些按钮可用"""
-        # 能否执行：必须有目标ID + 动作类型
-        can_execute = (self.selected_user_id is not None) and (self.action_type is not None)
+        # 3. 功能按钮
+        self.btn_id_search = ui.Button(label="ID模式", style=discord.ButtonStyle.secondary, emoji="🔍")
+        self.btn_id_search.callback = self.on_btn_id_click
 
-        for child in self.children:
-            # 执行按钮
-            if isinstance(child, discord.ui.Button) and child.custom_id == "btn_execute":
-                child.disabled = not can_execute
-                child.style = discord.ButtonStyle.danger if can_execute else discord.ButtonStyle.secondary
+        self.btn_evidence = ui.Button(label="传证", style=discord.ButtonStyle.primary, emoji="📸")
+        self.btn_evidence.callback = self.on_btn_evidence_click
 
-            # 理由按钮：必须先选动作
-            if isinstance(child, discord.ui.Button) and child.custom_id == "btn_reason":
-                child.disabled = (self.action_type is None)
+        self.btn_reason = ui.Button(label="写理由", style=discord.ButtonStyle.secondary, emoji="📝")
+        self.btn_reason.callback = self.on_btn_reason_click
 
-    async def update_panel(self, interaction: discord.Interaction, override_desc=None):
-        """核心方法：在原地刷新整个面板的消息内容"""
+        # 4. 执行按钮 (初始禁用)
+        self.btn_execute = ui.Button(label="⚡ 执行处罚", style=discord.ButtonStyle.danger, disabled=True, row=4)
+        self.btn_execute.callback = self.on_btn_execute_click
 
-        # 1. 刷新按钮状态
-        self.refresh_buttons_state()
+        # 初次构建界面
+        self.build_layout()
 
-        # 2. 构建新的 Embed
-        user_text = "❓ 未选择"
+    # --- 布局构建方法 ---
+    def build_layout(self, notification=None):
+        self.clear_items() # 清空当前容器
+
+        # 1. 顶部状态栏 Section
+        # 根据是否有选中用户显示不同内容
         if self.selected_user:
-            user_text = f"{self.selected_user.mention} \n`{self.selected_user.name}`"
+            user_display = f"**目标:** {self.selected_user.mention} (`{self.selected_user.id}`)"
+            avatar_url = self.selected_user.display_avatar.url
         elif self.selected_user_id:
-            user_text = f"⚙️ ID: `{self.selected_user_id}` (未找到对象)"
-
-        action_map = {
-            "warn": "⚠️ 警告 (Warn)",
-            "mute": "🤐 禁言 (Mute)",
-            "kick": "🚀 踢出 (Kick)",
-            "ban": "🚫 封禁 (Ban)",
-            "unwarn": "🛁 解除警告",
-            "unmute": "🎤 解除禁言",
-            "unban": "🔓 解除封禁"
-        }
-        act_text = action_map.get(self.action_type, "❓ 未选择")
-
-        embed = discord.Embed(title="🛡️ 社区管理控制台", color=STYLE["KIMI_YELLOW"])
-        embed.description = override_desc if override_desc else "请配置以下选项，确认无误后点击【⚡ 执行处罚】。"
-
-        # 构建信息概览表格
-        embed.add_field(name="1. 目标用户", value=user_text, inline=True)
-        embed.add_field(name="2. 处罚动作", value=act_text, inline=True)
-
-        details_text = f"**📜 理由:** {self.reason}\n"
-        if self.action_type == "mute":
-            details_text += f"**⏳ 时长:** `{self.duration_str}`\n"
-
-        if self.evidence_files:
-            details_text += f"**📎 附件:** 已暂存 {len(self.evidence_files)} 张证据"
+            user_display = f"**目标ID:** `{self.selected_user_id}` (离线/未知)"
+            avatar_url = None # 或者放个默认图
         else:
-            details_text += "**📎 附件:** 无"
+            user_display = "**目标:** ❓ 未选择"
+            avatar_url = None
 
-        embed.add_field(name="3. 执行详情", value=details_text, inline=False)
+        # 2. 动作详情 Section
+        action_map = {"warn": "⚠️ 警告", "mute": "🤐 禁言", "kick": "🚀 踢出", "ban": "🚫 封禁", "unwarn": "🛁 解警", "unmute": "🎤 解禁", "unban": "🔓 解封"}
+        act_str = action_map.get(self.action_type, "❓ 未选择")
 
-        if self.selected_user:
-            embed.set_thumbnail(url=self.selected_user.display_avatar.url)
-        embed.set_footer(text=KIMI_FOOTER_TEXT)
+        detail_lines = [f"**动作:** {act_str}"]
+        if self.action_type == "mute":
+            detail_lines.append(f"**时长:** `{self.duration_str}`")
+        detail_lines.append(f"**理由:** {self.reason}")
+        if self.evidence_files:
+            detail_lines.append(f"**证据:** 已存 {len(self.evidence_files)} 张")
 
-        # 3. 编辑消息
-        # 兼容处理：检查 interaction 是否已经被回应过
-        try:
-            if interaction.response.is_done():
-                await interaction.edit_original_response(embed=embed, view=self)
-            else:
-                await interaction.response.edit_message(embed=embed, view=self)
-        except Exception as e:
-            print(f"Panel update failed: {e}")
+        detail_content = "\n".join(detail_lines)
 
-    # --- 交互组件事件 ---
+        # 3. 如果有临时通知
+        notify_section = None
+        if notification:
+            notify_section = ui.Section(
+                ui.TextDisplay(content=f"🔔 {notification}"),
+                accessory=None
+            )
 
-    # Row 0: 用户选择器
-    @discord.ui.user_select(placeholder="👥 点击这里快速选择服务器成员...", row=0, min_values=1, max_values=1)
-    async def select_user(self, select: discord.ui.Select, interaction: discord.Interaction):
-        user = select.values[0] # 获取选中的 Member/User 对象
-        self.selected_user = user
-        self.selected_user_id = user.id
-        await self.update_panel(interaction)
+        # 4. 更新按钮状态
+        can_exec = (self.selected_user_id is not None) and (self.action_type is not None)
+        self.btn_execute.disabled = not can_exec
+        self.btn_reason.disabled = (self.action_type is None)
 
-    # Row 1: 动作选择器
-    @discord.ui.select(placeholder="🔨 请选择一种处理方式...", row=1, options=[
-        discord.SelectOption(label="警告 (Warn)", value="warn", emoji="⚠️", description="发送私信警告"),
-        discord.SelectOption(label="禁言 (Mute)", value="mute", emoji="🤐", description="开启超时模式"),
-        discord.SelectOption(label="踢出 (Kick)", value="kick", emoji="🚀", description="移出服务器"),
-        discord.SelectOption(label="封禁 (Ban)", value="ban", emoji="🚫", description="永久封禁"),
-        discord.SelectOption(label="解除禁言 (Unmute)", value="unmute", emoji="🎤"),
-        discord.SelectOption(label="解除封禁 (Unban)", value="unban", emoji="🔓"),
-    ])
-    async def select_action(self, select: discord.ui.Select, interaction: discord.Interaction):
-        self.action_type = select.values[0]
-        # 重置一些默认值提醒
-        if self.action_type == "mute" and self.duration_str == "":
-            self.duration_str = "1h"
-        await self.update_panel(interaction)
+        # --- 组装 Container ---
+        container_items = []
 
-    # Row 2: 功能按钮组
-    @discord.ui.button(label="ID搜索", style=discord.ButtonStyle.secondary, row=2, emoji="🔍")
-    async def btn_manual_id(self, button, interaction):
-        await interaction.response.send_modal(IDInputModal(self))
-
-    @discord.ui.button(label="补充证据", style=discord.ButtonStyle.primary, row=2, emoji="📸")
-    async def btn_add_evidence(self, button, interaction: discord.Interaction):
-        # 构造 Modal 内容
-        fields = {
-            "upload": ui.Label(
-                text="上传证据图 (单次最多5张)",
-                component=ui.FileUpload(
-                    custom_id="ev_upload_comp",
-                    max_values=5,
-                    required=True, # 必须传才能提交
-                ),
-            ),
-        }
-
-        # 内部回调：处理上传的文件
-        async def on_upload_submit(data, interact):
-            attachments = data.get("upload")
-
-            if not attachments:
-                return await interact.followup.send("❌ 没有检测到文件上传捏。", ephemeral=True)
-
-            count = 0
-            for att in attachments:
-                try:
-                    # 将 Attachment 转回 File 对象缓存
-                    f = await att.to_file()
-                    self.evidence_files.append(f)
-                    count += 1
-                except Exception as e:
-                    print(f"File convert error: {e}")
-
-            await self.update_panel(interact, override_desc=f"✅ 成功添加了 {count} 张新证据！当前共 {len(self.evidence_files)} 张。")
-
-        await interaction.response.send_modal(
-            CommonModal("📸 上传证据", fields, on_upload_submit)
+        # Header Section
+        container_items.append(
+            ui.Section(
+                ui.TextDisplay(content="### 🛡️ 社区管理控制台"),
+                ui.TextDisplay(content=user_display),
+                accessory=ui.Thumbnail(media=avatar_url) if avatar_url else None
+            )
         )
 
-    @discord.ui.button(label="撰写理由", style=discord.ButtonStyle.secondary, row=2, emoji="📝", custom_id="btn_reason")
-    async def btn_reason(self, button, interaction):
+        # Details Section
+        container_items.append(
+            ui.Section(
+                ui.TextDisplay(content=detail_content),
+                # 这里可以放个装饰性按钮或者Icon作为Accessory，这里暂空
+            )
+        )
+
+        if notify_section:
+            container_items.append(notify_section)
+
+        container_items.append(ui.Separator())
+
+        # Action Rows
+        container_items.append(ui.ActionRow(self.sel_user))
+        container_items.append(ui.ActionRow(self.sel_action))
+        container_items.append(ui.ActionRow(self.btn_id_search, self.btn_evidence, self.btn_reason))
+        container_items.append(ui.Separator())
+        container_items.append(ui.ActionRow(self.btn_execute))
+
+        # Config Container
+        container = ui.Container(
+            *container_items,
+            accent_colour=discord.Color.from_rgb(255, 223, 0) # Kimi Yellow
+        )
+
+        self.add_item(container)
+
+    # --- 刷新逻辑 ---
+    async def refresh_view(self, interaction: discord.Interaction = None, temp_notify=None):
+        """重新构建布局并更新消息"""
+        self.build_layout(notification=temp_notify)
+
+        if interaction:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(view=self)
+            else:
+                await interaction.edit_original_response(view=self)
+
+    # --- 回调函数 ---
+
+    async def on_user_select(self, interaction: discord.Interaction):
+        # UserSelect values 是一个列表
+        if not self.sel_user.values: return
+        user = self.sel_user.values[0]
+        self.selected_user = user
+        self.selected_user_id = user.id
+        await self.refresh_view(interaction)
+
+    async def on_action_select(self, interaction: discord.Interaction):
+        if not self.sel_action.values: return
+        self.action_type = self.sel_action.values[0]
+        if self.action_type == "mute" and not self.duration_str:
+            self.duration_str = "1h"
+        await self.refresh_view(interaction)
+
+    async def on_btn_id_click(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(IDInputModal(self))
+
+    async def on_btn_evidence_click(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(EvidenceUploadModal(self))
+
+    async def on_btn_reason_click(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ReasonInputModal(self))
 
-    # Row 3: 执行按钮 (单独一行，显眼)
-    @discord.ui.button(label="执行处罚", style=discord.ButtonStyle.danger, row=3, disabled=True, custom_id="btn_execute", emoji="⚡")
-    async def btn_execute(self, button, interaction):
-        # 再次推迟交互，因为执行可能需要时间
+    async def on_btn_execute_click(self, interaction: discord.Interaction):
         await interaction.response.defer()
 
-        # --- 准备执行数据 ---
+        # 数据准备
         target_id = self.selected_user_id
         action = self.action_type
         reason = self.reason
         guild = interaction.guild
         op_user = interaction.user
 
-        # --- 处理文件流 ---
-        # File 对象一旦被读取（比如上传到了临时服务器），指针可能会偏。
-        # 发送前我们尝试重置它们。
+        # 文件指针重置
         final_files = []
         for f in self.evidence_files:
             try:
-                if hasattr(f.fp, 'seek'):
-                    f.fp.seek(0)
+                if hasattr(f.fp, 'seek'): f.fp.seek(0)
                 final_files.append(f)
-            except:
-                pass # 忽略坏文件
+            except: pass
 
-        # --- 获取目标成员对象 ---
         target_member = guild.get_member(target_id)
-
-        # 针对需要成员在场才能执行的操作进行检查
         if action in ["warn", "mute", "kick"] and not target_member:
-             return await interaction.followup.send(f"❌ 目标用户 (ID: {target_id}) 当前不在服务器内，无法执行 警告/禁言/踢出！", ephemeral=True)
+             return await interaction.followup.send(f"❌ 目标不在服内，无法执行 {action}！", ephemeral=True)
 
-        # 获取 User 对象只为了显示名字 (fetch fallback)
-        target_user_display = self.selected_user or (target_member)
-        if not target_user_display:
-            try:
-                target_user_display = await self.bot.fetch_user(target_id)
-            except:
-                pass # 实在找不到就算了
-
-        name_display = f"{target_user_display.name} (ID: {target_id})" if target_user_display else f"ID: {target_id}"
-
-        # --- 构造日志 Embed ---
-        log_embed = discord.Embed(title=f"🛡️ 管理操作执行: {action.upper()}", color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
-        log_embed.add_field(name="执行对象", value=name_display, inline=False)
-        log_embed.add_field(name="执行理由", value=reason, inline=False)
-        log_embed.add_field(name="操作人", value=op_user.mention, inline=False)
-        if target_user_display and target_user_display.avatar:
-            log_embed.set_thumbnail(url=target_user_display.avatar.url)
-
+        # 执行逻辑
         status_msg = ""
+        log_embed = discord.Embed(title=f"🛡️ 执行报告: {action.upper()}", color=STYLE["KIMI_YELLOW"], timestamp=datetime.datetime.now())
+        log_embed.description = f"**对象:** <@{target_id}> ({target_id})\n**操作人:** {op_user.mention}\n**理由:** {reason}"
 
         try:
-            # --- 实际执行逻辑 ---
             if action == "warn":
-                # 警告通常只是私信 + 记录
                 try:
-                    dm_embed = discord.Embed(title=f"⚠️ 来自 {guild.name} 的警告", description=f"**理由:** {reason}", color=0xFFAA00)
-                    dm_embed.set_footer(text="请注意你的言行哦。")
-                    await target_member.send(embed=dm_embed)
-                    status_msg = "✅ 已私信发送警告。"
-                except discord.Forbidden:
-                    status_msg = "⚠️ 警告已记录，但无法私信用户（对方关闭了私信）。"
+                    dm = discord.Embed(title=f"⚠️ {guild.name} 警告通知", description=f"**理由:** {reason}", color=0xFFAA00)
+                    await target_member.send(embed=dm)
+                    status_msg = "✅ 已私信警告。"
+                except: status_msg = "⚠️ 警告已记录 (由于隐私设置未能私信)。"
 
             elif action == "mute":
-                seconds = parse_duration(self.duration_str)
-                if seconds <= 0:
-                    return await interaction.followup.send("❌ 禁言时间格式错误！", ephemeral=True)
-
-                until = discord.utils.utcnow() + datetime.timedelta(seconds=seconds)
+                secs = parse_duration(self.duration_str)
+                if secs <= 0: return await interaction.followup.send("❌ 时间格式错误", ephemeral=True)
+                until = discord.utils.utcnow() + datetime.timedelta(seconds=secs)
                 await target_member.timeout(until, reason=reason)
-                log_embed.add_field(name="禁言时长", value=self.duration_str, inline=False)
                 status_msg = f"🤐 已禁言 {self.duration_str}。"
+                log_embed.add_field(name="时长", value=self.duration_str)
 
             elif action == "kick":
                 await target_member.kick(reason=reason)
-                status_msg = "🚀 用户已被踢出。"
+                status_msg = "🚀 已踢出。"
 
             elif action == "ban":
-                # Ban 可以接受 User 对象或 ID
-                user_to_ban = target_member or discord.Object(id=target_id)
-                await guild.ban(user_to_ban, reason=reason)
-                status_msg = "🚫 用户已被封禁。"
-
-            elif action == "unban":
-                user_to_unban = discord.Object(id=target_id)
-                await guild.unban(user_to_unban, reason=reason)
-                status_msg = "🔓 用户已解封。"
+                await guild.ban(discord.Object(id=target_id), reason=reason)
+                status_msg = "🚫 已封禁。"
 
             elif action == "unmute":
                 await target_member.timeout(None, reason=reason)
-                status_msg = "🎤 用户已解除禁言。"
+                status_msg = "🎤 已解除禁言。"
 
-            # --- 发送结果 ---
-            # 1. 在面板下方显示结果（Ephemeral）
-            await interaction.followup.send(f"**执行成功！** {status_msg}", embed=log_embed, files=final_files, ephemeral=True)
+            elif action == "unban":
+                await guild.unban(discord.Object(id=target_id), reason=reason)
+                status_msg = "🔓 已解除封禁。"
 
-            # 2. (可选) 如果配置了日志频道，可以在这里发送一份公开记录
-            # log_channel = guild.get_channel(IDS["TICKET_LOG_CHANNEL_ID"])
-            # if log_channel: await log_channel.send(embed=log_embed)
+            # 结果反馈
+            await interaction.followup.send(f"{status_msg}", embed=log_embed, files=final_files, ephemeral=True)
 
-            # 3. 锁定面板，防止重复点击
-            for child in self.children:
-                child.disabled = True
-
-            embed = interaction.message.embeds[0]
-            embed.color = 0x00FF00 # 绿色表示完成
-            embed.title = "🛡️ 社区管理控制台 (已执行)"
-            embed.set_footer(text=f"操作已由 {op_user.display_name} 完成")
-
-            await interaction.edit_original_response(embed=embed, view=self)
+            # 锁定面板
+            self.clear_items()
+            end_container = ui.Container(
+                ui.Section(
+                    ui.TextDisplay(content=f"### ✅ 操作已完成"),
+                    ui.TextDisplay(content=f"由 {op_user.display_name} 执行于 {datetime.datetime.now().strftime('%H:%M')}"),
+                ),
+                accent_colour=discord.Color.green()
+            )
+            self.add_item(end_container)
+            await interaction.edit_original_response(view=self)
 
         except discord.Forbidden:
-            await interaction.followup.send("❌ **权限不足！** 我无法对该用户执行此操作（可能是因为他的身份组比我高）。", ephemeral=True)
+            await interaction.followup.send("❌ 权限不足 (对方身份组可能更高)！", ephemeral=True)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            await interaction.followup.send(f"❌ **执行过程中发生错误**: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ 遇到错误: {e}", ephemeral=True)
+
 
 # ======================================================
 # Cog 定义
@@ -455,31 +424,11 @@ class Management(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @discord.slash_command(name="处罚", description="呼出全能管理面板，对不乖的饱饱进行处罚！")
+    @discord.slash_command(name="处罚", description="打开全能管理面板")
     @is_super_egg()
     async def punishment_panel(self, ctx: discord.ApplicationContext):
-        # 初始 Embed
-        embed = discord.Embed(
-            title="🛡️ 社区管理控制台 (初始化中...)",
-            description="正在加载组件，请稍候...",
-            color=STYLE["KIMI_YELLOW"]
-        )
-        embed.set_footer(text=KIMI_FOOTER_TEXT)
-
-        # 初始化 View
         view = ManagementControlView(ctx)
-
-        # 发送消息并立即刷新一次面板以显示默认状态
-        resp = await ctx.respond(embed=embed, view=view, ephemeral=True)
-
-        # 获取 Interaction 对象来第一次刷新内容
-        if isinstance(resp, discord.Interaction):
-            # 这里的 resp 实际上是 interaction 上下文
-            # 但我们需要的是一个能调用 edit 或 followup 的上下文
-            # 在 pycord 中 ctx.respond 返回的是 Interaction 或 WebhookMessage
-            # 我们直接手动调用 view 的 update 逻辑来初始化内容
-            await view.update_panel(ctx.interaction, override_desc="请使用下方的组件来配置处罚选项。\n• 先选人，再选动作。\n• 点击【📸 补充证据】可上传截图保留。")
+        await ctx.respond(view=view, ephemeral=True)
 
 def setup(bot):
     bot.add_cog(Management(bot))
-
