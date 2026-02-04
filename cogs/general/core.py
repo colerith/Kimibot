@@ -181,28 +181,35 @@ class General(commands.Cog):
     @is_super_egg()
     async def send_role_panel_cmd(self, ctx):
         data = load_role_data()
-        roles = []
+        active_roles = []
         for rid in data["claimable_roles"]:
             r = ctx.guild.get_role(rid)
-            if r: roles.append(r)
+            if r: active_roles.append(r)
 
-        if not roles:
-            return await ctx.respond("还没上架任何身份组呢！请先使用 `/装饰中心 管理` 添加。", ephemeral=True)
+        # 构建可用身份组的展示文本
+        role_list_str = "*(暂无上架装饰)*"
+        if active_roles:
+            # 简单排版，用 ` ` 包裹名字
+            names = [f"`{r.name}`" for r in active_roles]
+            role_list_str = " | ".join(names)
 
         embed = discord.Embed(
-            title="🎨 装饰身份组中心",
-            description="欢迎来到装饰中心！\n请在下方选择心仪的 **装饰身份组** 来装点你的个人资料卡吧！\n\n"
-                        "💡 **操作指南**：\n"
-                        "• 点击下拉框选择一个款式穿戴。\n"
-                        "• 再次选择已拥有的款式即可卸下。\n"
-                        "• 同系列装饰（例如颜色）会自动替换，无需手动卸载。",
+            title="🎨 **百变小蛋 · 装饰身份组中心**",
+            description="欢迎来到装饰中心！在这里你可以自由装扮你的个人资料卡。\n\n"
+                        "✨ **功能介绍**：\n"
+                        "🔸 **开始装饰**：打开私密衣柜，查看并更换你的装饰。\n"
+                        "🔸 **一键移除**：一键卸下所有在此处领取的装饰，恢复素颜。\n"
+                        "🔸 **自动替换**：选择同系列新款式会自动替换旧的哦！\n\n"
+                        "📜 **当前上架款式一览**：\n"
+                        f"{role_list_str}",
             color=STYLE["KIMI_YELLOW"]
         )
-        embed.set_thumbnail(url=ctx.me.display_avatar.url) # 放 Bot 头像或者特定的图
-        embed.set_footer(text="选择下方菜单即可体验 ✨")
+        embed.set_thumbnail(url=ctx.me.display_avatar.url)
+        embed.set_footer(text="点击下方按钮即可体验 👇")
 
-        await ctx.channel.send(embed=embed, view=RoleClaimView(roles))
-        await ctx.respond("面板已发送！", ephemeral=True)
+        # 使用不需要传参的 RoleClaimView (因为数据是动态拉取的)
+        await ctx.channel.send(embed=embed, view=RoleClaimView())
+        await ctx.respond("✅ 面板发送成功！", ephemeral=True)
 
     # ==================== 抽奖 ====================
     lottery_group = SlashCommandGroup("抽奖", "激动人心的抽奖功能！")
