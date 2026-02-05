@@ -168,7 +168,6 @@ class SuspendAuditModal(discord.ui.Modal):
                 start_dt = now
             else:
                 # 尝试解析 'YYYY-MM-DD HH:MM'
-                # 假设输入的时间是配置文件里设定的时区
                 dt_naive = datetime.datetime.strptime(start_str, "%Y-%m-%d %H:%M")
                 start_dt = dt_naive.replace(tzinfo=QUOTA["TIMEZONE"])
 
@@ -183,12 +182,30 @@ class SuspendAuditModal(discord.ui.Modal):
         except ValueError:
             return await interaction.response.send_message("❌ **时间格式错误！**\n请使用 `YYYY-MM-DD HH:MM` 格式 (例如 2024-05-20 12:00) 或 `now`。", ephemeral=True)
 
-        # 保存状态到 Cog
-        self.cog.suspend_start_dt = start_dt
-        self.cog.suspend_end_dt = end_dt
-        self.cog.audit_suspend_reason = reason
-        # 强制开启标记，具体的逻辑判断交给 create_ticket_logic
-        self.cog.audit_suspended = True
+        # --- 核心修改部分开始 ---
+
+        # 1. 构建符合 core.py 中定义的 schedule_data 结构
+        # 注意：这里要存时间戳 (timestamp)，因为 json 不能直接存 datetime 对象
+        new_schedule = {
+            "suspended": True,
+            "reason": reason,
+            "start_dt": start_dt.timestamp() if start_dt else None,
+            "end_dt": end_dt.timestamp() if end_dt else None
+        }
+
+        # 2. 更新内存中的状态
+        self.cog.schedule_data = new_schedule
+
+        # 3. 持久化保存
+        # 小技巧：我们在函数内部导入 save_audit_schedule，
+        # 这样可以防止 views.py 和 core.py 互相导入导致的“循环引用”报错
+        try:
+            from .core import save_audit_schedule
+            save_audit_schedule(new_schedule)
+        except ImportError:
+            print("警告：无法导入 save_audit_schedule，可能是文件结构问题，数据仅在内存生效。")
+
+        # --- 核心修改部分结束 ---
 
         # 构建反馈消息
         msg = f"✅ **已设置审核中止计划**\n"

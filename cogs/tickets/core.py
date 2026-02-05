@@ -613,14 +613,18 @@ class Tickets(commands.Cog):
     async def resume_audit(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
 
-        # 清除所有暂停状态
-        self.audit_suspended = False
-        self.suspend_start_dt = None
-        self.suspend_end_dt = None
-        self.audit_suspend_reason = None
+        # 清除所有暂停状态 (逻辑同上)
+        self.schedule_data = {
+            "suspended": False,
+            "reason": None,
+            "start_dt": None,
+            "end_dt": None
+        }
+        save_audit_schedule(self.schedule_data)
 
         await self.update_panel_message()
         await ctx.followup.send("✅ **已手动恢复审核功能！**\n现在大家可以正常创建工单了。", ephemeral=True)
+
 
     @ticket.command(name="清理重复工单", description="（慎用）一键删除指定用户所有重复创建的工单，保留最早的一个。")
     @is_reviewer_egg()
@@ -959,7 +963,10 @@ class Tickets(commands.Cog):
     async def view_audit_schedule(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
 
-        if not self.audit_suspended:
+        # 从字典读取数据
+        is_suspended = self.schedule_data.get("suspended", False)
+
+        if not is_suspended:
             desc = "🟢 **当前工单系统正常开放**\n没有检测到预设的暂停计划。"
             color = 0x00FF00
         else:
@@ -967,20 +974,36 @@ class Tickets(commands.Cog):
             desc = "🔴 **检测到维护/暂停计划**\n"
 
             # 显示预设的原因
-            reason = self.audit_suspend_reason or "未填写原因"
+            reason = self.schedule_data.get("reason") or "未填写原因"
             desc += f"原因: {reason}\n"
 
-            start_str = self.suspend_start_dt.strftime('%m-%d %H:%M') if self.suspend_start_dt else "立即生效"
-            end_str = self.suspend_end_dt.strftime('%m-%d %H:%M') if self.suspend_end_dt else "手动恢复"
+            # 读取时间戳
+            start_ts = self.schedule_data.get("start_dt")
+            end_ts = self.schedule_data.get("end_dt")
+
+            # 转换时间用于显示
+            if start_ts:
+                start_dt = datetime.datetime.fromtimestamp(start_ts, QUOTA["TIMEZONE"])
+                start_str = start_dt.strftime('%m-%d %H:%M')
+            else:
+                start_dt = None
+                start_str = "立即生效"
+
+            if end_ts:
+                end_dt = datetime.datetime.fromtimestamp(end_ts, QUOTA["TIMEZONE"])
+                end_str = end_dt.strftime('%m-%d %H:%M')
+            else:
+                end_dt = None
+                end_str = "手动恢复"
 
             desc += f"📅 **计划时间表**:\nStart: `{start_str}`\nEnd: `{end_str}`\n\n"
 
             # 判断当前这一秒是否真的暂停了
             is_active_now = False
-            if not self.suspend_start_dt:
+            if not start_dt:
                 is_active_now = True
-            elif now >= self.suspend_start_dt:
-                if not self.suspend_end_dt or now < self.suspend_end_dt:
+            elif now >= start_dt:
+                if not end_dt or now < end_dt:
                     is_active_now = True
 
             status_text = "⛔ **服务已暂停** (当前生效中)" if is_active_now else "⏳ **计划等待执行中** (尚未开始)"
@@ -989,15 +1012,20 @@ class Tickets(commands.Cog):
 
         await ctx.followup.send(embed=discord.Embed(title="📅 工单计划管理器", description=desc, color=color), ephemeral=True)
 
+
     @schedule_group.command(name="清除", description="移除所有定时计划并立即恢复工单系统")
     async def clear_audit_schedule(self, ctx: discord.ApplicationContext):
         await ctx.defer(ephemeral=True)
 
-        # 重置所有状态
-        self.audit_suspended = False
-        self.suspend_start_dt = None
-        self.suspend_end_dt = None
-        self.audit_suspend_reason = None
+        # 重置所有状态到字典
+        self.schedule_data = {
+            "suspended": False,
+            "reason": None,
+            "start_dt": None,
+            "end_dt": None
+        }
+        # 保存到文件
+        save_audit_schedule(self.schedule_data)
 
         # 立即更新面板显示
         await self.update_panel_message()
@@ -1006,6 +1034,7 @@ class Tickets(commands.Cog):
             embed=discord.Embed(description="✅ **已清除所有计划任务！**\n工单系统已强制恢复为开放状态，面板已刷新。", color=0x00FF00),
             ephemeral=True
         )
+
 
     # --- 名额管理组 ---
     quota_mg = discord.SlashCommandGroup("名额管理", "（仅限审核小蛋）手动调整工单名额~", checks=[is_reviewer_egg()])
