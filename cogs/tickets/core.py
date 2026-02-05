@@ -491,8 +491,8 @@ class Tickets(commands.Cog):
 
                     # --- 逻辑分支 ---
 
-                    # 1. 处理：已过审但在等待确认 (3小时处理)
-                    if is_approved_waiting and diff_approved > datetime.timedelta(hours=3):
+                    # 1. 处理：已过审但在等待确认 (1小时处理)
+                    if is_approved_waiting and diff_approved > datetime.timedelta(hours=1):
 
                         # a. 尝试发送 DM 私信通知 (新增功能)
                         if member:
@@ -502,7 +502,7 @@ class Tickets(commands.Cog):
                                     description=(
                                         f"亲爱的小宝，您在 **{channel.guild.name}** 的审核工单 **{channel.name}** "
                                         f"已通过审核。\n\n"
-                                        f"由于超过 3 小时未确认，系统已自动将其归档保存。\n"
+                                        f"由于超过 1 小时未确认，系统已自动将其归档保存。\n"
                                         f"您现在的身份组应该已经更新啦，欢迎正式加入我们！🎉"
                                     ),
                                     color=0x4CAF50  # 柔和的绿色
@@ -515,7 +515,7 @@ class Tickets(commands.Cog):
                                 print(f"发送私信时发生未知错误: {e}")
 
                         # b. 频道内提示
-                        await channel.send("✅ **自动完成**\n检测到通过审核后超过 **3小时** 未操作，系统已默认处理并归档。")
+                        await channel.send("✅ **自动完成**\n检测到通过审核后超过 **1小时** 未操作，系统已默认处理并归档。")
 
                         # c. 锁定权限
                         if member:
