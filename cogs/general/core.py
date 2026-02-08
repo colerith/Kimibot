@@ -319,8 +319,8 @@ class General(commands.Cog):
     async def back_to_top(self, ctx: discord.ApplicationContext):
         await self._back_to_top_logic(ctx)
 
-    # 2. 右键菜单版本 (右键消息 -> Apps -> 🚀 回到帖子顶部)
-    @discord.message_command(name="🚀 回到帖子顶部")
+    # 2. 右键菜单版本 (右键消息 -> Apps -> 回顶)
+    @discord.message_command(name="回顶")
     async def back_to_top_ctx(self, ctx: discord.ApplicationContext, message: discord.Message):
         await self._back_to_top_logic(ctx)
 
