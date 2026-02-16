@@ -1,4 +1,3 @@
-# quiz.py
 import discord
 from discord.ext import commands
 import asyncio
@@ -13,9 +12,9 @@ SUPER_EGG_ROLE_ID = IDS.get("SUPER_EGG_ROLE_ID")
 QUIZ_LOG_CHANNEL_ID = IDS.get("QUIZ_LOG_CHANNEL_ID") 
 PUBLIC_RESULT_CHANNEL_ID = 1452485785939869808
 
-RETRY_COOLDOWN = 900      # 15分钟冷却 (900秒)
-MAX_ATTEMPTS = 999        # 答题次数不限，但有冷却
-QUIZ_DURATION = 120       # 2分钟倒计时
+RETRY_COOLDOWN = 900      
+MAX_ATTEMPTS = 999        
+QUIZ_DURATION = 120       
 
 # --- 数据存储 ---
 quiz_sessions = {}
@@ -26,12 +25,11 @@ quiz_history = {}
 # ======================================================================================
 
 def check_cooldown(user_id):
-    """检查用户是否在冷却中"""
     history = quiz_history.get(user_id)
     if not history:
         return True, 0
-
-    elapsed = (datetime.datetime.utcnow() - history).total_seconds()
+    # 使用 utcnow 的兼容写法，防止时区报错
+    elapsed = (discord.utils.utcnow() - history).total_seconds()
     if elapsed < RETRY_COOLDOWN:
         return False, int(RETRY_COOLDOWN - elapsed)
     return True, 0
@@ -46,9 +44,12 @@ class QuizStartView(discord.ui.View):
 
     @discord.ui.button(label="📝 点击开始答题", style=discord.ButtonStyle.success, custom_id="quiz_entry_start")
     async def start_quiz(self, button: discord.ui.Button, interaction: discord.Interaction):
+        # 1. 【核心修复】立即 Defer，防止 10062 错误
+        await interaction.response.defer(ephemeral=True)
+        
         user_id = interaction.user.id
 
-        # 1. 检查是否已有身份组
+        # 2. 检查是否已有身份组
         newbie_role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
         hatched_role = interaction.guild.get_role(IDS.get("HATCHED_ROLE_ID"))
 
@@ -56,16 +57,14 @@ class QuizStartView(discord.ui.View):
         has_hatched = hatched_role and hatched_role in interaction.user.roles
 
         if has_newbie or has_hatched:
-            await interaction.response.send_message("你已经是新兵蛋子或正式成员啦，不需要再答题咯！要去全区审核请前往审核频道~", ephemeral=True)
-            return
+            return await interaction.followup.send("你已经是新兵蛋子或正式成员啦，不需要再答题咯！", ephemeral=True)
 
         if user_id in quiz_sessions:
             session = quiz_sessions[user_id]
-            elapsed = (datetime.datetime.utcnow() - session["start_time"]).total_seconds()
+            elapsed = (discord.utils.utcnow() - session["start_time"]).total_seconds()
 
             if elapsed < QUIZ_DURATION:
                 remaining = int(QUIZ_DURATION - elapsed)
-                # 找到第一个未答的题
                 q_index = len(session["answers"])
                 if q_index >= len(session["questions"]):
                     q_index = len(session["questions"]) - 1
@@ -74,8 +73,8 @@ class QuizStartView(discord.ui.View):
                 view = QuizQuestionView(user_id, q_index)
                 embed = view.build_embed(q_index, question, remaining)
 
-                # 使用 ephemeral 发送，当作“恢复现场”
-                await interaction.response.send_message(
+                # 使用 followup 发送
+                await interaction.followup.send(
                     content="⚠️ **检测到你有未完成的答题，已为你恢复进度：**",
                     embed=embed,
                     view=view,
@@ -83,13 +82,12 @@ class QuizStartView(discord.ui.View):
                 )
                 return
             else:
-                # 已经超时了但因为某种原因session没清掉，强制清除，继续走下面的新流程
                 del quiz_sessions[user_id]
 
         # 3. 检查冷却
         can_start, wait_time = check_cooldown(user_id)
         if not can_start:
-            await interaction.response.send_message(f"⏳ 答题冷却中！\n请休息一下，再过 **{wait_time // 60}分{wait_time % 60}秒** 才能再次尝试哦。", ephemeral=True)
+            await interaction.followup.send(f"⏳ 答题冷却中！\n请休息一下，再过 **{wait_time // 60}分{wait_time % 60}秒** 才能再次尝试哦。", ephemeral=True)
             return
 
         # 4. 初始化
@@ -97,14 +95,14 @@ class QuizStartView(discord.ui.View):
         quiz_sessions[user_id] = {
             "questions": questions,
             "answers": {},
-            "start_time": datetime.datetime.utcnow(),
+            "start_time": discord.utils.utcnow(),
             "channel_id": interaction.channel_id
         }
 
-        # 5. 显示第一题
+        # 5. 显示第一题 (使用 followup)
         view = QuizQuestionView(user_id, 0)
         embed = view.build_embed(0, questions[0], 120)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
         # 启动计时任务
         asyncio.create_task(timer_task(interaction, user_id))
@@ -112,11 +110,9 @@ class QuizStartView(discord.ui.View):
 async def timer_task(interaction, user_id):
     try:
         await asyncio.sleep(QUIZ_DURATION)
-        # 检查在此期间是否已经完成（不在session里了）
         if user_id in quiz_sessions:
-            # 再次检查时间，防止刚刚好交卷导致的冲突
             session = quiz_sessions[user_id]
-            elapsed = (datetime.datetime.utcnow() - session["start_time"]).total_seconds()
+            elapsed = (discord.utils.utcnow() - session["start_time"]).total_seconds()
             if elapsed >= QUIZ_DURATION:
                 # 超时结算
                 await finalize_quiz(interaction, user_id, is_timeout=True)
@@ -128,8 +124,8 @@ class QuizQuestionView(discord.ui.View):
         super().__init__(timeout=QUIZ_DURATION)
         self.user_id = user_id
         self.q_index = q_index
-
-        # 检查session是否存在，再动态添加下拉菜单
+        
+        # 动态添加 Select
         session = quiz_sessions.get(user_id)
         if session and q_index < len(session["questions"]):
             question = session["questions"][q_index]
@@ -142,7 +138,7 @@ class QuizQuestionView(discord.ui.View):
                 min_values=1,
                 max_values=1,
                 options=options,
-                custom_id=f"quiz_select_{q_index}"
+                custom_id=f"quiz_select_{q_index}_{user_id}" # 加上user_id防止冲突
             )
             select.callback = self.select_callback
             self.add_item(select)
@@ -153,61 +149,52 @@ class QuizQuestionView(discord.ui.View):
         return embed
 
     async def select_callback(self, interaction: discord.Interaction):
-        # 用户验证
-        if interaction.user.id != self.user_id:
-            try:
-                return await interaction.response.send_message("这不是你的考卷！", ephemeral=True)
-            except:
-                return
+        # 【重要】Select 交互也建议 Defer，防止处理过慢
+        # defer(edit_origin=True) 表示我们要编辑原消息，不发送新消息
+        await interaction.response.defer()
 
-        # 确认session存在
+        # Ephemeral 消息只有用户自己看得到，理论上不需要校验 ID，但保留也没事
+        if interaction.user.id != self.user_id:
+             # 因为已经 defer 了，这里要用 followup
+            return await interaction.followup.send("这不是你的考卷！", ephemeral=True)
+
         session = quiz_sessions.get(self.user_id)
         if not session:
-            try:
-                return await interaction.response.send_message("❌ 会话已超时或已结束，请重新开始。", ephemeral=True)
-            except:
-                return
+            return await interaction.followup.send("❌ 会话已超时或已结束，请重新开始。", ephemeral=True)
 
         # 记录答案
-        session["answers"][self.q_index] = interaction.values[0]
+        try:
+            session["answers"][self.q_index] = interaction.data['values'][0] # 更安全的获取值方式
+        except:
+             session["answers"][self.q_index] = interaction.values[0]
 
         # 下一题
         next_index = self.q_index + 1
         if next_index < len(session["questions"]):
             next_q = session["questions"][next_index]
-
-            elapsed = (datetime.datetime.utcnow() - session["start_time"]).total_seconds()
+            elapsed = (discord.utils.utcnow() - session["start_time"]).total_seconds()
             remaining = max(0, QUIZ_DURATION - int(elapsed))
 
             view = QuizQuestionView(self.user_id, next_index)
             embed = view.build_embed(next_index, next_q, remaining)
             
+            # 使用 edit_original_response 因为我们上面已经 defer 过了
             try:
-                # 尝试编辑消息
-                if not interaction.response.is_done():
-                    await interaction.response.edit_message(embed=embed, view=view)
-                else:
-                    # Fallback：如果已响应过，则用followup
-                    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-            except discord.errors.NotFound:
-                # 交互已过期，忽略
-                pass
+                await interaction.edit_original_response(embed=embed, view=view)
             except Exception as e:
-                print(f"编辑消息出错: {e}")
+                print(f"Edit error: {e}")
+                # 如果编辑失败，尝试发个新的（兜底）
+                await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         else:
-            # 答完了，调用finalize
-            try:
-                await finalize_quiz(interaction, self.user_id, is_timeout=False)
-            except Exception as e:
-                print(f"结果处理出错: {e}")
+            # 答完了
+            await finalize_quiz(interaction, self.user_id, is_timeout=False)
 
 async def finalize_quiz(interaction, user_id, is_timeout=False):
-    # 安全检查：确保还在session里，防止多次调用
     if user_id not in quiz_sessions: 
         return
 
     session = quiz_sessions.pop(user_id)
-    quiz_history[user_id] = datetime.datetime.utcnow() # 记录结束时间用于冷却
+    quiz_history[user_id] = discord.utils.utcnow()
 
     score = 0
     details = []
@@ -218,10 +205,7 @@ async def finalize_quiz(interaction, user_id, is_timeout=False):
         if is_correct: score += 10
         details.append(f"Q{i+1}: {'✅' if is_correct else '❌'} (选{ans}/对{q['answer']})")
 
-    # 结果判定
     passed = score >= 60
-
-    # 1. 给用户的反馈 Embed
     embed = discord.Embed(
         title="📝 答题结束",
         description=f"**最终得分: {score}/100**\n" + ("⏱️ 超时提交" if is_timeout else ""),
@@ -229,61 +213,56 @@ async def finalize_quiz(interaction, user_id, is_timeout=False):
     )
 
     if passed:
-        embed.description += "\n\n🎉 **恭喜通过！**\n✅ 已自动获得【新兵蛋子】身份组。\n🔓 已解锁：象牙塔、极光及部分分区。\n\n**⚠️ 如需解锁【卡区】等所有区域：**\n请前往 <#1417572579304013885> 申请人工审核。"
-
-        # 发放身份组
+        embed.description += "\n\n🎉 **恭喜通过！**\n✅ 已自动获得【新兵蛋子】身份组。\n🔓 已解锁：象牙塔、极光及部分分区。"
         role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
         if role:
             try:
-                await interaction.user.add_roles(role, reason="自助答题通过")
-            except: pass
+                # 获取 member 对象，interaction.user 有时只是 User 类型
+                member = interaction.guild.get_member(user_id) or interaction.user
+                await member.add_roles(role, reason="自助答题通过")
+            except Exception as e:
+                print(f"加身份组失败: {e}")
     else:
         embed.description += f"\n\n❌ **未通过 (需60分)**\n请仔细阅读规则或群公告。\n**请等待 15分钟 后再次尝试。**"
 
-    # 编辑原消息显示结果
+    # 结果展示：这里最容易出错，需要兼容不同的 interaction 状态
     try:
-        if isinstance(interaction, discord.Interaction):
+        if is_timeout:
+            # 超时是由后台任务触发的，interaction 可能已经过期，尝试 followup
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            # 正常答完，因为 SelectCallback 里 defer 过了，所以用 edit_original_response
             try:
-                # 检查响应是否已处理
-                if not interaction.response.is_done():
-                    await interaction.response.edit_message(embed=embed, view=None)
-                else:
-                    # 已响应过，使用followup
-                    await interaction.followup.send(embed=embed, ephemeral=True)
-            except discord.errors.NotFound:
-                # 交互已过期，尝试followup
-                try:
-                    await interaction.followup.send(embed=embed, ephemeral=True)
-                except:
-                    pass
-            except Exception as e:
-                print(f"发送结果失败: {e}")
+                await interaction.edit_original_response(embed=embed, view=None)
+            except:
+                await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
-        print(f"响应结果异常: {e}")
+        print(f"发送结果给用户失败 (可能是token彻底过期): {e}")
 
-    # 2. 发送公示到指定频道
+    # 下面是发送到公开频道和日志频道 (无需修改，这些通常不会报 interaction 错误)
     try:
         public_channel = interaction.guild.get_channel(PUBLIC_RESULT_CHANNEL_ID)
         if public_channel:
             status_emoji = "🟢" if passed else "🔴"
             status_text = "**通过**" if passed else "**未通过**"
-
+            # 获取用户 mention
+            user_mention = f"<@{user_id}>"
+            
             public_embed = discord.Embed(
-                description=f"{status_emoji} 用户 {interaction.user.mention} 完成了入站答题。\n📊 结果：{status_text} (得分: `{score}`) {'⏱️ (超时)' if is_timeout else ''}",
+                description=f"{status_emoji} 用户 {user_mention} 完成了入站答题。\n📊 结果：{status_text} (得分: `{score}`) {'⏱️ (超时)' if is_timeout else ''}",
                 color=0x00FF00 if passed else 0xFF0000
             )
             if not passed:
                 public_embed.set_footer(text="请在冷却时间结束后再试")
-
             await public_channel.send(embed=public_embed)
     except Exception as e:
         print(f"发送公开结果失败: {e}")
 
-    # 3. 日志
     try:
         log_channel = interaction.guild.get_channel(QUIZ_LOG_CHANNEL_ID)
         if log_channel:
-            log_embed = discord.Embed(title=f"答题详情: {interaction.user.display_name} ({interaction.user.id})", description=f"分数: {score}\n结果: {'通过' if passed else '失败'}\n\n" + "\n".join(details))
+            user_name = interaction.user.display_name if hasattr(interaction.user, 'display_name') else str(user_id)
+            log_embed = discord.Embed(title=f"答题详情: {user_name} ({user_id})", description=f"分数: {score}\n结果: {'通过' if passed else '失败'}\n\n" + "\n".join(details))
             await log_channel.send(embed=log_embed)
     except Exception as e:
         print(f"发送日志失败: {e}")
@@ -294,25 +273,19 @@ class Quiz(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        try:
-            self.bot.add_view(QuizStartView())
-            print("[Quiz] Views registered successfully.")
-        except Exception as e:
-            print(f"[Quiz] Failed to register views: {e}")
+        # 重新注册持久化视图
+        self.bot.add_view(QuizStartView())
+        print("[Quiz] Views registered successfully.")
 
     @discord.slash_command(name="入站答题面板", description="（管理员）发送入站答题面板")
     async def setup_quiz_panel(self, ctx):
-        try:
-            if not ctx.guild.get_role(SUPER_EGG_ROLE_ID) in ctx.author.roles:
-                return await ctx.respond("无权操作", ephemeral=True)
-
-            channel = ctx.guild.get_channel(IDS["QUIZ_CHANNEL_ID"])
-            if not channel:
-                return await ctx.respond("找不到答题频道配置", ephemeral=True)
-
-            embed = discord.Embed(
-                title="📝 新兵蛋子入站答题",
-                description=(
+        if not ctx.guild.get_role(SUPER_EGG_ROLE_ID) in ctx.author.roles:
+            return await ctx.respond("无权操作", ephemeral=True)
+        
+        channel = ctx.guild.get_channel(IDS["QUIZ_CHANNEL_ID"])
+        embed = discord.Embed(
+            title="📝 新兵蛋子入站答题",
+            description=(
                     "欢迎来到 **🔮LOFI-加载中**！\n"
                     "为了维护社区环境，请在开始答题前仔细阅读以下内容。\n\n"
 
@@ -332,13 +305,10 @@ class Quiz(commands.Cog):
                     "• 通过后自动获得 `新兵蛋子` 身份，解锁象牙塔、极光等频道\n\n"
                     "**准备好了吗？点击下方按钮开始！**"
                 ),
-                color=STYLE["KIMI_YELLOW"]
-            )
-            await channel.send(embed=embed, view=QuizStartView())
-            await ctx.respond("面板已发送", ephemeral=True)
-        except Exception as e:
-            print(f"设置答题面板出错: {e}")
-            await ctx.respond(f"❌ 发送面板失败: {str(e)}", ephemeral=True)
+            color=STYLE["KIMI_YELLOW"]
+        )
+        await channel.send(embed=embed, view=QuizStartView())
+        await ctx.respond("面板已发送", ephemeral=True)
 
 def setup(bot):
     bot.add_cog(Quiz(bot))
