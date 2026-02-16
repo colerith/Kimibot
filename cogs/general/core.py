@@ -9,7 +9,7 @@ import random
 
 from config import IDS, STYLE, WISH_CHANNEL_ID
 from .utils import parse_duration, is_super_egg, TZ_CN
-from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data
+from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data, deploy_role_panel
 from .views import (
     WishPanelView, WishActionView, AnnouncementModal, PollView,
     RoleClaimView, LotteryCreateModal, LotteryJoinView, RoleManagerView
