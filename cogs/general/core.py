@@ -12,7 +12,8 @@ from .utils import parse_duration, is_super_egg, TZ_CN
 from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data
 from .views import (
     WishPanelView, WishActionView, AnnouncementModal, PollView,
-    RoleClaimView, LotteryCreateModal, LotteryJoinView, RoleManagerView
+    RoleClaimView, LotteryCreateModal, LotteryJoinView, RoleManagerView,
+    deploy_role_panel 
 )
 
 class General(commands.Cog):
@@ -153,75 +154,6 @@ class General(commands.Cog):
         else:
             await ctx.followup.send("呜...找不到许愿池频道！", ephemeral=True)
 
-    async def deploy_role_panel(self, channel, guild, user_avatar_url):
-        """
-        统一的面板部署逻辑：
-        1. 构建 Embed
-        2. 检查数据库中是否已记录该频道的面板消息ID
-        3. 尝试编辑旧消息，如果失败（被删了/找不到）则发送新消息
-        4. 更新数据库记录
-        """
-        # 1. 准备数据和 Embed
-        data = load_role_data()
-        active_roles = []
-        claimable_ids = data.get("claimable_roles", [])
-        
-        for rid in claimable_ids:
-            r = guild.get_role(rid)
-            if r: active_roles.append(r)
-
-        # 构建可用身份组的展示文本
-        role_list_str = "*(暂无上架装饰)*"
-        if active_roles:
-            names = [f"`{r.name}`" for r in active_roles]
-            role_list_str = " | ".join(names)
-
-        embed = discord.Embed(
-            title="🎨 **百变小蛋 · 装饰身份组中心**",
-            description="欢迎来到装饰中心！在这里你可以自由装扮你的个人资料卡。\n\n"
-                        "✨ **功能介绍**：\n"
-                        "🔸 **开始装饰**：打开私密衣柜，查看并更换你的装饰。\n"
-                        "🔸 **一键移除**：一键卸下所有在此处领取的装饰，恢复素颜。\n"
-                        "🔸 **自动替换**：选择同系列新款式会自动替换旧的哦！\n\n"
-                        "📜 **当前上架款式一览**：\n"
-                        f"{role_list_str}",
-            color=STYLE["KIMI_YELLOW"] # 确保你有导入 STYLE
-        )
-        if user_avatar_url:
-            embed.set_thumbnail(url=user_avatar_url)
-        embed.set_footer(text="点击下方按钮即可体验 👇")
-        
-        view = RoleClaimView() # 你的主面板 View
-
-        # 2. 检查是否需要更新
-        panel_info = data.get("panel_info", {})
-        last_channel_id = panel_info.get("channel_id")
-        last_message_id = panel_info.get("message_id")
-
-        message = None
-        
-        # 只有当目标频道和记录的频道一致时，才尝试编辑
-        if last_channel_id == channel.id and last_message_id:
-            try:
-                message = await channel.fetch_message(last_message_id)
-                await message.edit(embed=embed, view=view)
-                return "updated" # 返回状态：更新成功
-            except (discord.NotFound, discord.Forbidden):
-                # 消息被删了或者找不到，忽略，准备发新的
-                message = None
-        
-        # 3. 发送新消息 (如果上面没获取到 message)
-        if not message:
-            message = await channel.send(embed=embed, view=view)
-            
-            # 4. 保存新的消息ID到数据库
-            data["panel_info"] = {
-                "channel_id": channel.id,
-                "message_id": message.id
-            }
-            save_role_data(data)
-            return "sent" # 返回状态：发送新消息
-
     # ==================== 身份组领取 (Refactored) ====================
     role_group = SlashCommandGroup("百变小蛋", "管理自助领取的装饰身份组")
 
@@ -249,9 +181,9 @@ class General(commands.Cog):
     @role_group.command(name="发送", description="直接在当前频道发送用户领取面板")
     @is_super_egg()
     async def send_role_panel_cmd(self, ctx):
-        await ctx.defer(ephemeral=True) # 防止超时
+        await ctx.defer(ephemeral=True)
         
-        status = await self.deploy_role_panel(ctx.channel, ctx.guild, ctx.me.display_avatar.url)
+        status = await deploy_role_panel(ctx.channel, ctx.guild, ctx.me.display_avatar.url)
         
         if status == "updated":
             await ctx.followup.send("✅ 检测到当前频道已有面板，已同步最新数据并 **更新** 成功！", ephemeral=True)
