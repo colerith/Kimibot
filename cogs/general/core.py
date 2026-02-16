@@ -25,9 +25,8 @@ class General(commands.Cog):
         # 注册持久化视图
         self.bot.add_view(WishPanelView())
         self.bot.add_view(WishActionView())
-        self.bot.add_view(LotteryJoinView("Prize")) # 注册抽奖按钮监听
-        self.bot.add_view(RoleClaimView([])) # 占位注册，防止报错
-
+        self.bot.add_view(LotteryJoinView("Prize")) 
+        self.bot.add_view(RoleClaimView()) 
         print("General Cog Layout Loaded.")
         asyncio.create_task(self.check_and_post_wish_panel())
         asyncio.create_task(self.resume_lotteries())
