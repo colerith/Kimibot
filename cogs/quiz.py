@@ -65,13 +65,10 @@ class QuizStartView(discord.ui.View):
 
             if elapsed < QUIZ_DURATION:
                 remaining = int(QUIZ_DURATION - elapsed)
-                current_q_index = max(session["answers"].keys()) if session["answers"] else 0
-                q_index = 0
-                for i in range(len(session["questions"])):
-                    if i not in session["answers"]:
-                        q_index = i
-                        break
-                    q_index = i # 如果都答了（理论上会结束），保底一下
+                # 找到第一个未答的题
+                q_index = len(session["answers"])
+                if q_index >= len(session["questions"]):
+                    q_index = len(session["questions"]) - 1
 
                 question = session["questions"][q_index]
                 view = QuizQuestionView(user_id, q_index)
@@ -113,15 +110,18 @@ class QuizStartView(discord.ui.View):
         asyncio.create_task(timer_task(interaction, user_id))
 
 async def timer_task(interaction, user_id):
-    await asyncio.sleep(QUIZ_DURATION)
-    # 检查在此期间是否已经完成（不在session里了）
-    if user_id in quiz_sessions:
-        # 再次检查时间，防止刚刚好交卷导致的冲突
-        session = quiz_sessions[user_id]
-        elapsed = (datetime.datetime.utcnow() - session["start_time"]).total_seconds()
-        if elapsed >= QUIZ_DURATION:
-            # 超时结算
-            await finalize_quiz(interaction, user_id, is_timeout=True)
+    try:
+        await asyncio.sleep(QUIZ_DURATION)
+        # 检查在此期间是否已经完成（不在session里了）
+        if user_id in quiz_sessions:
+            # 再次检查时间，防止刚刚好交卷导致的冲突
+            session = quiz_sessions[user_id]
+            elapsed = (datetime.datetime.utcnow() - session["start_time"]).total_seconds()
+            if elapsed >= QUIZ_DURATION:
+                # 超时结算
+                await finalize_quiz(interaction, user_id, is_timeout=True)
+    except Exception as e:
+        print(f"计时任务出错: {e}")
 
 class QuizQuestionView(discord.ui.View):
     def __init__(self, user_id, q_index):
@@ -129,9 +129,9 @@ class QuizQuestionView(discord.ui.View):
         self.user_id = user_id
         self.q_index = q_index
 
-        # 动态添加下拉菜单
+        # 检查session是否存在，再动态添加下拉菜单
         session = quiz_sessions.get(user_id)
-        if session:
+        if session and q_index < len(session["questions"]):
             question = session["questions"][q_index]
             options = []
             for key, val in question["options"].items():
@@ -153,17 +153,23 @@ class QuizQuestionView(discord.ui.View):
         return embed
 
     async def select_callback(self, interaction: discord.Interaction):
+        # 用户验证
         if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("这不是你的考卷！", ephemeral=True)
+            try:
+                return await interaction.response.send_message("这不是你的考卷！", ephemeral=True)
+            except:
+                return
 
-        selected_val = self.children[0].values[0]
+        # 确认session存在
         session = quiz_sessions.get(self.user_id)
         if not session:
-            # 可能是超时了被清理了
-            return await interaction.response.send_message("❌ 会话已超时或已结束，请重新开始。", ephemeral=True)
+            try:
+                return await interaction.response.send_message("❌ 会话已超时或已结束，请重新开始。", ephemeral=True)
+            except:
+                return
 
         # 记录答案
-        session["answers"][self.q_index] = selected_val
+        session["answers"][self.q_index] = interaction.values[0]
 
         # 下一题
         next_index = self.q_index + 1
@@ -175,14 +181,30 @@ class QuizQuestionView(discord.ui.View):
 
             view = QuizQuestionView(self.user_id, next_index)
             embed = view.build_embed(next_index, next_q, remaining)
-            await interaction.response.edit_message(embed=embed, view=view)
+            
+            try:
+                # 尝试编辑消息
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(embed=embed, view=view)
+                else:
+                    # Fallback：如果已响应过，则用followup
+                    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            except discord.errors.NotFound:
+                # 交互已过期，忽略
+                pass
+            except Exception as e:
+                print(f"编辑消息出错: {e}")
         else:
-            # 答完了
-            await finalize_quiz(interaction, self.user_id, is_timeout=False)
+            # 答完了，调用finalize
+            try:
+                await finalize_quiz(interaction, self.user_id, is_timeout=False)
+            except Exception as e:
+                print(f"结果处理出错: {e}")
 
 async def finalize_quiz(interaction, user_id, is_timeout=False):
     # 安全检查：确保还在session里，防止多次调用
-    if user_id not in quiz_sessions: return
+    if user_id not in quiz_sessions: 
+        return
 
     session = quiz_sessions.pop(user_id)
     quiz_history[user_id] = datetime.datetime.utcnow() # 记录结束时间用于冷却
@@ -220,43 +242,51 @@ async def finalize_quiz(interaction, user_id, is_timeout=False):
 
     # 编辑原消息显示结果
     try:
-        # 如果是select interaction回复
         if isinstance(interaction, discord.Interaction):
             try:
-                # 尝试编辑最后一条消息
+                # 检查响应是否已处理
                 if not interaction.response.is_done():
                     await interaction.response.edit_message(embed=embed, view=None)
                 else:
+                    # 已响应过，使用followup
                     await interaction.followup.send(embed=embed, ephemeral=True)
-            except:
-                await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
-            pass
-    except: pass
+            except discord.errors.NotFound:
+                # 交互已过期，尝试followup
+                try:
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                except:
+                    pass
+            except Exception as e:
+                print(f"发送结果失败: {e}")
+    except Exception as e:
+        print(f"响应结果异常: {e}")
 
-    # 2. 发送公示到指定频道 (145248578593)
-    public_channel = interaction.guild.get_channel(PUBLIC_RESULT_CHANNEL_ID)
-    if public_channel:
-        status_emoji = "🟢" if passed else "🔴"
-        status_text = "**通过**" if passed else "**未通过**"
+    # 2. 发送公示到指定频道
+    try:
+        public_channel = interaction.guild.get_channel(PUBLIC_RESULT_CHANNEL_ID)
+        if public_channel:
+            status_emoji = "🟢" if passed else "🔴"
+            status_text = "**通过**" if passed else "**未通过**"
 
-        public_embed = discord.Embed(
-            description=f"{status_emoji} 用户 {interaction.user.mention} 完成了入站答题。\n📊 结果：{status_text} (得分: `{score}`) {'⏱️ (超时)' if is_timeout else ''}",
-            color=0x00FF00 if passed else 0xFF0000
-        )
-        if not passed:
-            public_embed.set_footer(text="请在冷却时间结束后再试")
+            public_embed = discord.Embed(
+                description=f"{status_emoji} 用户 {interaction.user.mention} 完成了入站答题。\n📊 结果：{status_text} (得分: `{score}`) {'⏱️ (超时)' if is_timeout else ''}",
+                color=0x00FF00 if passed else 0xFF0000
+            )
+            if not passed:
+                public_embed.set_footer(text="请在冷却时间结束后再试")
 
-        try:
             await public_channel.send(embed=public_embed)
-        except Exception as e:
-            print(f"发送公开结果失败: {e}")
+    except Exception as e:
+        print(f"发送公开结果失败: {e}")
 
-    # 3. 日志 (保留原有的管理员日志)
-    log_channel = interaction.guild.get_channel(QUIZ_LOG_CHANNEL_ID)
-    if log_channel:
-        log_embed = discord.Embed(title=f"答题详情: {interaction.user.display_name} ({interaction.user.id})", description=f"分数: {score}\n结果: {'通过' if passed else '失败'}\n\n" + "\n".join(details))
-        await log_channel.send(embed=log_embed)
+    # 3. 日志
+    try:
+        log_channel = interaction.guild.get_channel(QUIZ_LOG_CHANNEL_ID)
+        if log_channel:
+            log_embed = discord.Embed(title=f"答题详情: {interaction.user.display_name} ({interaction.user.id})", description=f"分数: {score}\n结果: {'通过' if passed else '失败'}\n\n" + "\n".join(details))
+            await log_channel.send(embed=log_embed)
+    except Exception as e:
+        print(f"发送日志失败: {e}")
 
 class Quiz(commands.Cog):
     def __init__(self, bot):
@@ -264,44 +294,51 @@ class Quiz(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.bot.add_view(QuizStartView())
-        print("Quiz views registered.")
+        try:
+            self.bot.add_view(QuizStartView())
+            print("[Quiz] Views registered successfully.")
+        except Exception as e:
+            print(f"[Quiz] Failed to register views: {e}")
 
     @discord.slash_command(name="入站答题面板", description="（管理员）发送入站答题面板")
     async def setup_quiz_panel(self, ctx):
-        if not ctx.guild.get_role(SUPER_EGG_ROLE_ID) in ctx.author.roles:
-            return await ctx.respond("无权操作", ephemeral=True)
+        try:
+            if not ctx.guild.get_role(SUPER_EGG_ROLE_ID) in ctx.author.roles:
+                return await ctx.respond("无权操作", ephemeral=True)
 
-        channel = ctx.guild.get_channel(IDS["QUIZ_CHANNEL_ID"])
-        if not channel:
-            return await ctx.respond("找不到答题频道配置", ephemeral=True)
+            channel = ctx.guild.get_channel(IDS["QUIZ_CHANNEL_ID"])
+            if not channel:
+                return await ctx.respond("找不到答题频道配置", ephemeral=True)
 
-        embed = discord.Embed(
-            title="📝 新兵蛋子入站答题",
-            description=(
-                "欢迎来到 **🔮LOFI-加载中**！\n"
-                "为了维护社区环境，请在开始答题前仔细阅读以下内容。\n\n"
+            embed = discord.Embed(
+                title="📝 新兵蛋子入站答题",
+                description=(
+                    "欢迎来到 **🔮LOFI-加载中**！\n"
+                    "为了维护社区环境，请在开始答题前仔细阅读以下内容。\n\n"
 
-                "📘 **第一步：阅读指引**\n"
-                "**请务必先前往 <#1417568378889175071> 仔细阅读频道指引！**\n"
+                    "📘 **第一步：阅读指引**\n"
+                    "**请务必先前往 <#1417568378889175071> 仔细阅读频道指引！**\n"
 
-                "🛑 **第二步：社区核心原则确认**\n"
-                "1. **社区定位**：我们是非商业化 SillyTavern 女性社区，仅欢迎有酒馆使用经验的同好。\n"
-                "2. **资源红线**：严禁将社区资源用于商业云酒馆、付费服务或第三方软件（如Tavo、Omate）。\n"
-                "3. **拒绝商业**：坚决反对任何形式的商业化，请勿推荐非官方付费API或节点。\n\n"
-                "----------------------------------------------------\n"
-                "**同意以上条款后，请开始答题：**\n\n"
-                "**规则说明：**\n"
-                "• 共10道题，涉及SillyTavern基础与社区规则\n"
-                "• **限时 2 分钟**，60分及格\n"
-                "• **答题失败需等待 15 分钟冷却**\n"
-                "• 通过后自动获得 `新兵蛋子` 身份，解锁象牙塔、极光等频道\n\n"
-                "**准备好了吗？点击下方按钮开始！**"
-            ),
-            color=STYLE["KIMI_YELLOW"]
-        )
-        await channel.send(embed=embed, view=QuizStartView())
-        await ctx.respond("面板已发送", ephemeral=True)
+                    "🛑 **第二步：社区核心原则确认**\n"
+                    "1. **社区定位**：我们是非商业化 SillyTavern 女性社区，仅欢迎有酒馆使用经验的同好。\n"
+                    "2. **资源红线**：严禁将社区资源用于商业云酒馆、付费服务或第三方软件（如Tavo、Omate）。\n"
+                    "3. **拒绝商业**：坚决反对任何形式的商业化，请勿推荐非官方付费API或节点。\n\n"
+                    "----------------------------------------------------\n"
+                    "**同意以上条款后，请开始答题：**\n\n"
+                    "**规则说明：**\n"
+                    "• 共10道题，涉及SillyTavern基础与社区规则\n"
+                    "• **限时 2 分钟**，60分及格\n"
+                    "• **答题失败需等待 15 分钟冷却**\n"
+                    "• 通过后自动获得 `新兵蛋子` 身份，解锁象牙塔、极光等频道\n\n"
+                    "**准备好了吗？点击下方按钮开始！**"
+                ),
+                color=STYLE["KIMI_YELLOW"]
+            )
+            await channel.send(embed=embed, view=QuizStartView())
+            await ctx.respond("面板已发送", ephemeral=True)
+        except Exception as e:
+            print(f"设置答题面板出错: {e}")
+            await ctx.respond(f"❌ 发送面板失败: {str(e)}", ephemeral=True)
 
 def setup(bot):
     bot.add_cog(Quiz(bot))
