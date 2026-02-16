@@ -241,6 +241,10 @@ class RoleClaimSelect(discord.ui.Select):
             custom_id="role_claim_select_inner"
         )
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # 允许所有用户交互（这个下拉框是通过start_decor_callback发送的私密消息）
+        return True
+
     async def callback(self, interaction: discord.Interaction):
         # 保持之前的逻辑不变
         await interaction.response.defer(ephemeral=True)
@@ -296,11 +300,15 @@ class RoleSelectionView(discord.ui.View):
     点开【开始装饰】后看到的私密视图
     """
     def __init__(self, guild_roles):
-        super().__init__(timeout=180) # 私密面板3分钟超时即可
+        super().__init__(timeout=None) # 改为None：持久化监听，即使bot重启也能交互
         if guild_roles:
             self.add_item(RoleClaimSelect(guild_roles[:25]))
         else:
             self.add_item(discord.ui.Button(label="暂无可用装饰", disabled=True))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # 允许此视图中的所有组件交互
+        return True
 
 # --- 用户端视图 Step 1 : 公开主面板入口 ---
 
@@ -310,6 +318,10 @@ class RoleClaimView(discord.ui.View):
     """
     def __init__(self):
         super().__init__(timeout=None) # 持久化监听
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # 允许所有用户与这个公共面板交互
+        return True
 
     @discord.ui.button(label="🎨 开始装饰", style=discord.ButtonStyle.success, custom_id="role_main_start")
     async def start_decor_callback(self, button, interaction: discord.Interaction):
@@ -393,8 +405,9 @@ class RoleManagerView(discord.ui.View):
     def __init__(self, ctx):
         super().__init__(timeout=600)
         self.ctx = ctx
-        self.guild = ctx.guild
-        self.setup_ui()
+        self.guild = ctx.guild if ctx else None
+        if self.guild:
+            self.setup_ui()
 
     def get_current_roles(self):
         data = load_role_data()
