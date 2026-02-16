@@ -180,36 +180,14 @@ class General(commands.Cog):
     @role_group.command(name="发送", description="直接在当前频道发送用户领取面板")
     @is_super_egg()
     async def send_role_panel_cmd(self, ctx):
-        data = load_role_data()
-        active_roles = []
-        for rid in data["claimable_roles"]:
-            r = ctx.guild.get_role(rid)
-            if r: active_roles.append(r)
-
-        # 构建可用身份组的展示文本
-        role_list_str = "*(暂无上架装饰)*"
-        if active_roles:
-            # 简单排版，用 ` ` 包裹名字
-            names = [f"`{r.name}`" for r in active_roles]
-            role_list_str = " | ".join(names)
-
-        embed = discord.Embed(
-            title="🎨 **百变小蛋 · 装饰身份组中心**",
-            description="欢迎来到装饰中心！在这里你可以自由装扮你的个人资料卡。\n\n"
-                        "✨ **功能介绍**：\n"
-                        "🔸 **开始装饰**：打开私密衣柜，查看并更换你的装饰。\n"
-                        "🔸 **一键移除**：一键卸下所有在此处领取的装饰，恢复素颜。\n"
-                        "🔸 **自动替换**：选择同系列新款式会自动替换旧的哦！\n\n"
-                        "📜 **当前上架款式一览**：\n"
-                        f"{role_list_str}",
-            color=STYLE["KIMI_YELLOW"]
-        )
-        embed.set_thumbnail(url=ctx.me.display_avatar.url)
-        embed.set_footer(text="点击下方按钮即可体验 👇")
-
-        # 使用不需要传参的 RoleClaimView (因为数据是动态拉取的)
-        await ctx.channel.send(embed=embed, view=RoleClaimView())
-        await ctx.respond("✅ 面板发送成功！", ephemeral=True)
+        await ctx.defer(ephemeral=True) # 防止超时
+        
+        status = await self.deploy_role_panel(ctx.channel, ctx.guild, ctx.me.display_avatar.url)
+        
+        if status == "updated":
+            await ctx.followup.send("✅ 检测到当前频道已有面板，已同步最新数据并 **更新** 成功！", ephemeral=True)
+        else:
+            await ctx.followup.send("✅ 面板已 **发送** 成功！", ephemeral=True)
 
     # ==================== 抽奖 ====================
     lottery_group = SlashCommandGroup("抽奖", "激动人心的抽奖功能！")

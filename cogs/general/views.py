@@ -5,7 +5,7 @@ import asyncio
 import random
 from config import STYLE, SERVER_OWNER_ID, IDS
 from .utils import TZ_CN, generate_progress_bar
-from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data
+from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data, deploy_role_panel
 
 # ==================== 许愿池相关 ====================
 
@@ -493,10 +493,22 @@ class RoleManagerView(discord.ui.View):
     async def refresh_callback(self, interaction): 
         await self.refresh_content(interaction)
 
-    async def send_panel_callback(self, interaction):
-        embed = discord.Embed(title="🎨 装饰身份组中心", description="点击下方按钮开始装扮！", color=STYLE["KIMI_YELLOW"])
-        await interaction.channel.send(embed=embed, view=RoleClaimView()) 
-        await interaction.response.send_message("✅ 面板已发送！", ephemeral=True)
+    async def send_panel_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            avatar_url = interaction.guild.me.display_avatar.url if interaction.guild.me else None
+            
+            # 调用我们定义的通用函数
+            status = await deploy_role_panel(interaction.channel, interaction.guild, avatar_url)
+            
+            if status == "updated":
+                await interaction.followup.send("🔄 面板已就地 **更新** 为最新状态！", ephemeral=True)
+            else:
+                await interaction.followup.send("📤 面板已 **发送** 到当前频道！", ephemeral=True)
+                
+        except Exception as e:
+            await interaction.followup.send(f"❌ 发送失败: {e}", ephemeral=True)
 
     async def refresh_content(self, interaction):
         self.setup_ui()
