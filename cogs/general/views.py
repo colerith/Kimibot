@@ -3,9 +3,9 @@ from discord import ui
 import datetime
 import asyncio
 import random
-from config import STYLE, SERVER_OWNER_ID, IDS
+from config import STYLE, SERVER_OWNER_ID, IDS, deploy_role_panel
 from .utils import TZ_CN, generate_progress_bar
-from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data, deploy_role_panel
+from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data
 
 # ==================== 许愿池相关 ====================
 
@@ -379,7 +379,6 @@ class RoleClaimView(discord.ui.View):
             await interaction.followup.send(f"❌ 移除失败: {e}", ephemeral=True)
 
 # --- 管理端视图 : 管理台 ---
-# 1. 新增：将添加身份组的逻辑提取为独立的类
 class AdminAddRoleSelect(discord.ui.Select):
     def __init__(self, parent_view):
         super().__init__(
