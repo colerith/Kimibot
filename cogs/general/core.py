@@ -9,7 +9,7 @@ import random
 
 from config import IDS, STYLE, WISH_CHANNEL_ID
 from .utils import parse_duration, is_super_egg, TZ_CN
-from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data, deploy_role_panel
+from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data
 from .views import (
     WishPanelView, WishActionView, AnnouncementModal, PollView,
     RoleClaimView, LotteryCreateModal, LotteryJoinView, RoleManagerView
@@ -153,12 +153,6 @@ class General(commands.Cog):
         else:
             await ctx.followup.send("呜...找不到许愿池频道！", ephemeral=True)
 
-    # ==================== 身份组领取 (Refactored) ====================
-    role_group = SlashCommandGroup("百变小蛋", "管理自助领取的装饰身份组")
-
-    @role_group.command(name="管理", description="打开身份组管理控制台（添加/移除身份组）")
-    @is_super_egg()
-
     async def deploy_role_panel(self, channel, guild, user_avatar_url):
         """
         统一的面板部署逻辑：
@@ -227,6 +221,12 @@ class General(commands.Cog):
             }
             save_role_data(data)
             return "sent" # 返回状态：发送新消息
+
+    # ==================== 身份组领取 (Refactored) ====================
+    role_group = SlashCommandGroup("百变小蛋", "管理自助领取的装饰身份组")
+
+    @role_group.command(name="管理", description="打开身份组管理控制台（添加/移除身份组）")
+    @is_super_egg()
     
     async def manage_roles(self, ctx):
         # 初始化 View
