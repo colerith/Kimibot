@@ -124,51 +124,64 @@ class QuizQuestionView(discord.ui.View):
         super().__init__(timeout=QUIZ_DURATION)
         self.user_id = user_id
         self.q_index = q_index
-        
+
         # 动态添加 Select
         session = quiz_sessions.get(user_id)
         if session and q_index < len(session["questions"]):
             question = session["questions"][q_index]
             options = []
+
             for key, val in question["options"].items():
-                options.append(discord.SelectOption(label=f"{key}. {val}", value=key))
+
+                preview_text = (val[:48] + "...") if len(val) > 48 else val
+
+                options.append(discord.SelectOption(
+                    label=f"选项 {key}",       
+                    description=preview_text,  
+                    value=key,
+                    emoji="👉" 
+                ))
 
             select = discord.ui.Select(
-                placeholder="请选择一个答案...",
+                placeholder="请选择你的答案 (完整内容见上方)",
                 min_values=1,
                 max_values=1,
                 options=options,
-                custom_id=f"quiz_select_{q_index}_{user_id}" # 加上user_id防止冲突
+                custom_id=f"quiz_select_{q_index}_{user_id}"
             )
             select.callback = self.select_callback
             self.add_item(select)
 
     def build_embed(self, index, question, remaining_time):
-        embed = discord.Embed(title=f"第 {index + 1}/10 题", description=f"**{question['question']}**", color=STYLE["KIMI_YELLOW"])
+        # 1. 题目部分
+        desc = f"### **{question['question']}**\n\n" 
+
+        for key, val in question["options"].items():
+            desc += f"> **{key}.** {val}\n"
+
+        embed = discord.Embed(
+            title=f"📝 第 {index + 1}/10 题",
+            description=desc,
+            color=STYLE["KIMI_YELLOW"]
+        )
         embed.set_footer(text=f"⏱️ 剩余时间: {remaining_time}秒 (总共2分钟)")
         return embed
 
     async def select_callback(self, interaction: discord.Interaction):
-        # 【重要】Select 交互也建议 Defer，防止处理过慢
-        # defer(edit_origin=True) 表示我们要编辑原消息，不发送新消息
         await interaction.response.defer()
 
-        # Ephemeral 消息只有用户自己看得到，理论上不需要校验 ID，但保留也没事
         if interaction.user.id != self.user_id:
-             # 因为已经 defer 了，这里要用 followup
             return await interaction.followup.send("这不是你的考卷！", ephemeral=True)
 
         session = quiz_sessions.get(self.user_id)
         if not session:
             return await interaction.followup.send("❌ 会话已超时或已结束，请重新开始。", ephemeral=True)
 
-        # 记录答案
         try:
-            session["answers"][self.q_index] = interaction.data['values'][0] # 更安全的获取值方式
+            session["answers"][self.q_index] = interaction.data['values'][0]
         except:
              session["answers"][self.q_index] = interaction.values[0]
 
-        # 下一题
         next_index = self.q_index + 1
         if next_index < len(session["questions"]):
             next_q = session["questions"][next_index]
@@ -177,16 +190,13 @@ class QuizQuestionView(discord.ui.View):
 
             view = QuizQuestionView(self.user_id, next_index)
             embed = view.build_embed(next_index, next_q, remaining)
-            
-            # 使用 edit_original_response 因为我们上面已经 defer 过了
+
             try:
                 await interaction.edit_original_response(embed=embed, view=view)
             except Exception as e:
                 print(f"Edit error: {e}")
-                # 如果编辑失败，尝试发个新的（兜底）
                 await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         else:
-            # 答完了
             await finalize_quiz(interaction, self.user_id, is_timeout=False)
 
 async def finalize_quiz(interaction, user_id, is_timeout=False):
