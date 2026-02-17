@@ -449,7 +449,7 @@ class AdminRemoveRoleSelect(discord.ui.Select):
         else:
             await interaction.response.send_message("数据不同步，请刷新后再试。", ephemeral=True)
 
-async def deploy_role_panel(self, channel, guild, user_avatar_url):
+async def deploy_role_panel(self, channel, guild):
         """
         统一的面板部署逻辑：
         1. 构建 Embed
