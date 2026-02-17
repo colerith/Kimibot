@@ -163,23 +163,9 @@ class General(commands.Cog):
 
     @role_group.command(name="管理", description="打开身份组管理控制台（添加/移除身份组）")
     @is_super_egg()
-    
     async def manage_roles(self, ctx):
-        # 初始化 View
         view = RoleManagerView(ctx)
-
-        # 初始 Embed
-        roles = view.get_current_roles()
-        embed = discord.Embed(title="⚙️ 身份组池管理控制台", color=discord.Color.blue())
-        desc = "**当前已上架的身份组：**\n"
-        if roles:
-            desc += "\n".join([f"• {r.mention} (ID: {r.id})" for r in roles])
-        else:
-            desc += "*(空空如也，快添加一些吧！)*"
-
-        desc += "\n\n**操作说明：**\n➕ 使用第一行菜单添加新身份组\n➖ 使用第二行菜单移除已有身份组"
-        embed.description = desc
-
+        embed = view.build_dashboard_embed()
         await ctx.respond(embed=embed, view=view, ephemeral=True)
 
     @role_group.command(name="发送", description="直接在当前频道发送用户领取面板")

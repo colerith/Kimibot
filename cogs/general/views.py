@@ -579,67 +579,71 @@ class RoleManagerView(discord.ui.View):
             self.setup_ui()
 
     def setup_ui(self):
+        """ 初始化界面组件 """
         self.clear_items()
-
-        # 1. 加载数据
         data = load_role_data()
-
-        # 2. 构建给 RemoveSelect 用的字典 {Role: Type}
-        # 这是修复的关键：我们明确创建一个字典，而不是列表
         role_map = {}
 
-        # 添加普通池
+        # 构建 {Role: Type} 字典
         for rid in data.get("claimable_roles", []):
             r = self.guild.get_role(rid)
             if r: role_map[r] = "claimable"
 
-        # 添加奖池
         for rid in data.get("lottery_roles", []):
             r = self.guild.get_role(rid)
             if r: role_map[r] = "lottery"
 
-        # 3. 添加组件
-        # [行0] 添加到奖池
+        # 添加组件
         self.add_item(AdminAddRoleSelect(self, is_lottery=True))
-        # [行1] 添加到普通池
         self.add_item(AdminAddRoleSelect(self, is_lottery=False))
-        # [行2] 移除列表 (这里传入字典 role_map)
-        self.add_item(AdminRemoveSelect(role_map, self))
+        self.add_item(AdminRemoveSelect(role_map, self)) # 传入修复后的字典
 
-        # [行3] 按钮
-        ref_btn = Button(label="🔄 刷新", style=discord.ButtonStyle.secondary, row=3)
+        # 功能按钮
+        ref_btn = discord.ui.Button(label="🔄 刷新", style=discord.ButtonStyle.secondary, row=3, custom_id="admin_refresh")
         ref_btn.callback = self.refresh_callback
         self.add_item(ref_btn)
 
-        snd_btn = Button(label="📤 发送面板", style=discord.ButtonStyle.primary, row=3, emoji="📨")
+        snd_btn = discord.ui.Button(label="📤 发送面板", style=discord.ButtonStyle.primary, row=3, emoji="📨", custom_id="admin_send")
         snd_btn.callback = self.send_panel_callback
         self.add_item(snd_btn)
 
-    async def refresh_callback(self, interaction):
-        await self.refresh_content(interaction)
-
-    async def send_panel_callback(self, interaction):
-        await interaction.response.defer(ephemeral=True)
-        await deploy_role_panel(interaction.channel, interaction.guild, interaction.user.display_avatar.url)
-        await interaction.followup.send("尝试发送面板...", ephemeral=True)
-
-    async def refresh_content(self, interaction):
-        self.setup_ui()
-
-        # 更新 Embed 显示当前列表
+    def build_dashboard_embed(self):
+        """ 【新增】专门用于生成/重建 Embed 的方法 """
         data = load_role_data()
         embed = discord.Embed(title="⚙️ 身份组管理控制台", color=0x2b2d31)
+        embed.set_footer(text=f"Server: {self.guild.name}", icon_url=self.guild.icon.url if self.guild.icon else None)
 
         def fmt_roles(key):
             ids = data.get(key, [])
             names = []
             for rid in ids:
                 r = self.guild.get_role(rid)
-                names.append(r.mention if r else f"`{rid}(已失效)`")
-            return ", ".join(names) if names else "*(空)*"
+                names.append(r.mention if r else f"`{rid} (失效)`")
+            return ", ".join(names) if names else "*Currently Empty*"
 
-        embed.add_field(name="🎰 抽奖模式 (Lottery)", value=fmt_roles("lottery_roles"), inline=False)
-        embed.add_field(name="🎨 自选模式 (Claimable)", value=fmt_roles("claimable_roles"), inline=False)
+        embed.add_field(name="🎰 抽奖模式 (Lottery Pool)", value=fmt_roles("lottery_roles"), inline=False)
+        embed.add_field(name="🎨 自选模式 (Claimable Pool)", value=fmt_roles("claimable_roles"), inline=False)
+        embed.description = "⬇️ **下方菜单操作指南：**\n• `Add Lottery`: 添加到需抽奖获取的身份组\n• `Add Claimable`: 添加到可直接领取的身份组\n• `➖ Remove`: 移除已有配置"
+
+        return embed
+
+    async def refresh_callback(self, interaction: discord.Interaction):
+        await self.refresh_content(interaction)
+
+    async def send_panel_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        # 调用你的部署函数
+        try:
+            await deploy_role_panel(interaction.channel, interaction.guild, None)
+            await interaction.followup.send("✅ 面板已发送/更新到当前频道底端。", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 发送失败: {e}", ephemeral=True)
+
+    async def refresh_content(self, interaction: discord.Interaction):
+        # 1. 重建 UI 数据
+        self.setup_ui()
+        # 2. 重建 Embed
+        embed = self.build_dashboard_embed()
 
         if not interaction.response.is_done():
             await interaction.response.edit_message(embed=embed, view=self)
