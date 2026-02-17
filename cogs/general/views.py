@@ -608,10 +608,9 @@ class RoleManagerView(discord.ui.View):
         self.add_item(snd_btn)
 
     def build_dashboard_embed(self):
-        """ 【新增】专门用于生成/重建 Embed 的方法 """
         data = load_role_data()
         embed = discord.Embed(title="⚙️ 身份组管理控制台", color=0x2b2d31)
-        embed.set_footer(text=f"Server: {self.guild.name}", icon_url=self.guild.icon.url if self.guild.icon else None)
+        embed.set_footer(text=f"{self.guild.name}", icon_url=self.guild.icon.url if self.guild.icon else None)
 
         def fmt_roles(key):
             ids = data.get(key, [])
@@ -619,11 +618,11 @@ class RoleManagerView(discord.ui.View):
             for rid in ids:
                 r = self.guild.get_role(rid)
                 names.append(r.mention if r else f"`{rid} (失效)`")
-            return ", ".join(names) if names else "*Currently Empty*"
+            return ", ".join(names) if names else "*现在还没有身份组唷！*"
 
-        embed.add_field(name="🎰 抽奖模式 (Lottery Pool)", value=fmt_roles("lottery_roles"), inline=False)
-        embed.add_field(name="🎨 自选模式 (Claimable Pool)", value=fmt_roles("claimable_roles"), inline=False)
-        embed.description = "⬇️ **下方菜单操作指南：**\n• `Add Lottery`: 添加到需抽奖获取的身份组\n• `Add Claimable`: 添加到可直接领取的身份组\n• `➖ Remove`: 移除已有配置"
+        embed.add_field(name="🎰 抽奖模式", value=fmt_roles("lottery_roles"), inline=False)
+        embed.add_field(name="🎨 自选模式 ", value=fmt_roles("claimable_roles"), inline=False)
+        embed.description = "⬇️ **下方菜单操作指南：**\n• `➕添加到奖池`: 添加到需抽奖获取的身份组\n• `➕ 添加到普通池`: 添加到可直接领取的身份组\n• `➖ 移除`: 移除已有配置"
 
         return embed
 
