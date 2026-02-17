@@ -622,7 +622,7 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
                     "✨ **功能介绍**：\n"
                     "🔸 **开始装饰**：打开私密衣柜，查看并更换你的装饰。\n"
                     "🔸 **一键移除**：一键卸下所有在此处领取的装饰，恢复素颜。\n"
-                    "🔸 **自动替换**：选择同系列新款式会自动替换旧的哦！\n\n"
+                    "🔸 **自动替换**：选择同系列新款式会自动替换旧的哦！\n"
                     "🔸 **积分抽奖**：多种身份颜色任你选择，抽奖更刺激！\n\n"
                     "📜 **当前上架款式一览**：\n"
                     f"{role_list_str}",
@@ -694,7 +694,7 @@ class RoleManagerView(discord.ui.View):
         self.clear_items()
         if current_roles is None: current_roles = self.get_current_roles()
         self.add_item(AdminAddRoleSelect(self))
-        self.add_item(AdminRemoveRoleSelect(current_roles, self))
+        self.add_item(AdminRemoveSelect(current_roles, self))
         
         # 4. 手动添加按钮 (Row 3)
         ref_btn = discord.ui.Button(label="🔄 刷新列表", style=discord.ButtonStyle.secondary, row=3)
