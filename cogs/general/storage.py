@@ -5,6 +5,7 @@ import os
 
 ROLES_DATA_FILE = "data/general_roles.json"
 LOTTERY_DATA_FILE = "data/general_lottery.json"
+POINTS_DATA_FILE = "data/user_points.json"
 
 # --- 身份组配置数据 ---
 def load_role_data():
