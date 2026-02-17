@@ -211,6 +211,117 @@ class AnnouncementModal(discord.ui.Modal):
             await interaction.followup.send(f"失败: {e}", ephemeral=True)
 
 # ==================== 身份组中心  ====================
+# ==================== 3. 通知订阅系统 (新增) ====================
+
+class NotificationSelect(discord.ui.Select):
+    """
+    用户侧：通知身份组多选菜单
+    """
+    def __init__(self, user, guild, notify_role_ids):
+        self.user = user
+        self.guild = guild
+        self.notify_role_ids = notify_role_ids
+
+        options = []
+        default_values = []
+
+        # 遍历配置的通知身份组，构建选项
+        for rid in notify_role_ids:
+            role = guild.get_role(rid)
+            if not role: continue
+
+            is_owned = role in user.roles
+
+            # 构建选项
+            options.append(discord.SelectOption(
+                label=role.name,
+                value=str(role.id),
+                emoji="🔔" if not is_owned else "🔕", # 视觉提示
+                description="点击选中以订阅，取消选中以移除",
+                default=is_owned # 如果用户已有该身份组，默认选中
+            ))
+
+            if is_owned:
+                default_values.append(str(role.id))
+
+        # Discord 限制 max_values 不能超过选项总数
+        max_val = len(options) if options else 1
+
+        super().__init__(
+            placeholder="👇 在此勾选你需要订阅的消息类型...",
+            min_values=0, # 允许全都不选（即取消所有订阅）
+            max_values=max_val,
+            options=options if options else [discord.SelectOption(label="暂无通知订阅", value="none")],
+            disabled=len(options) == 0,
+            custom_id="notify_select_menu"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        selected_ids = set(int(v) for v in self.values)
+        all_config_ids = set(self.notify_role_ids)
+
+        added = []
+        removed = []
+
+        # 批量处理逻辑
+        for rid in all_config_ids:
+            role = self.guild.get_role(rid)
+            if not role: continue
+
+            # 如果在选中列表中，也就是用户想要这个身份组
+            if rid in selected_ids:
+                if role not in self.user.roles:
+                    await self.user.add_roles(role, reason="通知订阅面板：主动订阅")
+                    added.append(role.name)
+
+            # 如果不在选中列表中，也就是用户取消了选择
+            else:
+                if role in self.user.roles:
+                    await self.user.remove_roles(role, reason="通知订阅面板：取消订阅")
+                    removed.append(role.name)
+
+        msg_parts = []
+        if added: msg_parts.append(f"✅ **订阅了**: {', '.join(added)}")
+        if removed: msg_parts.append(f"🔕 **取消了**: {', '.join(removed)}")
+
+        final_msg = "\n".join(msg_parts) if msg_parts else "🤷 你的订阅状态没有变化。"
+
+        await interaction.followup.send(final_msg, ephemeral=True)
+
+class NotificationControlView(discord.ui.View):
+    """
+    用户侧：点击入口按钮后看到的私密视图
+    """
+    def __init__(self, user, guild):
+        super().__init__(timeout=None)
+        data = load_role_data()
+        notify_ids = data.get("notification_roles", []) # 获取通知身份组列表
+
+        if notify_ids:
+            self.add_item(NotificationSelect(user, guild, notify_ids))
+        else:
+            self.add_item(discord.ui.Button(label="暂无可用订阅", disabled=True))
+
+class NotificationEntranceView(discord.ui.View):
+    """
+    用户侧：公共频道的入口按钮
+    """
+    def __init__(self):
+        super().__init__(timeout=None) # 持久化
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return True
+
+    @discord.ui.button(label="🔔 管理我的通知订阅", style=discord.ButtonStyle.primary, custom_id="notify_entrance_btn")
+    async def open_settings(self, button, interaction: discord.Interaction):
+        # 打开私密的多选面板
+        await interaction.response.send_message(
+            "👇 **请在下方菜单中勾选你感兴趣的内容：**\n(保持选中代表订阅，取消选中代表退订)",
+            view=NotificationControlView(interaction.user, interaction.guild),
+            ephemeral=True
+        )
 
 async def remove_all_decorations(user, guild, keep_role_id=None, role_type="lottery"):
     """
@@ -543,14 +654,26 @@ class RoleClaimView(discord.ui.View):
 
 # --- 管理端视图 : 管理台 ---
 class AdminAddRoleSelect(discord.ui.Select):
-    def __init__(self, parent_view, is_lottery=False):
-        # 区分是添加进普通池 还是 奖池
-        self.is_lottery = is_lottery
-        label = "➕ 添加到【奖池】..." if is_lottery else "➕ 添加到【普通池】..."
+    def __init__(self, parent_view, pool_type="claimable"):
+        # pool_type: "claimable" (普通), "lottery" (抽奖), "notification" (通知)
+        self.pool_type = pool_type
+
+        map_titles = {
+            "claimable": "➕ 添加到【普通池】...",
+            "lottery": "➕ 添加到【奖池】...",
+            "notification": "➕ 添加到【通知订阅】..."
+        }
+
+        row_map = {
+            "lottery": 0,
+            "claimable": 1,
+            "notification": 2
+        }
+
         super().__init__(
-            placeholder=label,
+            placeholder=map_titles.get(pool_type, "选择身份组..."),
             min_values=1, max_values=1,
-            row=1 if not is_lottery else 0, # 这里排版稍微错开一下
+            row=row_map.get(pool_type, 0),
             select_type=discord.ComponentType.role_select
         )
         self.parent_view = parent_view
@@ -561,42 +684,44 @@ class AdminAddRoleSelect(discord.ui.Select):
         if not role: return
 
         data = load_role_data()
-        target_list = "lottery_roles" if self.is_lottery else "claimable_roles"
-        other_list = "claimable_roles" if self.is_lottery else "lottery_roles"
 
-        # 检查逻辑
-        if role.id in data[target_list]:
-            return await interaction.response.send_message("⚠️ 已存在该列表中！", ephemeral=True)
-        if role.id in data[other_list]:
-            return await interaction.response.send_message("⚠️ 该身份组已在另一个池子中，请先移除再添加！", ephemeral=True)
+        # 映射 key
+        key_map = {
+            "claimable": "claimable_roles",
+            "lottery": "lottery_roles",
+            "notification": "notification_roles"
+        }
+        target_list_key = key_map.get(self.pool_type)
+        if not target_list_key: return
 
-        data[target_list].append(role.id)
+        # 确保数据结构存在
+        if target_list_key not in data: data[target_list_key] = []
+
+        # 检查逻辑：全池查重
+        all_lists = ["claimable_roles", "lottery_roles", "notification_roles"]
+        for k in all_lists:
+            if role.id in data.get(k, []):
+                return await interaction.response.send_message(f"⚠️ 该身份组已存在于【{k}】中，请先移除！", ephemeral=True)
+
+        data[target_list_key].append(role.id)
         save_role_data(data)
         await self.parent_view.refresh_content(interaction)
-        await interaction.followup.send(f"✅ 添加成功 ({'奖池' if self.is_lottery else '普通'})：{role.name}", ephemeral=True)
+        await interaction.followup.send(f"✅ 添加成功 ({self.pool_type})：{role.name}", ephemeral=True)
 
 class AdminRemoveSelect(Select):
     def __init__(self, role_datas, view_parent):
-        """
-        role_datas: 必须是一个字典 {Role对象: "类型字符串"}
-        """
         self.view_parent = view_parent
-
-        # --- 安全检查 (母神的护佑) ---
-        # 如果传入的是列表而非字典，我们手动转换它，防止崩溃
         if isinstance(role_datas, list):
-            # 假设列表里全是 Role 对象，默认归为 "unknown"
             role_datas = {r: "unknown" for r in role_datas}
-        # ---------------------------
 
         options = []
-        # 这里就是之前报错的地方，现在我们确保 role_datas 必然是字典
         for role, r_type in role_datas.items():
-            if not isinstance(role, discord.Role):
-                continue
+            if not isinstance(role, discord.Role): continue
 
-            # 根据类型加不同的图标
-            emoji = "🎟️" if r_type == "lottery" else "🎨"
+            # 图标区分
+            emoji_map = {"lottery": "🎟️", "claimable": "🎨", "notification": "🔔"}
+            emoji = emoji_map.get(r_type, "❓")
+
             desc = f"ID: {role.id} | 类型: {r_type}"
 
             options.append(discord.SelectOption(
@@ -606,7 +731,6 @@ class AdminRemoveSelect(Select):
                 emoji=emoji
             ))
 
-        # 如果没有任何选项（比如列表空了），加一个占位符防止 Discord 报错
         if not options:
             options.append(discord.SelectOption(label="暂无身份组", value="none", description="列表中空空如也"))
             disabled = True
@@ -615,44 +739,33 @@ class AdminRemoveSelect(Select):
 
         super().__init__(
             placeholder="➖ 选择要移除的身份组...",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id="admin_remove_select",
-            disabled=disabled,
-            row=2 # 放在第3行
+            min_values=1, max_values=1, options=options, custom_id="admin_remove_select",
+            disabled=disabled, row=3
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # 你的移除逻辑
         role_id = self.values[0]
         if role_id == "none":
             return await interaction.response.send_message("这里什么也没有。", ephemeral=True)
 
-        data = load_role_data() # 读取数据
+        data = load_role_data()
         target_rid = int(role_id)
-
         removed = False
-        # 从两个池子里都尝试删除
-        if target_rid in data.get("claimable_roles", []):
-            data["claimable_roles"].remove(target_rid)
-            removed = True
-        if target_rid in data.get("lottery_roles", []):
-            data["lottery_roles"].remove(target_rid)
-            removed = True
+
+        # 遍历所有可能的列表进行删除
+        keys = ["claimable_roles", "lottery_roles", "notification_roles"]
+        for k in keys:
+            if target_rid in data.get(k, []):
+                data[k].remove(target_rid)
+                removed = True
 
         if removed:
             save_role_data(data)
             await interaction.response.send_message(f"🗑️ 已移除身份组配置", ephemeral=True)
-            # 刷新父视图
             await self.view_parent.refresh_content(interaction)
         else:
-            await interaction.response.send_message("❌ 数据库中未找到该记录，可能已被删除。", ephemeral=True)
+            await interaction.response.send_message("❌ 数据库中未找到该记录。", ephemeral=True)
 
-
-# ==========================================
-# 视图：身份组管理面板 (构建正确的字典)
-# ==========================================
 class RoleManagerView(discord.ui.View):
     def __init__(self, ctx):
         super().__init__(timeout=600)
@@ -662,33 +775,30 @@ class RoleManagerView(discord.ui.View):
             self.setup_ui()
 
     def setup_ui(self):
-        """ 初始化界面组件 """
         self.clear_items()
         data = load_role_data()
         role_map = {}
 
         # 构建 {Role: Type} 字典
-        for rid in data.get("claimable_roles", []):
-            r = self.guild.get_role(rid)
-            if r: role_map[r] = "claimable"
+        def load_to_map(key_name, type_name):
+            for rid in data.get(key_name, []):
+                r = self.guild.get_role(rid)
+                if r: role_map[r] = type_name
 
-        for rid in data.get("lottery_roles", []):
-            r = self.guild.get_role(rid)
-            if r: role_map[r] = "lottery"
+        load_to_map("claimable_roles", "claimable")
+        load_to_map("lottery_roles", "lottery")
+        load_to_map("notification_roles", "notification") # 新增
 
         # 添加组件
-        self.add_item(AdminAddRoleSelect(self, is_lottery=True))
-        self.add_item(AdminAddRoleSelect(self, is_lottery=False))
-        self.add_item(AdminRemoveSelect(role_map, self)) # 传入修复后的字典
+        self.add_item(AdminAddRoleSelect(self, pool_type="lottery"))      # Row 0
+        self.add_item(AdminAddRoleSelect(self, pool_type="claimable"))    # Row 1
+        self.add_item(AdminAddRoleSelect(self, pool_type="notification")) # Row 2 (新增)
+        self.add_item(AdminRemoveSelect(role_map, self))                  # Row 3
 
-        # 功能按钮
-        ref_btn = discord.ui.Button(label="🔄 刷新", style=discord.ButtonStyle.secondary, row=3, custom_id="admin_refresh")
+        # 功能按钮 Row 4
+        ref_btn = discord.ui.Button(label="🔄 刷新", style=discord.ButtonStyle.secondary, row=4, custom_id="admin_refresh")
         ref_btn.callback = self.refresh_callback
         self.add_item(ref_btn)
-
-        snd_btn = discord.ui.Button(label="📤 发送面板", style=discord.ButtonStyle.primary, row=3, emoji="📨", custom_id="admin_send")
-        snd_btn.callback = self.send_panel_callback
-        self.add_item(snd_btn)
 
     def build_dashboard_embed(self):
         data = load_role_data()
@@ -701,32 +811,21 @@ class RoleManagerView(discord.ui.View):
             for rid in ids:
                 r = self.guild.get_role(rid)
                 names.append(r.mention if r else f"`{rid} (失效)`")
-            return ", ".join(names) if names else "*现在还没有身份组唷！*"
+            return ", ".join(names) if names else "*空*"
 
         embed.add_field(name="🎰 抽奖模式", value=fmt_roles("lottery_roles"), inline=False)
-        embed.add_field(name="🎨 自选模式 ", value=fmt_roles("claimable_roles"), inline=False)
-        embed.description = "⬇️ **下方菜单操作指南：**\n• `➕ 添加到奖池`: 添加到需抽奖获取的身份组\n• `➕ 添加到普通池`: 添加到可直接领取的身份组\n• `➖ 移除`: 移除已有配置"
+        embed.add_field(name="🎨 自选模式", value=fmt_roles("claimable_roles"), inline=False)
+        embed.add_field(name="🔔 通知订阅", value=fmt_roles("notification_roles"), inline=False) # 新增展示
 
+        embed.description = "⬇️ **使用下方菜单配置你的社区身份组系统**"
         return embed
 
     async def refresh_callback(self, interaction: discord.Interaction):
         await self.refresh_content(interaction)
 
-    async def send_panel_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        # 调用你的部署函数
-        try:
-            await deploy_role_panel(interaction.channel, interaction.guild, None)
-            await interaction.followup.send("✅ 面板已发送/更新到当前频道底端。", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ 发送失败: {e}", ephemeral=True)
-
     async def refresh_content(self, interaction: discord.Interaction):
-        # 1. 重建 UI 数据
         self.setup_ui()
-        # 2. 重建 Embed
         embed = self.build_dashboard_embed()
-
         if not interaction.response.is_done():
             await interaction.response.edit_message(embed=embed, view=self)
         else:
