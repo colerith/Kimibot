@@ -620,8 +620,7 @@ class RoleManagerView(discord.ui.View):
 
     async def send_panel_callback(self, interaction):
         await interaction.response.defer(ephemeral=True)
-        # 这里调用你的部署函数
-        # await deploy_role_panel(...)
+        await deploy_role_panel(interaction.channel, interaction.guild, interaction.user.display_avatar.url)
         await interaction.followup.send("尝试发送面板...", ephemeral=True)
 
     async def refresh_content(self, interaction):
@@ -679,7 +678,6 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
         color=STYLE["KIMI_YELLOW"]
     )
 
-    # 这里的 user_avatar_url 现在也能正确接收到字符串了
     if user_avatar_url:
         embed.set_thumbnail(url=user_avatar_url)
 
@@ -713,81 +711,6 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
         }
         save_role_data(data)
         return "sent"
-
-# 3. 修复 RoleManagerView
-class RoleManagerView(discord.ui.View):
-    def __init__(self, ctx):
-        super().__init__(timeout=600)
-        self.ctx = ctx
-        self.guild = ctx.guild if ctx else None
-        if self.guild:
-            self.setup_ui()
-
-    def get_current_roles(self):
-        data = load_role_data()
-        roles = []
-        cleanup_needed = False
-        new_list = []
-        for rid in data["claimable_roles"]:
-            r = self.guild.get_role(rid)
-            if r:
-                roles.append(r)
-                new_list.append(rid)
-            else:
-                cleanup_needed = True
-        if cleanup_needed:
-            data["claimable_roles"] = new_list
-            save_role_data(data)
-        return roles
-
-    def setup_ui(self, current_roles=None):
-        self.clear_items()
-        if current_roles is None: current_roles = self.get_current_roles()
-        self.add_item(AdminAddRoleSelect(self))
-        self.add_item(AdminRemoveSelect(current_roles, self))
-        
-        # 4. 手动添加按钮 (Row 3)
-        ref_btn = discord.ui.Button(label="🔄 刷新列表", style=discord.ButtonStyle.secondary, row=3)
-        ref_btn.callback = self.refresh_callback
-        self.add_item(ref_btn)
-        
-        snd_btn = discord.ui.Button(label="📤 发送面板到频道", style=discord.ButtonStyle.primary, row=3, emoji="📨")
-        snd_btn.callback = self.send_panel_callback
-        self.add_item(snd_btn)
-    
-    async def refresh_callback(self, interaction): 
-        await self.refresh_content(interaction)
-
-    async def send_panel_callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            avatar_url = interaction.guild.me.display_avatar.url if interaction.guild.me else None
-            
-            # 调用我们定义的通用函数
-            status = await deploy_role_panel(interaction.channel, interaction.guild, avatar_url)
-            
-            if status == "updated":
-                await interaction.followup.send("🔄 面板已就地 **更新** 为最新状态！", ephemeral=True)
-            else:
-                await interaction.followup.send("📤 面板已 **发送** 到当前频道！", ephemeral=True)
-                
-        except Exception as e:
-            await interaction.followup.send(f"❌ 发送失败: {e}", ephemeral=True)
-
-    async def refresh_content(self, interaction):
-        self.setup_ui()
-        roles = self.get_current_roles() # 为了下面构建 Embed 描述
-
-        embed = discord.Embed(title="⚙️ 身份组池管理控制台", color=discord.Color.blue())
-        desc = "**当前已上架的身份组：**\n" + ("\n".join([f"• {r.mention} (ID: {r.id})" for r in roles]) if roles else "*(空空如也)*")
-        desc += "\n\n**操作说明：**\n➕ 使用第一行菜单添加新身份组\n➖ 使用第二行菜单移除已有身份组"
-        embed.description = desc
-        
-        if not interaction.response.is_done():
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.edit_original_response(embed=embed, view=self)
 
 # ==================== 2. 抽奖功能 (New) ====================
 
