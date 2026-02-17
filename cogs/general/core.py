@@ -458,3 +458,6 @@ class General(commands.Cog):
 
         await message.edit(embed=embed, view=new_view)
         await ctx.respond("好哒！本大王已经把这个投票强制关掉惹！😤", ephemeral=True)
+
+def setup(bot):
+    bot.add_cog(General(bot))
