@@ -182,13 +182,14 @@ class General(commands.Cog):
     @is_super_egg()
     async def send_role_panel_cmd(self, ctx):
         await ctx.defer(ephemeral=True)
-        
+
         status = await deploy_role_panel(ctx.channel, ctx.guild, ctx.me.display_avatar.url)
-        
+
         if status == "updated":
             await ctx.followup.send("✅ 检测到当前频道已有面板，已同步最新数据并 **更新** 成功！", ephemeral=True)
         else:
             await ctx.followup.send("✅ 面板已 **发送** 成功！", ephemeral=True)
+
 
     # ==================== 抽奖 ====================
     lottery_group = SlashCommandGroup("抽奖", "激动人心的抽奖功能！")
