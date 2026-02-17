@@ -2,7 +2,7 @@
 
 import discord
 from discord import SlashCommandGroup, Option
-from discord.ext import commands
+from discord.ext import commands, tasks
 import asyncio
 import datetime
 import random
@@ -500,36 +500,68 @@ def is_valid_comment(content: str) -> bool:
 class PointListener(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.user_cooldowns = {}     
+        self.point_cache = {}        
+        self.batch_save_task.start()  
 
+    def cog_unload(self):
+        """当Cog被卸载时，强制保存一次剩余数据"""
+        self.batch_save_task.cancel()
+
+    @tasks.loop(minutes=2.0) 
+    async def batch_save_task(self):
+        """
+        每隔一段时间，将缓存中的积分一次性写入数据库。
+        """
+        if not self.point_cache:
+            return
+
+        print(f"🌊 [Nova Tide] 开始将积攒的星辉灌注大地... (处理 {len(self.point_cache)} 位旅行者)")
+
+        # 遍历缓存，写入数据库
+        # 注意：如果你的 modify_user_points 是同步函数，直接由数据库处理；如果是异步请加 await
+        count = 0
+        for user_id, points in self.point_cache.items():
+            if points > 0:
+                new_total = modify_user_points(user_id, points)
+                print(f"  └─ 用户 {user_id} : 结算 +{points} 分 -> 总分 {new_total}")
+                count += 1
+
+        # 清空缓存池，准备下一轮积攒
+        self.point_cache.clear()
+        print(f"✨ [Nova Tide] 周期保存完成，共处理 {count} 条记录。")
+
+    @batch_save_task.before_loop
+    async def before_batch_save(self):
+        """等待机器人准备就绪再启动计时器"""
+        await self.bot.wait_until_ready()
+
+    # --- 🌟 监听部分 ---
     @commands.Cog.listener()
     async def on_message(self, message):
         # 1. 基础过滤：忽略机器人、忽略私信
         if message.author.bot or not message.guild:
             return
 
-        # 2. 冷却检查：虽然发言有效，但如果太频繁也不给分
+        # 2. 冷却检查
         now = time.time()
-        last_time = user_cooldowns.get(message.author.id, 0)
+        last_time = self.user_cooldowns.get(message.author.id, 0)
 
-        # 如果还在冷却期内，直接略过（不一定要删消息，只是不加分）
         if now - last_time < COOLDOWN_SECONDS:
-            return
+            return # 冷却中
 
-        # 3. 质量检查：调用你的神圣筛子
-        if is_valid_comment(message.content):
-            # 通过审核！更新冷却时间
-            user_cooldowns[message.author.id] = now
+        if len(message.content) > 2: # 临时简单逻辑：长度大于2即有效
 
-            # --- 给予奖励 ---
-            # 设置一个随机区间，让奖励更像是一种惊喜
+            # 更新冷却
+            self.user_cooldowns[message.author.id] = now
+
             points_to_add = random.randint(1, 3)
 
-            # 记录数据
-            new_total = modify_user_points(message.author.id, points_to_add)
+            current_cache = self.point_cache.get(message.author.id, 0)
+            self.point_cache[message.author.id] = current_cache + points_to_add
 
-            # (可选) 这里的日志可以帮你监控是否正常运行，正式上线后可注释掉
-            print(f"💰 [积分] {message.author.name} 发言有效 (+{points_to_add}) -> 当前总分: {new_total}")
+            print(f"⚡ [缓存] {message.author.name} 发言被捕获 (暂存 +{points_to_add})")
 
 def setup(bot):
-    bot.add_cog(General(bot))
     bot.add_cog(PointListener(bot))
+    bot.add_cog(General(bot))
