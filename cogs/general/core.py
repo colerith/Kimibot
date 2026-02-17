@@ -6,15 +6,45 @@ from discord.ext import commands
 import asyncio
 import datetime
 import random
+import re
+import time
 
-from config import IDS, STYLE, WISH_CHANNEL_ID
+from config import IDS, STYLE, WISH_CHANNEL_ID, COOLDOWN_SECONDS, user_cooldowns
 from .utils import parse_duration, is_super_egg, TZ_CN
-from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data
+from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data, modify_user_points, get_user_points
 from .views import (
     WishPanelView, WishActionView, AnnouncementModal, PollView,
     RoleClaimView, LotteryCreateModal, LotteryJoinView, RoleManagerView,
     deploy_role_panel 
 )
+
+def is_valid_comment(content: str) -> bool:
+    """
+    严格的发言质量检测
+    1. 移除 emoji、链接、空白
+    2. 长度必须 > 5
+    3. 不能纯数字
+    4. 不能有大量重复字符 (如 aaaaa)
+    5. 字符种类必须丰富 (避免 ababab)
+    """
+    if not content: return False
+
+    # 移除自定义 Emoji <a:name:id>
+    content_no_emoji = re.sub(r'<a?:.+?:\d+>', '', content)
+
+    # 移除链接 http/https
+    content_clean = re.sub(r'http\S+', '', content_no_emoji).strip()
+
+    # 移除所有空白字符用于统计密度
+    content_clean = re.sub(r'\s+', '', content_clean)
+
+    # 判定逻辑
+    if len(content_clean) <= 5: return False          # 太短
+    if content_clean.isdigit(): return False          # 纯数字
+    if re.search(r'(.)\1{4,}', content_clean): return False # 单字重复5次以上
+    if len(set(content_clean)) < 4: return False      # 字符种类过少（防乱按键盘）
+
+    return True
 
 class General(commands.Cog):
     def __init__(self, bot):
@@ -153,6 +183,39 @@ class General(commands.Cog):
                 await ctx.followup.send(f"呜...本大王没有权限在频道 {channel.name} 发送消息！", ephemeral=True)
         else:
             await ctx.followup.send("呜...找不到许愿池频道！", ephemeral=True)
+
+class PointListener(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        # 1. 基础过滤：忽略机器人、忽略私信
+        if message.author.bot or not message.guild:
+            return
+
+        # 2. 冷却检查：虽然发言有效，但如果太频繁也不给分
+        now = time.time()
+        last_time = user_cooldowns.get(message.author.id, 0)
+
+        # 如果还在冷却期内，直接略过（不一定要删消息，只是不加分）
+        if now - last_time < COOLDOWN_SECONDS:
+            return
+
+        # 3. 质量检查：调用你的神圣筛子
+        if is_valid_comment(message.content):
+            # 通过审核！更新冷却时间
+            user_cooldowns[message.author.id] = now
+
+            # --- 给予奖励 ---
+            # 设置一个随机区间，让奖励更像是一种惊喜
+            points_to_add = random.randint(1, 3)
+
+            # 记录数据
+            new_total = modify_user_points(message.author.id, points_to_add)
+
+            # (可选) 这里的日志可以帮你监控是否正常运行，正式上线后可注释掉
+            print(f"💰 [积分] {message.author.name} 发言有效 (+{points_to_add}) -> 当前总分: {new_total}")
 
     # ==================== 身份组领取 (Refactored) ====================
     role_group = SlashCommandGroup("百变小蛋", "管理自助领取的装饰身份组")
@@ -462,3 +525,4 @@ class General(commands.Cog):
 
 def setup(bot):
     bot.add_cog(General(bot))
+    bot.add_cog(PointListener(bot))

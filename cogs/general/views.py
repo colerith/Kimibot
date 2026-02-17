@@ -5,9 +5,9 @@ from discord import ui
 import datetime
 import asyncio
 import random
-from config import STYLE, SERVER_OWNER_ID, IDS
+from config import STYLE, SERVER_OWNER_ID, IDS, LOTTERY_COST, LOTTERY_REFUND
 from .utils import TZ_CN, generate_progress_bar
-from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data
+from .storage import load_role_data, save_role_data, load_lottery_data, save_lottery_data, modify_user_points, get_user_points
 
 # ==================== 许愿池相关 ====================
 
@@ -209,7 +209,106 @@ class AnnouncementModal(discord.ui.Modal):
         except Exception as e:
             await interaction.followup.send(f"失败: {e}", ephemeral=True)
 
-# ==================== 1. 身份组领取中心 ====================
+# ==================== 身份组中心  ====================
+
+async def remove_all_decorations(user, guild, keep_role_id=None):
+    """
+    移除用户身上所有的装饰身份组（包括普通和抽奖的），
+    keep_role_id 为当前要穿戴的，不移除它。
+    """
+    data = load_role_data()
+    # 所有的装饰ID集合
+    all_decor_ids = set(data.get("claimable_roles", []) + data.get("lottery_roles", []))
+
+    to_remove = []
+    for role in user.roles:
+        if role.id in all_decor_ids:
+            if keep_role_id and role.id == keep_role_id:
+                continue
+            to_remove.append(role)
+
+    if to_remove:
+        await user.remove_roles(*to_remove, reason="装饰互斥自动卸下")
+    return to_remove
+
+# --- 抽奖界面 ---
+
+class RoleLotteryView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎲 试试手气", style=discord.ButtonStyle.primary, emoji="🎰", custom_id="lottery_draw_btn")
+    async def draw_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user = interaction.user
+
+        # 1. 检查积分
+        current_points = get_user_points(user.id)
+        if current_points < LOTTERY_COST:
+            return await interaction.followup.send(
+                f"💸 **积分不足！**\n你需要 **{LOTTERY_COST}** 积分才能抽奖，当前只有 **{current_points}**。\n快去社区里找小伙伴聊天吧！(拒绝水贴哦)",
+                ephemeral=True
+            )
+
+        # 2. 检查奖池
+        data = load_role_data()
+        pool_ids = data.get("lottery_roles", [])
+        if not pool_ids:
+            return await interaction.followup.send("🏜️ 奖池目前是空的，请联系管理员进货！", ephemeral=True)
+
+        valid_pool = []
+        for rid in pool_ids:
+            r = interaction.guild.get_role(rid)
+            if r: valid_pool.append(r)
+
+        if not valid_pool:
+           return await interaction.followup.send("⚠️ 奖池里的身份组好像失效了，请联系管理员。", ephemeral=True)
+
+        # 3. 扣费并抽奖
+        modify_user_points(user.id, -LOTTERY_COST)
+        left_points = current_points - LOTTERY_COST
+
+        won_role = random.choice(valid_pool)
+
+        # 4. 结果判定的 Embed
+        embed = discord.Embed(title="🎰 命运之轮转动了...", color=discord.Color.gold())
+
+        # 情况A: 已经有了这个身份组 -> 退款
+        if won_role in user.roles:
+            modify_user_points(user.id, LOTTERY_REFUND)
+            final_points = left_points + LOTTERY_REFUND
+
+            embed.description = f"你抽到了 **{won_role.name}**！\n\n🤔 **但是...** 你好像已经拥有它了。\n\n💰 **退还积分**: {LOTTERY_REFUND}\n💳 **当前余额**: {final_points}"
+            embed.color = discord.Color.light_grey()
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        # 情况B: 中奖 -> 穿戴 (互斥移除其他的)
+        else:
+            try:
+                # 先执行互斥移除
+                removed = await remove_all_decorations(user, interaction.guild, keep_role_id=won_role.id)
+                await user.add_roles(won_role, reason="积分抽奖获取")
+
+                desc = f"🎉 **恭喜！！欧气爆发！**\n\n你获得了稀有装饰：**{won_role.mention}**"
+                if removed:
+                    desc += f"\n\n♻️ 已自动换下旧装饰：{', '.join([r.name for r in removed])}"
+
+                desc += f"\n\n💳 **扣除积分**: {LOTTERY_COST}\n💰 **当前余额**: {left_points}"
+
+                embed.description = desc
+                # 可以加个图片增加氛围
+                embed.set_thumbnail(url="https://media.giphy.com/media/26tOZ42Mg6pbTUPVS/giphy.gif")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+
+            except Exception as e:
+                # 出错退款
+                modify_user_points(user.id, LOTTERY_COST)
+                await interaction.followup.send(f"❌ 佩戴失败 (积分已退还): {e}", ephemeral=True)
+
+    @discord.ui.button(label="📜 查看积分", style=discord.ButtonStyle.secondary, emoji="👛", custom_id="lottery_check_points")
+    async def check_points(self, button, interaction: discord.Interaction):
+        p = get_user_points(interaction.user.id)
+        await interaction.response.send_message(f"💰 你当前的社区活跃积分是：**{p}**", ephemeral=True)
 
 # --- 用户端视图 Step 2 : 私密选择面板 ---
 
@@ -244,58 +343,34 @@ class RoleClaimSelect(discord.ui.Select):
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # 允许所有用户交互（这个下拉框是通过start_decor_callback发送的私密消息）
         return True
 
     async def callback(self, interaction: discord.Interaction):
-        # 保持之前的逻辑不变
         await interaction.response.defer(ephemeral=True)
-
         try:
             role_id = int(self.values[0])
             target_role = interaction.guild.get_role(role_id)
-        except:
-             return await interaction.followup.send("呜...数据出错了，请重新打开面板试试！", ephemeral=True)
+        except: return await interaction.followup.send("数据错误", ephemeral=True)
 
-        if not target_role:
-            return await interaction.followup.send("呜...这个装饰好像已经下架了！", ephemeral=True)
+        if not target_role: return await interaction.followup.send("装饰已下架", ephemeral=True)
 
-        # 互斥逻辑
-        prefix = target_role.name.split("·")[0] if "·" in target_role.name else None
+        # === 修改处：使用全局互斥移除 ===
+        if target_role not in interaction.user.roles:
+            try:
+                # 移除所有其他的(包含抽奖的和普通领取的)
+                removed = await remove_all_decorations(interaction.user, interaction.guild, keep_role_id=target_role.id)
+                await interaction.user.add_roles(target_role, reason="面板自助领取")
 
-        data = load_role_data()
-        claimable_ids = data.get("claimable_roles", [])
-        user = interaction.user
-        to_remove = []
-
-        if prefix:
-            for r in user.roles:
-                if r.id in claimable_ids and r.id != target_role.id:
-                    r_prefix = r.name.split("·")[0] if "·" in r.name else None
-                    if r_prefix == prefix:
-                        to_remove.append(r)
-
-        try:
-            msg = ""
-            if to_remove:
-                await user.remove_roles(*to_remove, reason="装饰更换-互斥移除")
-                removed_names = ", ".join([r.name for r in to_remove])
-                msg += f"♻️ 已自动收纳旧装饰：{removed_names}\n"
-
-            if target_role not in user.roles:
-                await user.add_roles(target_role, reason="装饰佩戴")
-                msg += f"✅ **穿戴成功！**\n✨ 你现在拥有了 **{target_role.name}** 身份。"
-            else:
-                await user.remove_roles(target_role, reason="装饰主动卸下")
-                msg += f"❎ **卸下成功！**\n🍃 你放下了 **{target_role.name}** 身份。"
-
-            # 操作完成后，最好给个反馈告诉用户现在状态
-            await interaction.followup.send(msg, ephemeral=True)
-
-        except discord.Forbidden:
-            await interaction.followup.send("💥 哎呀！本大王的权限好像不够高，帮不了你换衣服... (请检查Bot身份组位置)", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"😵 错误: {e}", ephemeral=True)
+                msg = f"✅ **穿戴成功！**\n✨ 你现在拥有了 **{target_role.name}**。"
+                if removed:
+                    msg += f"\n♻️ 已自动收纳旧装饰：{', '.join([r.name for r in removed])}"
+                await interaction.followup.send(msg, ephemeral=True)
+            except Exception as e:
+                await interaction.followup.send(f"❌ 权限不足或错误: {e}", ephemeral=True)
+        else:
+            # 卸下
+            await interaction.user.remove_roles(target_role, reason="主动卸下")
+            await interaction.followup.send(f"❎ **卸下成功！**", ephemeral=True)
 
 class RoleSelectionView(discord.ui.View):
     """
@@ -325,7 +400,7 @@ class RoleClaimView(discord.ui.View):
         # 允许所有用户与这个公共面板交互
         return True
 
-    @discord.ui.button(label="🎨 开始装饰", style=discord.ButtonStyle.success, custom_id="role_main_start")
+    @discord.ui.button(label="🎨 领取/更换", style=discord.ButtonStyle.success, custom_id="role_main_start")
     async def start_decor_callback(self, button, interaction: discord.Interaction):
         # 1. 动态获取当前配置的有效身份组
         data = load_role_data()
@@ -357,97 +432,170 @@ class RoleClaimView(discord.ui.View):
             color=0xFFB6C1
         )
         await interaction.response.send_message(embed=embed, view=RoleSelectionView(valid_roles), ephemeral=True)
+    
+    @discord.ui.button(label="🎲 积分抽奖", style=discord.ButtonStyle.primary, custom_id="role_main_lottery")
+    async def lottery_entry_callback(self, button, interaction: discord.Interaction):
+        points = get_user_points(interaction.user.id)
+        embed = discord.Embed(
+            title="🌌 **星之运势 · 身份组抽奖**",
+            description=f"这里藏着一些无法直接领取的 **稀有款式**！\n你会是那个被命运选中的孩子吗？\n\n"
+                        f"💳 **单次消耗**: {LOTTERY_COST} 积分\n"
+                        f"🔄 **重复补偿**: 返还 {LOTTERY_REFUND} 积分\n"
+                        f"💰 **你的积蓄**: **{points}**\n\n"
+                        f"*注：抽到的稀有装饰也会替换掉当前的普通装饰哦，毕竟荣耀是唯一的。*",
+            color=discord.Color.purple()
+        )
+        await interaction.response.send_message(embed=embed, view=RoleLotteryView(), ephemeral=True)
 
     @discord.ui.button(label="🧹 一键移除", style=discord.ButtonStyle.danger, custom_id="role_main_remove_all")
     async def remove_all_callback(self, button, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-
-        data = load_role_data()
-        claimable_ids = data.get("claimable_roles", [])
-        user = interaction.user
-
-        to_remove = []
-        for r in user.roles:
-            if r.id in claimable_ids:
-                to_remove.append(r)
-
-        if not to_remove:
-            return await interaction.followup.send("❔ 你身上好像没有属于这里的装饰品哦，不需要清理。", ephemeral=True)
-
-        try:
-            await user.remove_roles(*to_remove, reason="用户一键移除所有装饰")
-            await interaction.followup.send(f"🧹 呼~ 已帮你清除了 **{len(to_remove)}** 个装饰身份组，现在一身轻啦！", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ 移除失败: {e}", ephemeral=True)
+        # 调用我们的全局移除函数
+        removed = await remove_all_decorations(interaction.user, interaction.guild)
+        if removed:
+            await interaction.followup.send(f"🧹 已清空身上的 {len(removed)} 个装饰！", ephemeral=True)
+        else:
+            await interaction.followup.send("❔ 你身上本来就很干净哦。", ephemeral=True)
 
 # --- 管理端视图 : 管理台 ---
 class AdminAddRoleSelect(discord.ui.Select):
-    def __init__(self, parent_view):
+    def __init__(self, parent_view, is_lottery=False):
+        # 区分是添加进普通池 还是 奖池
+        self.is_lottery = is_lottery
+        label = "➕ 添加到【奖池】..." if is_lottery else "➕ 添加到【普通池】..."
         super().__init__(
-            placeholder="➕ 点击这里添加新的身份组...",
-            min_values=1,
-            max_values=1,
-            row=1,
-            select_type=discord.ComponentType.role_select 
+            placeholder=label,
+            min_values=1, max_values=1,
+            row=1 if not is_lottery else 0, # 这里排版稍微错开一下
+            select_type=discord.ComponentType.role_select
         )
         self.parent_view = parent_view
 
     async def callback(self, interaction):
-        selected_roles = interaction.data.get('values', [])
-        if not selected_roles: return
-        
-        role_id = int(selected_roles[0])
+        role_id = int(interaction.data['values'][0])
         role = interaction.guild.get_role(role_id)
+        if not role: return
 
-        if not role: 
-            return await interaction.response.send_message("❌ 无法解析选中的身份组！", ephemeral=True)
-        
         data = load_role_data()
-        
-        # 逻辑检查
-        if role.id in data["claimable_roles"]: 
-            return await interaction.response.send_message(f"⚠️ **{role.name}** 已经在列表里啦！", ephemeral=True)
-        
-        if role.permissions.administrator or role.permissions.manage_guild: 
-            return await interaction.response.send_message(f"🚫 达咩！**{role.name}** 权限太高了！", ephemeral=True)
-            
-        data["claimable_roles"].append(role.id)
+        target_list = "lottery_roles" if self.is_lottery else "claimable_roles"
+        other_list = "claimable_roles" if self.is_lottery else "lottery_roles"
+
+        # 检查逻辑
+        if role.id in data[target_list]:
+            return await interaction.response.send_message("⚠️ 已存在该列表中！", ephemeral=True)
+        if role.id in data[other_list]:
+            return await interaction.response.send_message("⚠️ 该身份组已在另一个池子中，请先移除再添加！", ephemeral=True)
+
+        data[target_list].append(role.id)
         save_role_data(data)
-        
-        # 刷新父视图
         await self.parent_view.refresh_content(interaction)
-        await interaction.followup.send(f"✅ 成功上架：**{role.name}**", ephemeral=True)
+        await interaction.followup.send(f"✅ 添加成功 ({'奖池' if self.is_lottery else '普通'})：{role.name}", ephemeral=True)
 
 
-class AdminRemoveRoleSelect(discord.ui.Select):
-    def __init__(self, current_roles, parent_view):
+# 为了简化，移除 Select 复用旧的，我们只需要在 RoleManagerView 里加上 两个 AddSelect
+class AdminRemoveSelect(discord.ui.Select):
+    # 下架逻辑 (合并显示所有，方便管理)
+    def __init__(self, all_roles_map, parent_view):
         options = []
-        for r in current_roles:
-            options.append(discord.SelectOption(label=r.name, value=str(r.id), emoji="🗑️"))
-        if not options:
-            options.append(discord.SelectOption(label="暂无身份组", value="none", description="列表是空的"))
-        
-        super().__init__(
-            placeholder="➖ 选择要移除（下架）的身份组...", 
-            min_values=1, 
-            max_values=1, 
-            options=options[:25], 
-            row=2, 
-            disabled=(len(current_roles) == 0)
-        )
+        # all_roles_map: {role_obj: 'lottery' or 'claimable'}
+        for r, r_type in all_roles_map.items():
+            emoji = "🎰" if r_type == 'lottery' else "🎨"
+            options.append(discord.SelectOption(label=r.name, value=str(r.id), emoji=emoji, description=f"类型: {r_type}"))
+
+        if not options: options.append(discord.SelectOption(label="无数据", value="none"))
+
+        super().__init__(placeholder="➖ 下架任意身份组...", options=options[:25], row=2)
         self.parent_view = parent_view
 
     async def callback(self, interaction):
-        if self.values[0] == "none": return await interaction.response.send_message("这里没什么可删的捏。", ephemeral=True)
-        role_id = int(self.values[0])
+        if self.values[0] == "none": return
+        rid = int(self.values[0])
         data = load_role_data()
-        if role_id in data["claimable_roles"]:
-            data["claimable_roles"].remove(role_id)
+
+        found = False
+        if rid in data["claimable_roles"]:
+            data["claimable_roles"].remove(rid)
+            found = True
+        elif rid in data["lottery_roles"]:
+            data["lottery_roles"].remove(rid)
+            found = True
+
+        if found:
             save_role_data(data)
             await self.parent_view.refresh_content(interaction)
-            await interaction.followup.send("🗑️ 已下架该身份组。", ephemeral=True)
+            await interaction.followup.send("🗑️ 已下架。", ephemeral=True)
+
+class RoleManagerView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=600)
+        self.ctx = ctx
+        self.guild = ctx.guild
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.clear_items()
+
+        # 1. 奖池添加口
+        self.add_item(AdminAddRoleSelect(self, is_lottery=True))
+        # 2. 普通池添加口
+        self.add_item(AdminAddRoleSelect(self, is_lottery=False))
+
+        # 准备数据给移除列表
+        data = load_role_data()
+        role_map = {}
+        # 为了避免过多，只取前25个混合展示，或者做分页(这里简化处理)
+        for rid in data["claimable_roles"]:
+            r = self.guild.get_role(rid)
+            if r: role_map[r] = "普通"
+        for rid in data["lottery_roles"]:
+            r = self.guild.get_role(rid)
+            if r: role_map[r] = "奖池"
+
+        self.add_item(AdminRemoveSelect(role_map, self))
+
+        # 按钮
+        btn = discord.ui.Button(label="刷新", style=discord.ButtonStyle.secondary, row=3)
+        btn.callback = self.refresh_callback
+        self.add_item(btn)
+
+        snd_btn = discord.ui.Button(label="发送面板", style=discord.ButtonStyle.primary, row=3)
+        snd_btn.callback = self.send_panel_callback
+        self.add_item(snd_btn)
+
+    async def refresh_callback(self, interaction): await self.refresh_content(interaction)
+    
+    async def send_panel_callback(self, interaction):
+        result = await deploy_role_panel(interaction.channel, self.guild, interaction.user.display_avatar.url)
+        if result == "updated":
+            await interaction.response.send_message("✅ 面板已更新！", ephemeral=True)
+        elif result == "sent":
+            await interaction.response.send_message("✅ 面板已发送到当前频道！", ephemeral=True)
         else:
-            await interaction.response.send_message("数据不同步，请刷新后再试。", ephemeral=True)
+            await interaction.response.send_message("❌ 发生未知错误。", ephemeral=True)
+
+    async def refresh_content(self, interaction):
+        self.setup_ui()
+        data = load_role_data()
+
+        # 构建可视化的 Embed
+        embed = discord.Embed(title="⚙️ 综合身份组管理", color=discord.Color.blurple())
+
+        def list_names(key):
+            ids = data.get(key, [])
+            names = []
+            for rid in ids:
+                r = self.guild.get_role(rid)
+                if r: names.append(r.mention)
+                else: names.append(f"<无效ID:{rid}>")
+            return ", ".join(names) if names else "*(空)*"
+
+        embed.add_field(name="🎰 稀有奖池 (Lottery)", value=list_names("lottery_roles"), inline=False)
+        embed.add_field(name="🎨 普通领取 (Claimable)", value=list_names("claimable_roles"), inline=False)
+
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.edit_original_response(embed=embed, view=self)
 
 async def deploy_role_panel(channel, guild, user_avatar_url):
     """
@@ -475,6 +623,7 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
                     "🔸 **开始装饰**：打开私密衣柜，查看并更换你的装饰。\n"
                     "🔸 **一键移除**：一键卸下所有在此处领取的装饰，恢复素颜。\n"
                     "🔸 **自动替换**：选择同系列新款式会自动替换旧的哦！\n\n"
+                    "🔸 **积分抽奖**：多种身份颜色任你选择，抽奖更刺激！\n\n"
                     "📜 **当前上架款式一览**：\n"
                     f"{role_list_str}",
         color=STYLE["KIMI_YELLOW"]

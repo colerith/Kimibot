@@ -26,9 +26,18 @@ QUOTA = {
     "QUOTA_FILE_PATH": 'quota_data.json'
 }
 
+# --- 身份组抽奖相关配置 ---
+LOTTERY = {  
+    "LOTTERY_COST": 50, 
+    "LOTTERY_REFUND": 20,
+    "user_cooldowns": {},
+    "COOLDOWN_SECONDS": 30
+}
+
 # --- 外观配置 ---
 STYLE = {"KIMI_YELLOW": 0xFFD700, "KIMI_FOOTER_TEXT": "请遵守社区规则，一起做个乖饱饱嘛~！"}
 
 globals().update(IDS)
 globals().update(QUOTA)
 globals().update(STYLE)
+globals().update(LOTTERY)
