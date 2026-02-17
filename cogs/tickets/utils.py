@@ -95,9 +95,7 @@ async def execute_archive(bot, interaction, channel, note, is_timeout=True):
             await user.send(f"工单 `{ticket_id}` 已超时关闭。\n备注: {note}\n欢迎重新申请~")
         except: pass
 
-    # 3. 移动频道或删除 (原逻辑是删除，或者移动到 archive 分类)
-    # 你的旧代码里 execute_timeout_archive 是直接 delete。
-    # 这里我们统一行为：如果是超时归档，移动到 Archive Channel 并改名
+    # 3. 移动频道或删除
 
     archive_cat = channel.guild.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
     if archive_cat:

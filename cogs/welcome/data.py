@@ -1,4 +1,4 @@
-# quiz_data.py
+# cogs/welcome/data.py
 
 QUIZ_QUESTIONS = [
     {

@@ -1,44 +1,16 @@
-#cogs/quiz.py
+# cogs/welcome/views.py
 
 import discord
-from discord.ext import commands
 import asyncio
 import random
-import datetime
+from discord.ext import commands
+
 from config import IDS, STYLE
-from quiz_data import QUIZ_QUESTIONS
+from .data import QUIZ_QUESTIONS
+from cog import quiz_sessions, quiz_history, check_cooldown, finalize_quiz,PUBLIC_RESULT_CHANNEL_ID, QUIZ_LOG_CHANNEL_ID
 
 # --- 配置区 ---
-QUIZ_CHANNEL_ID = IDS.get("QUIZ_CHANNEL_ID")
-SUPER_EGG_ROLE_ID = IDS.get("SUPER_EGG_ROLE_ID")
-QUIZ_LOG_CHANNEL_ID = IDS.get("QUIZ_LOG_CHANNEL_ID") 
-PUBLIC_RESULT_CHANNEL_ID = 1452485785939869808
-
-RETRY_COOLDOWN = 900      
-MAX_ATTEMPTS = 999        
-QUIZ_DURATION = 120       
-
-# --- 数据存储 ---
-quiz_sessions = {}
-quiz_history = {} 
-
-# ======================================================================================
-# --- 辅助函数 ---
-# ======================================================================================
-
-def check_cooldown(user_id):
-    history = quiz_history.get(user_id)
-    if not history:
-        return True, 0
-    # 使用 utcnow 的兼容写法，防止时区报错
-    elapsed = (discord.utils.utcnow() - history).total_seconds()
-    if elapsed < RETRY_COOLDOWN:
-        return False, int(RETRY_COOLDOWN - elapsed)
-    return True, 0
-
-# ======================================================================================
-# --- 视图类 (Views) ---
-# ======================================================================================
+QUIZ_DURATION = 120
 
 class QuizStartView(discord.ui.View):
     def __init__(self):
@@ -278,49 +250,3 @@ async def finalize_quiz(interaction, user_id, is_timeout=False):
             await log_channel.send(embed=log_embed)
     except Exception as e:
         print(f"发送日志失败: {e}")
-
-class Quiz(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        # 重新注册持久化视图
-        self.bot.add_view(QuizStartView())
-        print("[Quiz] Views registered successfully.")
-
-    @discord.slash_command(name="入站答题面板", description="（管理员）发送入站答题面板")
-    async def setup_quiz_panel(self, ctx):
-        if not ctx.guild.get_role(SUPER_EGG_ROLE_ID) in ctx.author.roles:
-            return await ctx.respond("无权操作", ephemeral=True)
-        
-        channel = ctx.guild.get_channel(IDS["QUIZ_CHANNEL_ID"])
-        embed = discord.Embed(
-            title="📝 新兵蛋子入站答题",
-            description=(
-                    "欢迎来到 **🔮LOFI-加载中**！\n"
-                    "为了维护社区环境，请在开始答题前仔细阅读以下内容。\n\n"
-
-                    "📘 **第一步：阅读指引**\n"
-                    "**请务必先前往 <#1417568378889175071> 仔细阅读频道指引！**\n"
-
-                    "🛑 **第二步：社区核心原则确认**\n"
-                    "1. **社区定位**：我们是非商业化 SillyTavern 女性社区，仅欢迎有酒馆使用经验的同好。\n"
-                    "2. **资源红线**：严禁将社区资源用于商业云酒馆、付费服务或第三方软件（如Tavo、Omate）。\n"
-                    "3. **拒绝商业**：坚决反对任何形式的商业化，请勿推荐非官方付费API或节点。\n\n"
-                    "----------------------------------------------------\n"
-                    "**同意以上条款后，请开始答题：**\n\n"
-                    "**规则说明：**\n"
-                    "• 共10道题，涉及SillyTavern基础与社区规则\n"
-                    "• **限时 2 分钟**，60分及格\n"
-                    "• **答题失败需等待 15 分钟冷却**\n"
-                    "• 通过后自动获得 `新兵蛋子` 身份，解锁象牙塔、极光等频道\n\n"
-                    "**准备好了吗？点击下方按钮开始！**"
-                ),
-            color=STYLE["KIMI_YELLOW"]
-        )
-        await channel.send(embed=embed, view=QuizStartView())
-        await ctx.respond("面板已发送", ephemeral=True)
-
-def setup(bot):
-    bot.add_cog(Quiz(bot))

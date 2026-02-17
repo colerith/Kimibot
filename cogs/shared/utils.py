@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 import datetime
-from config import IDS, STYLE
+from config import IDS, STYLE, SERVER_OWNER_ID
 
 # 常量定义
 TZ_CN = datetime.timezone(datetime.timedelta(hours=8))
@@ -10,6 +10,9 @@ KIMI_FOOTER_TEXT = "请遵守社区规则，一起做个乖饱饱嘛~！"
 # 检查权限：超级小蛋
 def is_super_egg():
     async def predicate(ctx: discord.ApplicationContext) -> bool:
+        if ctx.author.id == SERVER_OWNER_ID:
+            return True
+
         if not isinstance(ctx.author, discord.Member) or not hasattr(ctx.author, 'roles'):
              await ctx.respond("呜...无法识别你的身份组信息！", ephemeral=True)
              return False
@@ -17,7 +20,8 @@ def is_super_egg():
         super_egg_role = ctx.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
         if super_egg_role and super_egg_role in ctx.author.roles:
             return True
-        await ctx.respond("呜...这个是【超级小蛋】专属嘟魔法，你还不能用捏！QAQ", ephemeral=True)
+
+        await ctx.respond("🚫 只有【超级小蛋】才能使用此魔法哦！", ephemeral=True)
         return False
     return commands.check(predicate)
 
