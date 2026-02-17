@@ -25,7 +25,7 @@ intents.message_content = True
 bot = discord.Bot(intents=intents, debug_guilds=DEBUG_GUILDS)
 
 # --- 启动时加载所有“魔法书” (Cogs) ---
-cogs_list = ['general', 'management', 'tickets', 'quiz', 'forum_tracker','general.core']
+cogs_list = ['management', 'tickets', 'quiz', 'forum_tracker','general.core']
 
 for cog in cogs_list:
     try:
