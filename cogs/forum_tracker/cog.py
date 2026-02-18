@@ -20,7 +20,7 @@ from .views import ForumStatsView
 from .utils import get_task_autocomplete, check_keywords
 from ..shared.utils import is_super_egg
 
-class ForumTracker(commands.Cog):
+class ForumTrackerCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.daily_update_task.start()
