@@ -1,8 +1,6 @@
 # cogs/forum_tracker/db.py
 
 import sqlite3
-import datetime
-import os
 
 # 数据库文件路径
 DB_PATH = "data/forum_data.db"

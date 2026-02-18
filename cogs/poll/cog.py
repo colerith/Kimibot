@@ -7,7 +7,7 @@ import asyncio
 import datetime
 
 from .views import PollView
-from config import IDS, STYLE, TZ_CN
+from config import TZ_CN
 from cogs.shared.utils import is_super_egg, parse_duration
 
 class PollsCog(commands.Cog, name="投票系统"):

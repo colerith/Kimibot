@@ -1,7 +1,6 @@
 # cogs/forum_tracker/utils.py
 
 import discord
-import re
 from .db import db
 
 async def get_task_autocomplete(ctx: discord.AutocompleteContext):

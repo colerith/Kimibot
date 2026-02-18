@@ -3,10 +3,9 @@
 import discord
 from discord import ui
 import datetime
-import random
 
 from .storage import load_lottery_data, save_lottery_data
-from config import IDS, LOTTERY, STYLE, TZ_CN
+from config import STYLE, TZ_CN
 
 # --- 用户端：参与抽奖 ---
 class LotteryJoinView(discord.ui.View):

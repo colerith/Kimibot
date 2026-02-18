@@ -5,7 +5,7 @@ from discord.ext import commands
 import asyncio
 
 from .views import WishPanelView, WishActionView
-from config import IDS, STYLE, WISH_CHANNEL_ID
+from config import STYLE, WISH_CHANNEL_ID
 from cogs.shared.utils import is_super_egg
 
 class WishPoolCog(commands.Cog):

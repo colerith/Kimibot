@@ -9,8 +9,7 @@ import random
 
 from .storage import load_lottery_data, save_lottery_data
 from .views import LotteryCreateModal, LotteryJoinView
-from config import IDS
-from cogs.shared.utils import is_super_egg, parse_duration
+from cogs.shared.utils import is_super_egg
 
 class LotteryCog(commands.Cog, name="抽奖系统"):
     """负责所有抽奖相关的功能。"""

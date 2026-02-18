@@ -3,7 +3,7 @@
 import discord
 from discord import ui
 import datetime
-from config import IDS, STYLE, WISH_CHANNEL_ID, SERVER_OWNER_ID
+from config import STYLE, SERVER_OWNER_ID
 import random
 import asyncio
 
