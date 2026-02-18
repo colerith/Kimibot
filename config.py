@@ -3,6 +3,8 @@ import pytz
 import os
 import datetime
 
+TZ_CN = datetime.timezone(datetime.timedelta(hours=8))
+
 # --- 身份组和频道ID配置 ---
 IDS = {
     "SUPER_EGG_ROLE_ID": 1417724603253395526,
