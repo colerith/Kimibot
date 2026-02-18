@@ -57,7 +57,6 @@ class WelcomeCog(commands.Cog):
         except discord.Forbidden:
             print(f"权限不足，无法在频道 {channel.name} 发送欢迎消息。")
 
-    # --- ✨ 修改点：所有答题逻辑函数都变成 Cog 的方法 ---
     def check_cooldown(self, user_id: int):
         """检查用户答题冷却时间"""
         history_time = self.history.get(user_id)
@@ -95,12 +94,14 @@ class WelcomeCog(commands.Cog):
             ans = session["answers"].get(i)
             is_correct = (ans == q["answer"])
             if is_correct: score += 10
-            details.append(f"Q{i+1}: {'✅' if is_correct else '❌'} (选{ans}/对{q['answer']})")
+            details.append(f"Q{i+1}: {'✅' if is_correct else '❌'} (选{ans or '未答'}/对{q['answer']})")
 
         passed = score >= 60
+        title_prefix = "⏱️ 答题超时" if is_timeout else "📝 答题结束"
+
         embed = discord.Embed(
-            title="📝 答题结束",
-            description=f"**最终得分: {score}/100**\n" + ("⏱️ 超时提交" if is_timeout else ""),
+            title=title_prefix,
+            description=f"**最终得分: {score}/100**",
             color=0x00FF00 if passed else 0xFF0000
         )
 
@@ -116,26 +117,30 @@ class WelcomeCog(commands.Cog):
         else:
             embed.description += f"\n\n❌ **未通过 (需60分)**\n请仔细阅读规则或群公告。\n你可以在 **{RETRY_COOLDOWN // 60}分钟** 后再次尝试。"
 
-        # 发送私密结果
+        # --- 核心修改部分 ---
         try:
-            # 统一使用 followup.send 来保证消息发送
+            # 如果是超时，交互对象很旧，只能用 followup 发送新消息
             if is_timeout:
-                await interaction.followup.send(embed=embed, ephemeral=True, view=None)
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            # 如果是正常答完，交互对象是新鲜的，直接编辑当前消息
             else:
-                 await interaction.edit_original_response(embed=embed, view=None)
+                await interaction.response.edit_message(embed=embed, view=None)
+
+        # 备用方案：如果编辑失败（例如用户关闭了窗口），尝试用followup发送
         except discord.NotFound:
-            # 如果原始交互找不到了（比如超时后用户关闭了窗口），用 followup 发送新消息
-            await interaction.followup.send(content="答题会话已结束。", embed=embed, ephemeral=True, view=None)
-        except Exception as e:
-            # 对于其他未知错误，也尝试 followup
-            print(f"发送答题结果给用户 {user_id} 失败: {e}")
             try:
-                await interaction.followup.send(embed=embed, ephemeral=True, view=None)
+                await interaction.followup.send(content="答题会话已结束。", embed=embed, ephemeral=True)
             except Exception as final_e:
                 print(f"最终发送答题结果失败: {final_e}")
+        except Exception as e:
+            print(f"发送答题结果时发生未知错误: {e}")
+            try:
+                await interaction.followup.send(content="处理结果时发生错误。", embed=embed, ephemeral=True)
+            except Exception as final_e:
+                print(f"最终发送答题结果失败: {final_e}")
+        # --- 修改结束 ---
 
-
-        # 使用 self 调用方法
+        # 发送日志的逻辑保持不变
         self._send_public_log(interaction, user_id, score, passed, is_timeout, details)
 
     def _send_public_log(self, interaction, user_id, score, passed, is_timeout, details):
