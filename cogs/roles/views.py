@@ -64,7 +64,7 @@ class RoleLotteryView(discord.ui.View):
             try:
                 await user.add_roles(won_role, reason="积分抽奖获取")
 
-                desc = f"🎉 **恭喜！！欧气爆发！**\n\n你获得了新的稀有装饰：**{won_role.mention}**\n它已经放入你的个人试衣间，快去看看吧！"
+                desc = f"🎉 **恭喜！！欧气爆发！**\n\n你获得了新的装饰：**{won_role.mention}**\n它已经放入你的个人试衣间，快去看看吧！"
                 desc += f"\n\n💳 **扣除积分**: {LOTTERY_COST}\n💰 **当前余额**: {left_points}"
 
                 embed.description = desc
@@ -297,8 +297,7 @@ class RoleClaimView(discord.ui.View):
             description=f"这里藏着一些无法直接领取的 **稀有款式**！\n你会是那个被命运选中的孩子吗？\n\n"
                         f"💳 **单次消耗**: {LOTTERY_COST} 积分\n"
                         f"🔄 **重复补偿**: 返还 {LOTTERY_REFUND} 积分\n"
-                        f"💰 **你的积蓄**: **{points}**\n\n"
-                        f"*注：抽到的稀有装饰也会替换掉当前的普通装饰哦，毕竟荣耀是唯一的。*",
+                        f"💰 **你的积蓄**: **{points}**\n\n",
             color=discord.Color.purple()
         )
         await interaction.response.send_message(embed=embed, view=RoleLotteryView(), ephemeral=True)
