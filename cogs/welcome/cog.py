@@ -86,18 +86,18 @@ class WelcomeCog(commands.Cog):
         except Exception as e:
             print(f"答题计时任务出错: {e}")
 
-    async def finalize_quiz(self, interaction: discord.Interaction, user_id: int, is_timeout: bool = False):
-        """结算答题结果的核心函数"""
-        if user_id not in self.sessions:
+    async def finalize_quiz(interaction, user_id, is_timeout=False):
+        if user_id not in quiz_sessions: 
             return
 
-        session = self.sessions.pop(user_id)
-        self.history[user_id] = discord.utils.utcnow()
+        session = quiz_sessions.pop(user_id)
+        quiz_history[user_id] = discord.utils.utcnow()
 
         score = 0
         details = []
+
         for i, q in enumerate(session["questions"]):
-            ans = session["answers"].get(i)
+            ans = session["answers"].get(i, None)
             is_correct = (ans == q["answer"])
             if is_correct: score += 10
             details.append(f"Q{i+1}: {'✅' if is_correct else '❌'} (选{ans}/对{q['answer']})")
@@ -110,51 +110,81 @@ class WelcomeCog(commands.Cog):
         )
 
         if passed:
-            embed.description += "\n\n🎉 **恭喜通过！**\n✅ 已自动获得【新兵蛋子】身份组，并解锁部分频道。"
+            embed.description += "\n\n🎉 **恭喜通过！**\n✅ 已自动获得【新兵蛋子】身份组。\n🔓 已解锁：象牙塔、极光及部分分区。"
             role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
             if role:
                 try:
-                    member = interaction.guild.get_member(user_id) or await interaction.guild.fetch_member(user_id)
+                    # 获取 member 对象，interaction.user 有时只是 User 类型
+                    member = interaction.guild.get_member(user_id) or interaction.user
                     await member.add_roles(role, reason="自助答题通过")
                 except Exception as e:
-                    print(f"为用户 {user_id} 添加身份组失败: {e}")
+                    print(f"加身份组失败: {e}")
         else:
-            embed.description += f"\n\n❌ **未通过 (需60分)**\n请仔细阅读规则或群公告。\n你可以在 **{RETRY_COOLDOWN // 60}分钟** 后再次尝试。"
+            embed.description += f"\n\n❌ **未通过 (需60分)**\n请仔细阅读规则或群公告。\n**请等待 15分钟 后再次尝试。**"
 
-        # 发送私密结果
+        # 结果展示：这里最容易出错，需要兼容不同的 interaction 状态
         try:
             if is_timeout:
-                await interaction.followup.send(embed=embed, ephemeral=True, view=None)
+                # 超时是由后台任务触发的，interaction 可能已经过期，尝试 followup
+                await interaction.followup.send(embed=embed, ephemeral=True)
             else:
-                await interaction.edit_original_response(embed=embed, view=None)
-        except discord.errors.InteractionResponded:
-             await interaction.followup.send(embed=embed, ephemeral=True, view=None)
+                # 正常答完，因为 SelectCallback 里 defer 过了，所以用 edit_original_response
+                try:
+                    await interaction.edit_original_response(embed=embed, view=None)
+                except:
+                    await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
-            print(f"发送答题结果给用户 {user_id} 失败: {e}")
+            print(f"发送结果给用户失败 (可能是token彻底过期): {e}")
 
-        self._send_public_log(interaction, user_id, score, passed, is_timeout, details)
+        # 下面是发送到公开频道和日志频道 (无需修改，这些通常不会报 interaction 错误)
+        try:
+            public_channel = interaction.guild.get_channel(PUBLIC_RESULT_CHANNEL_ID)
+            if public_channel:
+                status_emoji = "🟢" if passed else "🔴"
+                status_text = "**通过**" if passed else "**未通过**"
+                # 获取用户 mention
+                user_mention = f"<@{user_id}>"
+                
+                public_embed = discord.Embed(
+                    description=f"{status_emoji} 用户 {user_mention} 完成了入站答题。\n📊 结果：{status_text} (得分: `{score}`) {'⏱️ (超时)' if is_timeout else ''}",
+                    color=0x00FF00 if passed else 0xFF0000
+                )
+                if not passed:
+                    public_embed.set_footer(text="请在冷却时间结束后再试")
+                await public_channel.send(embed=public_embed)
+        except Exception as e:
+            print(f"发送公开结果失败: {e}")
 
-    def _send_public_log(self, interaction, user_id, score, passed, is_timeout, details):
-        public_channel = self.bot.get_channel(PUBLIC_RESULT_CHANNEL_ID)
-        if public_channel:
-            status_emoji = "🟢" if passed else "🔴"
-            status_text = "**通过**" if passed else "**未通过**"
-            public_embed = discord.Embed(
-                description=f"{status_emoji} <@{user_id}>完成了入站答题。\n📊 结果: {status_text} (`{score}`分) {'⏱️(超时)' if is_timeout else ''}",
-                color=0x00FF00 if passed else 0xFF0000
-            )
-            asyncio.create_task(public_channel.send(embed=public_embed))
+        try:
+            log_channel = interaction.guild.get_channel(QUIZ_LOG_CHANNEL_ID)
+            if log_channel:
+                user_name = interaction.user.display_name if hasattr(interaction.user, 'display_name') else str(user_id)
+                log_embed = discord.Embed(title=f"答题详情: {user_name} ({user_id})", description=f"分数: {score}\n结果: {'通过' if passed else '失败'}\n\n" + "\n".join(details))
+                await log_channel.send(embed=log_embed)
+        except Exception as e:
+            print(f"发送日志失败: {e}")
 
-        # 内部日志记录
-        log_channel = self.bot.get_channel(QUIZ_LOG_CHANNEL_ID)
-        if log_channel:
-            member = interaction.guild.get_member(user_id)
-            user_name = member.display_name if member else f"ID: {user_id}"
-            log_embed = discord.Embed(
-                title=f"答题详情: {user_name}",
-                description=f"分数: {score}\n结果: {'通过' if passed else '失败'}\n\n" + "\n".join(details)
-            )
-            asyncio.create_task(log_channel.send(embed=log_embed))
+        def _send_public_log(self, interaction, user_id, score, passed, is_timeout, details):
+            public_channel = self.bot.get_channel(PUBLIC_RESULT_CHANNEL_ID)
+            if public_channel:
+                status_emoji = "🟢" if passed else "🔴"
+                status_text = "**通过**" if passed else "**未通过**"
+                public_embed = discord.Embed(
+                    description=f"{status_emoji} <@{user_id}>完成了入站答题。\n📊 结果: {status_text} (`{score}`分) {'⏱️(超时)' if is_timeout else ''}",
+                    color=0x00FF00 if passed else 0xFF0000
+                )
+                asyncio.create_task(public_channel.send(embed=public_embed))
+
+            # 内部日志记录
+            log_channel = self.bot.get_channel(QUIZ_LOG_CHANNEL_ID)
+            if log_channel:
+                member = interaction.guild.get_member(user_id)
+                user_name = member.display_name if member else f"ID: {user_id}"
+                log_embed = discord.Embed(
+                    title=f"答题详情: {user_name}",
+                    description=f"分数: {score}\n结果: {'通过' if passed else '失败'}\n\n" + "\n".join(details)
+                )
+                asyncio.create_task(log_channel.send(embed=log_embed))
 
     # --- 答题管理命令 ---
     @discord.slash_command(name="入站答题面板", description="（管理员）发送入站答题面板")
