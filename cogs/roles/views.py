@@ -5,7 +5,7 @@ from discord import ui
 import asyncio
 import random
 
-from .storage import load_role_data, save_role_data
+from .storage import load_role_data, save_role_data, add_to_collection, get_user_collection
 from cogs.points.storage import get_user_points, modify_user_points
 from config import STYLE, LOTTERY_COST, LOTTERY_REFUND
 from discord.ui import Select
@@ -59,12 +59,16 @@ class RoleLotteryView(discord.ui.View):
             embed.color = discord.Color.light_grey()
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # 情况B: 抽到新的 -> 直接添加，不替换
         else:
             try:
+                # 记录到永久藏品数据库
+                add_to_collection(user.id, won_role.id)
+
+                # 移除旧装饰，并穿上新装饰
+                await remove_all_decorations(user, interaction.guild, keep_role_id=won_role.id, exclusive_type="lottery")
                 await user.add_roles(won_role, reason="积分抽奖获取")
 
-                desc = f"🎉 **恭喜！！欧气爆发！**\n\n你获得了新的装饰：**{won_role.mention}**\n它已经放入你的个人试衣间，快去看看吧！"
+                desc = f"🎉 **恭喜！！欧气爆发！**\n\n你获得了新的稀有装饰：**{won_role.mention}**\n它已永久解锁并放入你的个人试衣间！"
                 desc += f"\n\n💳 **扣除积分**: {LOTTERY_COST}\n💰 **当前余额**: {left_points}"
 
                 embed.description = desc
@@ -92,17 +96,18 @@ class RoleLotteryView(discord.ui.View):
             return await interaction.followup.send("🌑 这片星域空空如也（奖池未配置）。", ephemeral=True)
 
         guild = interaction.guild
-        user_roles_ids = {r.id for r in interaction.user.roles}
+
+        # 【✨ 核心修改：从新的藏品数据库读取数据】
+        user_collection_ids = set(get_user_collection(interaction.user.id))
 
         # 1. 梳理奖池和拥有状态
         valid_roles_in_pool = [r for r in [guild.get_role(rid) for rid in pool_ids] if r]
-        owned_lottery_roles = [r for r in valid_roles_in_pool if r.id in user_roles_ids]
+
+        # ✨ 现在通过藏品ID来判断拥有状态
+        owned_lottery_roles = [r for r in valid_roles_in_pool if r.id in user_collection_ids]
 
         total_count = len(valid_roles_in_pool)
         owned_count = len(owned_lottery_roles)
-
-        if total_count == 0:
-             return await interaction.followup.send("⚠️ 奖池里的身份组似乎都已失效。", ephemeral=True)
 
         # 2. 构建图鉴描述
         embed = discord.Embed(title="🌌 命运星图 · 珍藏馆", color=0x9b59b6)
@@ -242,28 +247,26 @@ class RoleClaimView(discord.ui.View):
 
     @discord.ui.button(label="🎨 领取/更换", style=discord.ButtonStyle.success, custom_id="role_main_start")
     async def start_decor_callback(self, button, interaction: discord.Interaction):
-        # 1. 同时获取普通池和奖池的配置
         data = load_role_data()
         claimable_ids = set(data.get("claimable_roles", []))
         lottery_ids = set(data.get("lottery_roles", []))
 
-        user_role_ids = {r.id for r in interaction.user.roles}
+        # 从藏品数据库获取稀有身份组
+        user_lottery_collection_ids = set(get_user_collection(interaction.user.id))
 
-        # 2. 构建可选择的身份组列表
         selectable_roles = []
 
-        # 添加所有有效的【普通身份组】
+        # 1. 添加所有有效的【普通身份组】
         for rid in claimable_ids:
             role = interaction.guild.get_role(rid)
             if role:
                 selectable_roles.append(role)
 
-        # 只添加用户【已拥有】的【奖池身份组】
-        for rid in lottery_ids:
-            if rid in user_role_ids:
-                role = interaction.guild.get_role(rid)
-                if role:
-                    selectable_roles.append(role)
+        # 2. 添加用户【藏品中】的所有【稀有身份组】
+        for rid in user_lottery_collection_ids:
+            role = interaction.guild.get_role(rid)
+            if role: # 确保身份组仍然存在于服务器
+                selectable_roles.append(role)
 
         if not selectable_roles:
             return await interaction.response.send_message("⚠️ 现在好像还没有任何可用的装饰品呢！", ephemeral=True)
