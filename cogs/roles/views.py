@@ -7,8 +7,7 @@ import random
 
 from .storage import load_role_data, save_role_data
 from cogs.points.storage import get_user_points, modify_user_points
-from cogs.points.cog import LOTTERY_COST, LOTTERY_REFUND, remove_all_decorations
-from config import STYLE
+from config import STYLE, LOTTERY_COST, LOTTERY_REFUND
 from discord.ui import Select
 
 # --- 抽奖界面 ---
