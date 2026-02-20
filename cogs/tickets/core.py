@@ -950,7 +950,7 @@ class Tickets(commands.Cog):
         await progress_msg.edit(content=f"✅ 处理完成！\n扫描: {len(channels_to_rename)} 个\n更名: {success_count} 个")
 
     # 上下文菜单：右键消息超时归档
-    @discord.message_command(name="超时归档此工单")
+    @discord.message_command(name="🚫超时归档此工单")
     @is_reviewer_egg()
     async def timeout_archive_ctx(self, ctx: discord.ApplicationContext, message: discord.Message):
         if not get_ticket_info(ctx.channel).get("工单ID"): return await ctx.respond("无效频道", ephemeral=True)
