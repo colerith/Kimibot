@@ -204,10 +204,12 @@ class ManagementControlView(ui.View):
             public_msg, user_obj = None, member or self.selected_user or await self.ctx.bot.fetch_user(tid)
             public_chan = guild.get_channel(self.public_channel_id)
             if public_chan:
-                p_embed = discord.Embed(title=f"🚨 社区公告 | {msg_act}", color=color)
-                p_embed.add_field(name="当事人", value=f"<@{tid}> (`{user_obj.name}`)", inline=True)
+                p_embed = discord.Embed(title=f"🚨 违规公示 | {msg_act}", color=color)
+                p_embed.add_field(name="违规者", value=f"<@{tid}> (`{user_obj.name}`)", inline=True)
                 p_embed.add_field(name="累计违规", value=f"**{new_count}** 次", inline=True)
                 p_embed.description = f"**理由:**\n{self.reason}"
+                p_embed.set_footer(text="请大家遵守社区规范，共建良好环境。")
+                p_embed.timestamp = discord.utils.utcnow()
                 if user_obj.display_avatar:
                     p_embed.set_thumbnail(url=user_obj.display_avatar.url)
                 public_msg = await public_chan.send(embed=p_embed, files=files_for_pub)
