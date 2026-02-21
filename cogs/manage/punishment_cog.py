@@ -1,7 +1,8 @@
 # cogs/manage/punishment_cog.py
 
 import discord
-from discord import commands, Option
+from discord.ext import commands
+from discord import Option
 
 from config import IDS, STYLE
 from .punishment_db import db

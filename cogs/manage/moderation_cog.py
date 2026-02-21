@@ -1,7 +1,8 @@
 # cogs/manage/moderation_cog.py
 
 import discord
-from discord import commands, Option
+from discord.ext import commands
+from discord import Option
 import asyncio
 
 from .moderation_views import AnnouncementModal
