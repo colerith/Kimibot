@@ -9,20 +9,24 @@ from .punishment_db import db
 from .punishment_views import ManagementControlView
 from ..shared.utils import is_super_egg
 
-# 从 config 获取公示频道 ID
 PUBLIC_NOTICE_CHANNEL_ID = IDS.get("PUBLIC_NOTICE_CHANNEL_ID")
 LOG_CHANNEL_ID = 1468508677144055818
 
 class PunishmentCog(commands.Cog, name="处罚系统"):
     def __init__(self, bot):
         self.bot = bot
-        # 注册持久化视图
-        # 在 __init__ 中直接给 ctx 传 None，仅用于注册
-        self.bot.add_view(ManagementControlView(None, public_channel_id=PUBLIC_NOTICE_CHANNEL_ID, log_channel_id=LOG_CHANNEL_ID))
+        self.persistent_view = ManagementControlView(
+            ctx=None,  
+            public_channel_id=PUBLIC_NOTICE_CHANNEL_ID,
+            log_channel_id=LOG_CHANNEL_ID
+        )
+
+    def cog_load(self):
+        self.bot.add_view(self.persistent_view)
 
     @commands.Cog.listener()
     async def on_ready(self):
-        print("[Punishment] Cog loaded.")
+        print("[Punishment] Cog loaded and persistent view registered.")
 
     @discord.slash_command(name="处罚", description="打开管理面板 (可上传证据)")
     @is_super_egg()
