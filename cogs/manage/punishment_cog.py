@@ -15,18 +15,22 @@ LOG_CHANNEL_ID = 1468508677144055818
 class PunishmentCog(commands.Cog, name="处罚系统"):
     def __init__(self, bot):
         self.bot = bot
-        self.persistent_view = ManagementControlView(
-            ctx=None,  
-            public_channel_id=PUBLIC_NOTICE_CHANNEL_ID,
-            log_channel_id=LOG_CHANNEL_ID
-        )
-
-    def cog_load(self):
-        self.bot.add_view(self.persistent_view)
+        # ✨ 修复点：移除了在 __init__ 中的 View 实例化
+        # 现在，我们将在 bot 准备好时或 Cog 加载时初始化它
+        self.persistent_view = None
 
     @commands.Cog.listener()
     async def on_ready(self):
-        print("[Punishment] Cog loaded and persistent view registered.")
+        # ✨ 修复点：在 on_ready 时实例化 View，确保 loop 正在运行
+        if self.persistent_view is None:
+            self.persistent_view = ManagementControlView(
+                ctx=None,
+                public_channel_id=PUBLIC_NOTICE_CHANNEL_ID,
+                log_channel_id=LOG_CHANNEL_ID
+            )
+            self.bot.add_view(self.persistent_view)
+
+        print("[Punishment] Cog loaded and view registered (if persistent).")
 
     @discord.slash_command(name="处罚", description="打开管理面板 (可上传证据)")
     @is_super_egg()
@@ -41,6 +45,8 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             file8: Option(discord.Attachment, "证据8", required=False)=None,
             file9: Option(discord.Attachment, "证据9", required=False)=None):
         files = [f for f in [file1, file2, file3, file4, file5, file6, file7, file8, file9] if f]
+
+        # 每次命令创建新的 View 实例
         view = ManagementControlView(
             ctx,
             initial_files=files,
