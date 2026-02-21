@@ -15,13 +15,10 @@ LOG_CHANNEL_ID = 1468508677144055818
 class PunishmentCog(commands.Cog, name="处罚系统"):
     def __init__(self, bot):
         self.bot = bot
-        # ✨ 修复点：移除了在 __init__ 中的 View 实例化
-        # 现在，我们将在 bot 准备好时或 Cog 加载时初始化它
         self.persistent_view = None
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # ✨ 修复点：在 on_ready 时实例化 View，确保 loop 正在运行
         if self.persistent_view is None:
             self.persistent_view = ManagementControlView(
                 ctx=None,
