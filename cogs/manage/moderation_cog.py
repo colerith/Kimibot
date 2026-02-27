@@ -18,7 +18,12 @@ class ModerationCog(commands.Cog, name="通用管理"):
     @is_super_egg()
     async def publish_announcement(self, ctx: discord.ApplicationContext, 
         channel: discord.TextChannel, 
-        mention_role: Option(discord.Role, "要@的身份组", required=False) = None,  # pyright: ignore[reportInvalidTypeForm]
+        mention_role1: Option(discord.Role, "要@的身份组1", required=False) = None,  # pyright: ignore[reportInvalidTypeForm]
+        mention_role2: Option(discord.Role, "要@的身份组2", required=False) = None,  # pyright: ignore[reportInvalidTypeForm]
+        mention_role3: Option(discord.Role, "要@的身份组3", required=False) = None,  # pyright: ignore[reportInvalidTypeForm]
+        mention_role4: Option(discord.Role, "要@的身份组4", required=False) = None,  # pyright: ignore[reportInvalidTypeForm]
+        mention_role5: Option(discord.Role, "要@的身份组5", required=False) = None,  # pyright: ignore[reportInvalidTypeForm]
+        mention_everyone: Option(bool, "是否@全体成员(@everyone)", required=False) = False,  # pyright: ignore[reportInvalidTypeForm]
         image1: Option(discord.Attachment, "图片附件1", required=False) = None,  # type: ignore
         image2: Option(discord.Attachment, "图片附件2", required=False) = None, # type: ignore
         image3: Option(discord.Attachment, "图片附件3", required=False) = None, # pyright: ignore[reportInvalidTypeForm]
@@ -29,8 +34,12 @@ class ModerationCog(commands.Cog, name="通用管理"):
         image8: Option(discord.Attachment, "图片附件8", required=False) = None, # pyright: ignore[reportInvalidTypeForm]
         image9: Option(discord.Attachment, "图片附件9", required=False) = None # pyright: ignore[reportInvalidTypeForm]
     ):
+        mention_roles = [
+            role for role in [mention_role1, mention_role2, mention_role3, mention_role4, mention_role5]
+            if role
+        ]
         attachments = [img for img in [image1, image2, image3, image4, image5, image6, image7, image8, image9] if img]
-        modal = AnnouncementModal(channel, mention_role, attachments)
+        modal = AnnouncementModal(channel, mention_roles, mention_everyone, attachments)
         await ctx.send_modal(modal)
 
     @discord.slash_command(name="清空消息", description="本大王来帮你打扫卫生惹！可以定时清理唷~")

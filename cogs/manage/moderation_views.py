@@ -4,10 +4,17 @@ import discord
 from discord import ui
 
 class AnnouncementModal(ui.Modal):
-    def __init__(self, channel: discord.TextChannel, mention_role, attachments):
+    def __init__(
+        self,
+        channel: discord.TextChannel,
+        mention_roles: list[discord.Role],
+        mention_everyone: bool,
+        attachments,
+    ):
         super().__init__(title="📢 编辑公告内容")
         self.channel = channel
-        self.mention_role = mention_role
+        self.mention_roles = mention_roles
+        self.mention_everyone = mention_everyone
         self.attachments = attachments
 
         self.add_item(ui.InputText(label="公告标题", placeholder="例如：服务器维护通知", required=True))
@@ -24,10 +31,28 @@ class AnnouncementModal(ui.Modal):
 
         files_to_send = [await f.to_file() for f in self.attachments]
 
-        mention_content = self.mention_role.mention if self.mention_role else ""
+        # 去重，避免重复@同一个身份组
+        unique_roles = list({role.id: role for role in self.mention_roles}.values())
+        mention_parts = []
+        if self.mention_everyone:
+            mention_parts.append("@everyone")
+        mention_parts.extend(role.mention for role in unique_roles)
+        mention_content = " ".join(mention_parts)
+
+        allowed_mentions = discord.AllowedMentions(
+            everyone=self.mention_everyone,
+            roles=unique_roles,
+            users=False,
+            replied_user=False,
+        )
 
         try:
-            await self.channel.send(content=mention_content, embed=embed, files=files_to_send)
+            await self.channel.send(
+                content=mention_content,
+                embed=embed,
+                files=files_to_send,
+                allowed_mentions=allowed_mentions,
+            )
             await interaction.followup.send("✅ 公告已成功发送！", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ 发送失败: {e}", ephemeral=True)
