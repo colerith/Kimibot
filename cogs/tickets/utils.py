@@ -9,8 +9,8 @@ from config import IDS, QUOTA, STYLE
 
 # --- 常量 ---
 SPECIFIC_REVIEWER_ID = 1452321798308888776
-TIMEOUT_HOURS_ARCHIVE = 12
-TIMEOUT_HOURS_REMIND = 6
+TIMEOUT_HOURS_ARCHIVE = 6
+TIMEOUT_HOURS_REMIND = 3
 STRINGS_PATH = os.path.join(os.path.dirname(__file__), 'strings.json')
 
 # --- 文本加载 ---
