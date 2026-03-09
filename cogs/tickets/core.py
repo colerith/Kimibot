@@ -137,7 +137,7 @@ class Tickets(commands.Cog):
 
             # 2. 检查时间
             now = datetime.datetime.now(QUOTA["TIMEZONE"])
-            if not (8 <= now.hour < 23):
+            if not (17 <= now.hour < 23):
                 self.creating_lock.discard(user.id)
                 return await interaction.response.send_message(STRINGS["messages"]["err_time_limit"], ephemeral=True)
 
@@ -342,7 +342,7 @@ class Tickets(commands.Cog):
         now = datetime.datetime.now(QUOTA["TIMEZONE"])
 
         desc = p_data["description_head"] + "\n" + p_data["req_newbie"] + "\n"
-        desc += f"**-` 审核开放时间: 每日 08:00 - 23:00 `**\n**-` 今日剩余名额: {d['daily_quota_left']}/{QUOTA['DAILY_TICKET_LIMIT']} `**"
+        desc += f"**-` 审核开放时间: 每日 17:00 - 23:00 `**\n**-` 今日剩余名额: {d['daily_quota_left']}/{QUOTA['DAILY_TICKET_LIMIT']} `**"
 
         is_active_suspension = False
 

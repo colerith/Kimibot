@@ -61,7 +61,7 @@
     "err_perm_create": "呜...只有【新兵蛋子】或【审核小蛋】才能创建审核工单哦！",
     "err_quota_limit": "呜...今天的新蛋审核名额已经用完惹，请明天再来吧！",
     "err_already_has": "呜...你已经有一个正在处理的工单 {channel} 惹！请不要重复创建哦~",
-    "err_time_limit": "呜...现在是审核员的休息时间 (08:00 - 23:00)，请在开放时间内再来申请哦！",
+    "err_time_limit": "呜...现在是审核员的休息时间 (17:00 - 23:00)，请在开放时间内再来申请哦！",
     "log_timeout": "🚫 **超时归档**\n工单: `{ticket_id}`\n用户: `{creator_name}` (`{creator_id}`)\n操作人: {operator}\n📝 **备注**: {note}"
   }
 }
