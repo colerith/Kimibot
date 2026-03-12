@@ -23,7 +23,8 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             self.persistent_view = ManagementControlView(
                 ctx=None,
                 public_channel_id=PUBLIC_NOTICE_CHANNEL_ID,
-                log_channel_id=LOG_CHANNEL_ID
+                log_channel_id=LOG_CHANNEL_ID,
+                timeout=None
             )
             self.bot.add_view(self.persistent_view)
 

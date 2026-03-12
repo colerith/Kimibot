@@ -61,8 +61,8 @@ class ReasonInputModal(ui.Modal):
 
 # --- 主视图 ---
 class ManagementControlView(ui.View):
-    def __init__(self, ctx, initial_files=None, public_channel_id=None, log_channel_id=None):
-        super().__init__(timeout=900)
+    def __init__(self, ctx, initial_files=None, public_channel_id=None, log_channel_id=None, *, timeout=900):
+        super().__init__(timeout=timeout)
         self.ctx = ctx
         self.public_channel_id = public_channel_id
         self.log_channel_id = log_channel_id
