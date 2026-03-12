@@ -69,6 +69,8 @@ class Tickets(commands.Cog):
         self.bot.add_view(TicketPanelView(self))
         self.bot.add_view(ArchiveRequestView())
         self.bot.add_view(NotifyReviewerView(SPECIFIC_REVIEWER_ID))
+        from .views import ConfirmAbandonView
+        self.bot.add_view(ConfirmAbandonView())
 
         print("Tickets Cog Loaded & Views Registered.")
         print(f"当前审核暂停状态: {self.schedule_data.get('suspended')}")

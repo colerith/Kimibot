@@ -77,6 +77,50 @@ class ArchiveRequestView(discord.ui.View):
     @discord.ui.button(label="不打算加群，没问题了", style=discord.ButtonStyle.secondary, custom_id="req_archive_2")
     async def btn_NoIssue(self, button, interaction): await self.process(interaction, "不打算加群")
 
+# --- 视图: 确认放弃审核 ---
+class ConfirmAbandonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="✅ 确认放弃", style=discord.ButtonStyle.danger)
+    async def confirm(self, button, interaction):
+        await interaction.response.defer()
+        channel = interaction.channel
+        user = interaction.user
+        info = get_ticket_info(channel)
+        
+        # 1. 返还名额
+        q_data = load_quota_data()
+        q_data["daily_quota_left"] += 1
+        save_quota_data(q_data)
+        
+        # 更新面板
+        cog = interaction.client.get_cog("Tickets")
+        if cog:
+            await cog.update_panel_message()
+            
+        # 2. 记录日志
+        log_channel_id = IDS.get("TICKET_LOG_CHANNEL_ID")
+        if log_channel_id:
+            log_channel = interaction.client.get_channel(log_channel_id)
+            if log_channel:
+                embed = discord.Embed(
+                    title="🚫 用户放弃审核",
+                    description=f"**用户:** {user.mention} ({user.name})\n**工单ID:** {info.get('工单ID', '未知')}\n**频道名:** {channel.name}",
+                    color=discord.Color.red()
+                )
+                await log_channel.send(embed=embed)
+                
+        # 3. 删除频道
+        try:
+            await channel.delete(reason=f"用户 {user.name} 主动放弃审核")
+        except Exception as e:
+            print(f"删除频道失败: {e}")
+
+    @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button, interaction):
+        await interaction.response.edit_message(content="已取消放弃操作。", view=None)
+
 # --- 视图: 呼叫审核员 ---
 class NotifyReviewerView(discord.ui.View):
     def __init__(self, reviewer_id: int):
@@ -93,6 +137,14 @@ class NotifyReviewerView(discord.ui.View):
         button.label = "✅ 已呼叫"
         await interaction.message.edit(view=self)
         await interaction.response.send_message(f"<@&{self.rid}> 材料已备齐，请查看！")
+
+    @discord.ui.button(label="🚫 放弃审核", style=discord.ButtonStyle.danger, custom_id="abandon_ticket_button")
+    async def abandon(self, button, interaction):
+        info = get_ticket_info(interaction.channel)
+        if str(interaction.user.id) != info.get("创建者ID"):
+            return await interaction.response.send_message("只有创建者能放弃审核哦！", ephemeral=True)
+        
+        await interaction.response.send_message("确定要放弃审核吗？此操作将删除当前工单并无法恢复。", view=ConfirmAbandonView(), ephemeral=True)
 
 # --- 视图: 工单内管理面板 ---
 class TicketActionView(discord.ui.View):
