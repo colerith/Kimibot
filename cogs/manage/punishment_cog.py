@@ -1,9 +1,10 @@
 # cogs/manage/punishment_cog.py
 
+import os
 import discord
 from discord.ext import commands
 from discord import Option
-import datetime
+import redis.asyncio as redis
 
 from config import IDS, STYLE
 from .punishment_db import db
@@ -11,12 +12,111 @@ from .punishment_views import ManagementControlView
 from ..shared.utils import is_super_egg
 
 PUBLIC_NOTICE_CHANNEL_ID = IDS.get("PUBLIC_NOTICE_CHANNEL_ID")
-LOG_CHANNEL_ID = 1468508677144055818
+LOG_CHANNEL_ID = IDS.get("LOG_CHANNEL_ID", 1468508677144055818)
+
+# Redis 配置（可用环境变量覆盖）
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+AD_MESSAGE_TTL_SECONDS = int(os.getenv("AD_MESSAGE_TTL_SECONDS", "86400"))
+
 
 class PunishmentCog(commands.Cog, name="处罚系统"):
     def __init__(self, bot):
         self.bot = bot
         self.persistent_view = None
+        self.redis_client = None
+        self.redis_ready = False
+
+    def _redis_key(self, guild_id: int, user_id: int) -> str:
+        return f"ad_msgs:{guild_id}:{user_id}"
+
+    async def _init_redis(self):
+        if self.redis_client is not None:
+            return
+
+        try:
+            self.redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+            await self.redis_client.ping()
+            self.redis_ready = True
+            print(f"[Punishment] Redis connected: {REDIS_URL}")
+        except Exception as e:
+            self.redis_client = None
+            self.redis_ready = False
+            print(f"[Punishment] Redis unavailable, ad cleanup tracking disabled: {e}")
+
+    async def _track_user_message(self, message: discord.Message):
+        if not self.redis_ready or not self.redis_client:
+            return
+        if not message.guild:
+            return
+        if message.author.bot:
+            return
+
+        key = self._redis_key(message.guild.id, message.author.id)
+        value = f"{message.channel.id}:{message.id}"
+
+        try:
+            pipe = self.redis_client.pipeline()
+            pipe.rpush(key, value)
+            pipe.expire(key, AD_MESSAGE_TTL_SECONDS)
+            await pipe.execute()
+        except Exception as e:
+            # 记录失败但不影响主流程
+            print(f"[Punishment] Redis track message failed: {e}")
+
+    async def _delete_tracked_messages(self, guild: discord.Guild, user_id: int, reason: str):
+        if not self.redis_ready or not self.redis_client:
+            return 0, 0, 0
+
+        key = self._redis_key(guild.id, user_id)
+        try:
+            raw_items = await self.redis_client.lrange(key, 0, -1)
+        except Exception as e:
+            print(f"[Punishment] Redis read failed: {e}")
+            return 0, 0, 0
+
+        deleted_count = 0
+        attempted_count = 0
+        seen = set()
+
+        for raw in raw_items:
+            try:
+                channel_id_str, message_id_str = raw.split(":", 1)
+                channel_id = int(channel_id_str)
+                message_id = int(message_id_str)
+            except Exception:
+                continue
+
+            pair = (channel_id, message_id)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            attempted_count += 1
+
+            channel = guild.get_channel(channel_id)
+            if channel is None and hasattr(guild, "get_thread"):
+                channel = guild.get_thread(channel_id)
+            if channel is None:
+                channel = self.bot.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(channel_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+
+            try:
+                target_msg = await channel.fetch_message(message_id)
+                await target_msg.delete(reason=reason)
+                deleted_count += 1
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+                continue
+
+        # 处罚执行后，立即清空此用户追踪记录，避免重复删除
+        try:
+            await self.redis_client.delete(key)
+        except Exception:
+            pass
+
+        return deleted_count, attempted_count, len(raw_items)
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -29,7 +129,19 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             )
             self.bot.add_view(self.persistent_view)
 
+        await self._init_redis()
         print("[Punishment] Cog loaded and view registered (if persistent).")
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        await self._track_user_message(message)
+
+    def cog_unload(self):
+        if self.redis_client is not None:
+            try:
+                self.bot.loop.create_task(self.redis_client.aclose())
+            except Exception:
+                pass
 
     @discord.slash_command(name="处罚", description="打开管理面板 (可上传证据)")
     @is_super_egg()
@@ -86,8 +198,18 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 if roles_to_remove:
                     await member.remove_roles(*roles_to_remove, reason=reason)
 
-            start_of_day = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            await message.channel.purge(after=start_of_day, check=lambda m: m.author.id == target_id)
+            deleted_count, attempted_count, tracked_count = await self._delete_tracked_messages(
+                guild=guild,
+                user_id=target_id,
+                reason=reason
+            )
+
+            # 兜底：确保触发处罚的这条消息也尝试删除
+            try:
+                await message.delete(reason=reason)
+                deleted_count += 1
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
 
             new_count = db.add_strike(target_id)
 
@@ -112,6 +234,15 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 log_embed.add_field(name="执行人 (Executor)", value=ctx.user.mention, inline=True)
                 log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
                 log_embed.add_field(name="触发消息", value=message.jump_url, inline=False)
+                log_embed.add_field(
+                    name="清理结果",
+                    value=(
+                        f"已删 {deleted_count} 条 / 命中 {attempted_count} 条 / "
+                        f"缓存记录 {tracked_count} 条\n"
+                        f"Redis状态: {'可用' if self.redis_ready else '不可用'}"
+                    ),
+                    inline=False
+                )
 
                 log_view = discord.ui.View()
                 if public_msg:
@@ -119,7 +250,11 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
                 await log_chan.send(embed=log_embed, view=log_view)
 
-            await ctx.followup.send("✅ 已执行广告处罚并发送公示。", ephemeral=True)
+            await ctx.followup.send(
+                "✅ 已执行广告处罚并发送公示。\n"
+                f"🧹 清理统计：已删 {deleted_count} 条 / 命中 {attempted_count} 条 / 缓存记录 {tracked_count} 条。",
+                ephemeral=True
+            )
 
         except discord.Forbidden as e:
             await ctx.followup.send(f"❌ 权限不足: {e}", ephemeral=True)
