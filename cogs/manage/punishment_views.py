@@ -89,7 +89,7 @@ class ManagementControlView(ui.View):
         elif self.selected_user_id: info = f"ID: `{self.selected_user_id}`"
         else: info = "🔴 **未选择**"
         embed.add_field(name="1. 目标", value=info, inline=True)
-        act_map = {"warn": "⚠️ 警告", "mute": "🤐 禁言", "kick": "🚀 踢出", "ban": "🚫 封禁", "unmute": "🎤 解禁", "unban": "🔓 解封"}
+        act_map = {"warn": "⚠️ 警告", "mute": "🤐 禁言", "ad": "📢 广告", "kick": "🚀 踢出", "ban": "🚫 封禁", "unmute": "🎤 解禁", "unban": "🔓 解封"}
         embed.add_field(name="2. 动作", value=act_map.get(self.action_type, "⚪ **未选择**"), inline=True)
         link_only_count = len([link for link in self.evidence_links if link not in self.attachment_urls])
         desc = f"> **理由:** {self.reason}\n"
@@ -119,6 +119,7 @@ class ManagementControlView(ui.View):
         options=[
             discord.SelectOption(label="警告 (Warn)", value="warn", emoji="⚠️"),
             discord.SelectOption(label="禁言 (Mute)", value="mute", emoji="🤐"),
+            discord.SelectOption(label="广告 (Ad)", value="ad", emoji="📢"),
             discord.SelectOption(label="踢出 (Kick)", value="kick", emoji="🚀"),
             discord.SelectOption(label="封禁 (Ban)", value="ban", emoji="🚫"),
             discord.SelectOption(label="解除禁言", value="unmute", emoji="🎤"),
@@ -175,13 +176,26 @@ class ManagementControlView(ui.View):
                     await member.timeout(discord.utils.utcnow() + datetime.timedelta(seconds=secs), reason=self.reason)
                 else:
                     raise ValueError("用户不存在或时长无效")
+            elif act == "ad":
+                msg_act, color = "广告清理", 0xFF8800
+                if member:
+                    roles_to_remove = [r for r in member.roles if r != guild.default_role]
+                    if roles_to_remove:
+                        await member.remove_roles(*roles_to_remove, reason=self.reason)
+                else:
+                    raise ValueError("用户不存在")
+                if hasattr(interaction.channel, "purge"):
+                    start_of_day = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                    await interaction.channel.purge(after=start_of_day, check=lambda m: m.author.id == tid)
+                else:
+                    raise ValueError("频道不可清理")
             elif act == "kick":
                 msg_act, color = "踢出", 0xFF0000
                 if member: await member.kick(reason=self.reason)
                 else: raise ValueError("用户不存在")
             elif act == "ban":
                 msg_act, color = "封禁", 0x000000
-                await guild.ban(discord.Object(id=tid), reason=self.reason, delete_message_days=0)
+                await guild.ban(discord.Object(id=tid), reason=self.reason)
             elif act == "unmute":
                 msg_act, color = "解禁", 0x55FF55
                 if member: await member.timeout(None, reason=self.reason)
@@ -192,7 +206,7 @@ class ManagementControlView(ui.View):
 
             # --- 数据库记录 ---
             new_count = db.get_strikes(tid)
-            if act in ["warn", "mute", "kick", "ban"]:
+            if act in ["warn", "mute", "ad", "kick", "ban"]:
                 new_count = db.add_strike(tid)
 
             # --- 文件准备 ---
