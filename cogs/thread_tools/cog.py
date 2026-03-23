@@ -10,6 +10,51 @@ class ThreadToolsCog(commands.Cog, name="帖子工具"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    # --- 通用校验 ---
+
+    async def _get_thread_owner_id(self, thread: discord.Thread):
+        if thread.owner_id:
+            return thread.owner_id
+        try:
+            starter_message = await thread.fetch_message(thread.id)
+            return starter_message.author.id
+        except Exception:
+            return None
+
+    async def _ensure_thread_owner(self, ctx: discord.ApplicationContext):
+        if not isinstance(ctx.channel, discord.Thread):
+            await ctx.respond("呜...这个魔法只能在帖子频道里用啦！", ephemeral=True)
+            return False
+
+        owner_id = await self._get_thread_owner_id(ctx.channel)
+        if not owner_id:
+            await ctx.respond("呜...本大王找不到帖子的贴主信息惹。", ephemeral=True)
+            return False
+
+        if owner_id != ctx.author.id:
+            await ctx.respond("呜...只有贴主才能使用这个功能哦！", ephemeral=True)
+            return False
+
+        return True
+
+    async def _toggle_mark(self, ctx: discord.ApplicationContext, message: discord.Message):
+        try:
+            message = await ctx.channel.fetch_message(message.id)
+        except Exception:
+            pass
+
+        try:
+            if message.pinned:
+                await message.unpin(reason=f"贴主 {ctx.author} 取消标注")
+                await ctx.respond("已取消标注。", ephemeral=True)
+            else:
+                await message.pin(reason=f"贴主 {ctx.author} 标注消息")
+                await ctx.respond("已标注。", ephemeral=True)
+        except discord.Forbidden:
+            await ctx.respond("呜...本大王没有权限标注消息（需要管理消息权限）。", ephemeral=True)
+        except Exception as e:
+            await ctx.respond(f"标注失败: {e}", ephemeral=True)
+
     # --- 命令 ---
 
     # 1. 斜杠命令版本 (/回顶)
@@ -54,3 +99,71 @@ class ThreadToolsCog(commands.Cog, name="帖子工具"):
         except Exception as e:
             print(f"Error in 'back_to_top' command: {e}")
             await ctx.respond(f"呜...发生未知错误惹: {e}", ephemeral=True)
+
+    # --- 贴主命令组 ---
+
+    thread_owner = discord.SlashCommandGroup("贴主", "贴主相关功能")
+
+    @thread_owner.command(name="自助删帖", description="贴主自助删除当前帖子")
+    async def thread_owner_delete(self, ctx: discord.ApplicationContext):
+        if not await self._ensure_thread_owner(ctx):
+            return
+
+        await ctx.respond("正在删除该帖子...", ephemeral=True)
+        try:
+            await ctx.channel.delete(reason=f"贴主 {ctx.author} 自助删帖")
+        except Exception as e:
+            await ctx.followup.send(f"删除失败: {e}", ephemeral=True)
+
+    @thread_owner.command(name="修改贴名", description="贴主修改当前帖子标题")
+    async def thread_owner_rename(self, ctx: discord.ApplicationContext, new_name: discord.Option(str, "新标题")):
+        if not await self._ensure_thread_owner(ctx):
+            return
+
+        if len(new_name) > 100:
+            await ctx.respond("标题太长啦，控制在 100 字以内哦。", ephemeral=True)
+            return
+
+        try:
+            await ctx.channel.edit(name=new_name, reason=f"贴主 {ctx.author} 修改贴名")
+            await ctx.respond("已更新帖子标题。", ephemeral=True)
+        except Exception as e:
+            await ctx.respond(f"修改失败: {e}", ephemeral=True)
+
+    @thread_owner.command(name="标注消息", description="标注/取消标注当前帖子内的消息")
+    async def thread_owner_mark_message(self, ctx: discord.ApplicationContext, message: discord.Option(str, "消息链接或ID")):
+        if not await self._ensure_thread_owner(ctx):
+            return
+
+        msg_id = None
+        try:
+            msg_id = int(message.strip().split("/")[-1])
+        except Exception:
+            pass
+
+        if not msg_id:
+            await ctx.respond("请提供消息链接或消息ID。", ephemeral=True)
+            return
+
+        try:
+            target = await ctx.channel.fetch_message(msg_id)
+        except Exception:
+            await ctx.respond("找不到这条消息，请确认在当前帖子内。", ephemeral=True)
+            return
+
+        await self._toggle_mark(ctx, target)
+
+    @discord.message_command(name="标注消息")
+    async def mark_message_context_menu(self, ctx: discord.ApplicationContext, message: discord.Message):
+        if not await self._ensure_thread_owner(ctx):
+            return
+
+        if not isinstance(ctx.channel, discord.Thread):
+            await ctx.respond("呜...这个魔法只能在帖子频道里用啦！", ephemeral=True)
+            return
+
+        if message.channel.id != ctx.channel.id:
+            await ctx.respond("请在当前帖子内选择要标注的消息。", ephemeral=True)
+            return
+
+        await self._toggle_mark(ctx, message)
