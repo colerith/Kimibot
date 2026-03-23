@@ -67,7 +67,7 @@ def save_quota_data(data):
     with open(QUOTA["QUOTA_FILE_PATH"], 'w') as f: json.dump(data, f, indent=4)
 
 # --- 通用归档逻辑 ---
-async def execute_archive(bot, interaction, channel, note, is_timeout=True):
+async def execute_archive(bot, interaction, channel, note, is_timeout=True, log_title_override=None):
     """
     执行归档操作的核心逻辑
     """
@@ -84,8 +84,10 @@ async def execute_archive(bot, interaction, channel, note, is_timeout=True):
             ticket_id=ticket_id, creator_name=creator_name, creator_id=creator_id,
             operator=operator, note=note
         )
-        if not is_timeout: # 手动归档
-             log_text = log_text.replace("超时归档", "手动归档")
+        if log_title_override:
+            log_text = log_text.replace("超时归档", log_title_override)
+        elif not is_timeout: # 手动归档
+            log_text = log_text.replace("超时归档", "手动归档")
         await log_channel.send(log_text)
 
     # 2. 如果是超时，私信通知用户

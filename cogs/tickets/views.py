@@ -9,16 +9,25 @@ from .utils import (
 
 # --- 模态框: 填写归档备注 ---
 class TimeoutNoteModal(discord.ui.Modal):
-    def __init__(self, bot, channel):
-        super().__init__(title="填写归档备注")
+    def __init__(self, bot, channel, *, is_timeout=True, log_title_override=None, title="填写归档备注"):
+        super().__init__(title=title)
         self.bot = bot
         self.channel = channel
+        self.is_timeout = is_timeout
+        self.log_title_override = log_title_override
         self.add_item(discord.ui.InputText(
             label="备注内容", placeholder="请输入原因...", style=discord.InputTextStyle.paragraph, required=True
         ))
 
     async def callback(self, interaction: discord.Interaction):
-        await execute_archive(self.bot, interaction, self.channel, self.children[0].value, is_timeout=True)
+        await execute_archive(
+            self.bot,
+            interaction,
+            self.channel,
+            self.children[0].value,
+            is_timeout=self.is_timeout,
+            log_title_override=self.log_title_override,
+        )
 
 # --- 视图: 超时确认选项 ---
 class TimeoutOptionView(discord.ui.View):
@@ -177,7 +186,14 @@ class TicketActionView(discord.ui.View):
 
     @discord.ui.button(label="📦 工单归档", style=discord.ButtonStyle.secondary, custom_id="ticket_archive")
     async def archive(self, button, interaction):
-        await interaction.response.send_modal(TimeoutNoteModal(interaction.client, interaction.channel))
+        await interaction.response.send_modal(
+            TimeoutNoteModal(
+                interaction.client,
+                interaction.channel,
+                is_timeout=False,
+                log_title_override="审核未通过",
+            )
+        )
 
 class SuspendAuditModal(discord.ui.Modal):
     def __init__(self, cog):

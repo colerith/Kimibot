@@ -487,6 +487,7 @@ class Tickets(commands.Cog):
 
                     diff_approved = now - last_msg_time
                     diff_active = now - last_active
+                    is_name_approved = "已过审" in channel.name
 
 
                     # --- 逻辑分支 ---
@@ -536,6 +537,9 @@ class Tickets(commands.Cog):
 
 
                     # 2. 常规超时归档 (12小时)
+                    if is_name_approved:
+                        continue
+
                     if diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
                         await execute_archive(self.bot, None, channel, f"超过{TIMEOUT_HOURS_ARCHIVE}小时无活动", is_timeout=True)
 
