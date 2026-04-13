@@ -540,7 +540,15 @@ class Tickets(commands.Cog):
                     if is_name_approved:
                         continue
 
-                    if diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
+                    # 北京时间最近一次 23:30 截止线：若此后无新消息，直接按超时处理
+                    now_cn = now.astimezone(QUOTA["TIMEZONE"])
+                    cutoff_today = now_cn.replace(hour=23, minute=30, second=0, microsecond=0)
+                    latest_cutoff = cutoff_today if now_cn >= cutoff_today else (cutoff_today - datetime.timedelta(days=1))
+                    is_silent_after_cutoff = last_active.astimezone(QUOTA["TIMEZONE"]) <= latest_cutoff
+
+                    if is_silent_after_cutoff:
+                        await execute_archive(self.bot, None, channel, "北京时间23:30后无新消息", is_timeout=True)
+                    elif diff_active > datetime.timedelta(hours=TIMEOUT_HOURS_ARCHIVE):
                         await execute_archive(self.bot, None, channel, f"超过{TIMEOUT_HOURS_ARCHIVE}小时无活动", is_timeout=True)
 
                     # 3. 温馨提醒 (6小时)

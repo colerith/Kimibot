@@ -23,6 +23,17 @@ class PunishmentDB:
                 last_updated TIMESTAMP
             )
         """)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ad_signatures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern TEXT UNIQUE,
+                source_url TEXT,
+                created_by INTEGER,
+                created_at TIMESTAMP,
+                hit_count INTEGER DEFAULT 0,
+                last_hit TIMESTAMP
+            )
+        """)
         self.conn.commit()
 
     def add_strike(self, user_id: int):
@@ -43,6 +54,39 @@ class PunishmentDB:
 
     def reset_strikes(self, user_id: int):
         self.cursor.execute("DELETE FROM strikes WHERE user_id = ?", (user_id,))
+        self.conn.commit()
+
+    def add_ad_signature(self, pattern: str, source_url: str | None = None, created_by: int | None = None) -> bool:
+        now = datetime.datetime.now()
+        try:
+            self.cursor.execute(
+                """
+                INSERT INTO ad_signatures (pattern, source_url, created_by, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (pattern, source_url, created_by, now),
+            )
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def list_ad_signatures(self) -> list[str]:
+        self.cursor.execute("SELECT pattern FROM ad_signatures ORDER BY id ASC")
+        rows = self.cursor.fetchall()
+        return [row[0] for row in rows]
+
+    def mark_ad_signature_hit(self, pattern: str):
+        now = datetime.datetime.now()
+        self.cursor.execute(
+            """
+            UPDATE ad_signatures
+            SET hit_count = hit_count + 1,
+                last_hit = ?
+            WHERE pattern = ?
+            """,
+            (now, pattern),
+        )
         self.conn.commit()
 
 # 创建一个全局数据库实例，供其他模块调用

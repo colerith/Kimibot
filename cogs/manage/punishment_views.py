@@ -184,11 +184,16 @@ class ManagementControlView(ui.View):
                         await member.remove_roles(*roles_to_remove, reason=self.reason)
                 else:
                     raise ValueError("用户不存在")
-                if hasattr(interaction.channel, "purge"):
-                    start_of_day = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-                    await interaction.channel.purge(after=start_of_day, check=lambda m: m.author.id == tid)
+                cleanup_stats = (0, 0, 0, 0, 0)
+                punishment_cog = interaction.client.get_cog("处罚系统") or interaction.client.get_cog("PunishmentCog")
+                if punishment_cog and hasattr(punishment_cog, "_cleanup_ad_messages"):
+                    cleanup_stats = await punishment_cog._cleanup_ad_messages(
+                        guild=guild,
+                        user_id=tid,
+                        reason=self.reason
+                    )
                 else:
-                    raise ValueError("频道不可清理")
+                    raise ValueError("未找到处罚模块，无法执行跨频道广告清理")
             elif act == "kick":
                 msg_act, color = "踢出", 0xFF0000
                 if member: await member.kick(reason=self.reason)
@@ -237,6 +242,16 @@ class ManagementControlView(ui.View):
                 log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
                 if act == "mute":
                     log_embed.add_field(name="时长", value=self.duration_str, inline=True)
+                if act == "ad":
+                    deleted_count, attempted_count, tracked_count, fallback_deleted, fallback_scanned = cleanup_stats
+                    log_embed.add_field(
+                        name="清理结果",
+                        value=(
+                            f"已删 {deleted_count} 条 / 命中 {attempted_count} 条 / 缓存记录 {tracked_count} 条\n"
+                            f"兜底扫描命中 {fallback_deleted} 条 / 扫描用户消息 {fallback_scanned} 条"
+                        ),
+                        inline=False
+                    )
 
                 link_only_urls = [link for link in self.evidence_links if link not in self.attachment_urls]
                 if link_only_urls:
@@ -249,7 +264,16 @@ class ManagementControlView(ui.View):
                 await log_chan.send(embed=log_embed, view=log_view, files=files_for_log)
 
             # --- 3. 反馈与清理 ---
-            await interaction.followup.send("✅ 执行成功！已发送公示与日志。", ephemeral=True)
+            if act == "ad":
+                deleted_count, attempted_count, tracked_count, fallback_deleted, fallback_scanned = cleanup_stats
+                await interaction.followup.send(
+                    "✅ 执行成功！已发送公示与日志。\n"
+                    f"🧹 清理统计：已删 {deleted_count} 条 / 命中 {attempted_count} 条 / 缓存记录 {tracked_count} 条 / "
+                    f"兜底命中 {fallback_deleted} 条。",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send("✅ 执行成功！已发送公示与日志。", ephemeral=True)
             self.clear_items()
             original_msg = await interaction.original_response()
             fin_embed = original_msg.embeds[0]

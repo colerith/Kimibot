@@ -3,6 +3,7 @@
 import os
 import re
 import datetime
+from urllib.parse import urlparse
 import discord
 from discord.ext import commands
 from discord import Option
@@ -19,6 +20,11 @@ LOG_CHANNEL_ID = IDS.get("LOG_CHANNEL_ID", 1468508677144055818)
 # Redis 配置（可用环境变量覆盖）
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 AD_MESSAGE_TTL_SECONDS = int(os.getenv("AD_MESSAGE_TTL_SECONDS", "86400"))
+AD_LINK_PATTERN = re.compile(r"(https?://|www\.|discord\.gg/|discord(?:app)?\.com/invite/)", re.IGNORECASE)
+URL_EXTRACT_PATTERN = re.compile(
+    r"(https?://[^\s<>\"']+|www\.[^\s<>\"']+|discord\.gg/[^\s<>\"']+|discord(?:app)?\.com/invite/[^\s<>\"']+)",
+    re.IGNORECASE,
+)
 
 
 class PunishmentCog(commands.Cog, name="处罚系统"):
@@ -27,9 +33,108 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         self.persistent_view = None
         self.redis_client = None
         self.redis_ready = False
+        self.ad_signature_regex = []
 
     def _redis_key(self, guild_id: int, user_id: int) -> str:
         return f"ad_msgs:{guild_id}:{user_id}"
+
+    @staticmethod
+    def _extract_urls(text: str) -> list[str]:
+        if not text:
+            return []
+        raw_urls = URL_EXTRACT_PATTERN.findall(text)
+        seen = set()
+        ordered_urls = []
+        for raw in raw_urls:
+            cleaned = raw.strip().rstrip(").,!?;:]")
+            if cleaned in seen:
+                continue
+            seen.add(cleaned)
+            ordered_urls.append(cleaned)
+        return ordered_urls
+
+    @staticmethod
+    def _build_signature_patterns(url: str) -> list[str]:
+        parsed = urlparse(url if "://" in url else f"https://{url}")
+        host = (parsed.netloc or "").lower().split("@")[-1].split(":")[0]
+        if not host:
+            return []
+        if host.startswith("www."):
+            host = host[4:]
+
+        patterns = [rf"(?:https?://)?(?:www\.)?{re.escape(host)}(?:[/:?#]|$)"]
+        first_segment = parsed.path.strip("/").split("/")[0] if parsed.path else ""
+        if first_segment and len(first_segment) >= 3:
+            patterns.append(
+                rf"(?:https?://)?(?:www\.)?{re.escape(host)}/{re.escape(first_segment)}(?:[/?#]|$)"
+            )
+        return patterns
+
+    def _refresh_ad_signature_cache(self):
+        self.ad_signature_regex = []
+        for pattern in db.list_ad_signatures():
+            try:
+                self.ad_signature_regex.append((pattern, re.compile(pattern, re.IGNORECASE)))
+            except re.error:
+                continue
+
+    def _learn_ad_signatures_from_text(self, text: str, source_url: str | None = None, created_by: int | None = None):
+        urls = self._extract_urls(text)
+        if not urls:
+            return 0, 0
+
+        added_count = 0
+        for url in urls:
+            for pattern in self._build_signature_patterns(url):
+                if db.add_ad_signature(pattern, source_url=source_url, created_by=created_by):
+                    added_count += 1
+
+        if added_count > 0:
+            self._refresh_ad_signature_cache()
+
+        return added_count, len(urls)
+
+    def _match_ad_signature(self, text: str):
+        if not text or not self.ad_signature_regex:
+            return None
+
+        for pattern, compiled in self.ad_signature_regex:
+            if compiled.search(text):
+                return pattern
+        return None
+
+    async def _auto_intercept_ad_message(self, message: discord.Message):
+        if not message.guild or message.author.bot:
+            return
+        if not message.content or not AD_LINK_PATTERN.search(message.content):
+            return
+
+        member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+        if member:
+            perms = message.channel.permissions_for(member)
+            if perms.manage_messages or perms.administrator or perms.manage_guild:
+                return
+
+        matched_pattern = self._match_ad_signature(message.content)
+        if not matched_pattern:
+            return
+
+        try:
+            await message.delete(reason="命中广告识别库自动拦截")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return
+
+        db.mark_ad_signature_hit(matched_pattern)
+
+        log_chan = message.guild.get_channel(LOG_CHANNEL_ID)
+        if log_chan:
+            embed = discord.Embed(title="🧱 自动拦截广告消息", color=0xFF8800)
+            embed.add_field(name="目标", value=message.author.mention, inline=True)
+            embed.add_field(name="频道", value=message.channel.mention, inline=True)
+            embed.add_field(name="命中特征", value=f"`{matched_pattern}`", inline=False)
+            embed.description = f"消息预览: {(message.content or '')[:300]}"
+            embed.timestamp = discord.utils.utcnow()
+            await log_chan.send(embed=embed)
 
     async def _init_redis(self):
         if self.redis_client is not None:
@@ -107,6 +212,10 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
             try:
                 target_msg = await channel.fetch_message(message_id)
+                self._learn_ad_signatures_from_text(
+                    target_msg.content or "",
+                    source_url=getattr(target_msg, "jump_url", None),
+                )
                 await target_msg.delete(reason=reason)
                 deleted_count += 1
             except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
@@ -119,6 +228,85 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             pass
 
         return deleted_count, attempted_count, len(raw_items)
+
+    async def _fallback_delete_recent_link_messages(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        reason: str,
+        lookback_hours: int = 24,
+        per_channel_limit: int = 200,
+    ):
+        """Fallback for ad cleanup when tracked records are missing.
+        Scans recent messages in accessible channels/threads and removes link messages by target user.
+        """
+        me = guild.me or guild.get_member(self.bot.user.id)
+        if me is None:
+            return 0, 0
+
+        cutoff = discord.utils.utcnow() - datetime.timedelta(hours=lookback_hours)
+        deleted_count = 0
+        inspected_messages = 0
+
+        channels = []
+        seen_channel_ids = set()
+
+        for ch in guild.text_channels:
+            if ch.id not in seen_channel_ids:
+                seen_channel_ids.add(ch.id)
+                channels.append(ch)
+
+        for th in getattr(guild, "threads", []):
+            if th.id not in seen_channel_ids:
+                seen_channel_ids.add(th.id)
+                channels.append(th)
+
+        for channel in channels:
+            perms = channel.permissions_for(me)
+            if not perms.read_message_history:
+                continue
+
+            try:
+                async for msg in channel.history(limit=per_channel_limit, after=cutoff):
+                    if msg.author.id != user_id:
+                        continue
+                    inspected_messages += 1
+                    if not AD_LINK_PATTERN.search(msg.content or ""):
+                        continue
+                    self._learn_ad_signatures_from_text(
+                        msg.content or "",
+                        source_url=getattr(msg, "jump_url", None),
+                    )
+                    try:
+                        await msg.delete(reason=reason)
+                        deleted_count += 1
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        continue
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
+                continue
+
+        return deleted_count, inspected_messages
+
+    async def _cleanup_ad_messages(self, guild: discord.Guild, user_id: int, reason: str):
+        tracked_deleted, attempted_count, tracked_count = await self._delete_tracked_messages(
+            guild=guild,
+            user_id=user_id,
+            reason=reason,
+        )
+
+        fallback_deleted, fallback_scanned = await self._fallback_delete_recent_link_messages(
+            guild=guild,
+            user_id=user_id,
+            reason=reason,
+        )
+
+        return (
+            tracked_deleted + fallback_deleted,
+            attempted_count,
+            tracked_count,
+            fallback_deleted,
+            fallback_scanned,
+        )
 
     @staticmethod
     def _parse_user_ids(raw_text: str | None):
@@ -139,7 +327,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
     async def _apply_single_action(self, guild: discord.Guild, target_id: int, action: str, reason: str, duration_secs: int):
         member = None
-        ad_stats = (0, 0, 0)
+        ad_stats = (0, 0, 0, 0, 0)
 
         try:
             member = guild.get_member(target_id) or await guild.fetch_member(target_id)
@@ -173,7 +361,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 roles_to_remove = [r for r in member.roles if r != guild.default_role]
                 if roles_to_remove:
                     await member.remove_roles(*roles_to_remove, reason=reason)
-                ad_stats = await self._delete_tracked_messages(
+                ad_stats = await self._cleanup_ad_messages(
                     guild=guild,
                     user_id=target_id,
                     reason=reason
@@ -231,11 +419,13 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             self.bot.add_view(self.persistent_view)
 
         await self._init_redis()
+        self._refresh_ad_signature_cache()
         print("[Punishment] Cog loaded and view registered (if persistent).")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         await self._track_user_message(message)
+        await self._auto_intercept_ad_message(message)
 
     def cog_unload(self):
         if self.redis_client is not None:
@@ -328,7 +518,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
             if result["ok"]:
                 success.append(result)
-                deleted_count, attempted_count, tracked_count = result["ad_stats"]
+                deleted_count, attempted_count, tracked_count, _, _ = result["ad_stats"]
                 total_deleted += deleted_count
                 total_attempted += attempted_count
                 total_tracked += tracked_count
@@ -464,12 +654,18 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         color = 0xFF8800
 
         try:
+            learned_count, learned_urls = self._learn_ad_signatures_from_text(
+                message.content or "",
+                source_url=message.jump_url,
+                created_by=ctx.user.id,
+            )
+
             if member:
                 roles_to_remove = [r for r in member.roles if r != guild.default_role]
                 if roles_to_remove:
                     await member.remove_roles(*roles_to_remove, reason=reason)
 
-            deleted_count, attempted_count, tracked_count = await self._delete_tracked_messages(
+            deleted_count, attempted_count, tracked_count, fallback_deleted, fallback_scanned = await self._cleanup_ad_messages(
                 guild=guild,
                 user_id=target_id,
                 reason=reason
@@ -505,11 +701,13 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 log_embed.add_field(name="执行人 (Executor)", value=ctx.user.mention, inline=True)
                 log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
                 log_embed.add_field(name="触发消息", value=message.jump_url, inline=False)
+                log_embed.add_field(name="新增识别特征", value=f"{learned_count} 条（来源链接 {learned_urls} 个）", inline=False)
                 log_embed.add_field(
                     name="清理结果",
                     value=(
                         f"已删 {deleted_count} 条 / 命中 {attempted_count} 条 / "
                         f"缓存记录 {tracked_count} 条\n"
+                        f"兜底扫描命中 {fallback_deleted} 条 / 扫描用户消息 {fallback_scanned} 条\n"
                         f"Redis状态: {'可用' if self.redis_ready else '不可用'}"
                     ),
                     inline=False
@@ -523,7 +721,8 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
             await ctx.followup.send(
                 "✅ 已执行广告处罚并发送公示。\n"
-                f"🧹 清理统计：已删 {deleted_count} 条 / 命中 {attempted_count} 条 / 缓存记录 {tracked_count} 条。",
+                f"🧹 清理统计：已删 {deleted_count} 条 / 命中 {attempted_count} 条 / 缓存记录 {tracked_count} 条。\n"
+                f"🧠 新增识别特征：{learned_count} 条（来源链接 {learned_urls} 个）。",
                 ephemeral=True
             )
 
