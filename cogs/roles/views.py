@@ -59,10 +59,10 @@ def _rules_text() -> str:
 
     single_cost = max(1, int(cfg.get("cost_single", int(getattr(config, "LOTTERY_COST", 50)))))
     ten_cost = max(
-        900,
-        int(getattr(config, "LOTTERY_TEN_COST", 900)),
+        888,
+        int(getattr(config, "LOTTERY_TEN_COST", 888)),
         single_cost,
-        int(cfg.get("cost_ten", 900)),
+        int(cfg.get("cost_ten", 888)),
     )
 
     msg_daily_cap = int(getattr(config, "POINTS_DAILY_MSG_CAP", 100))
@@ -101,11 +101,11 @@ class RoleLotteryView(discord.ui.View):
         cfg = get_lottery_config(data)
 
         fallback_single = int(getattr(config, "LOTTERY_COST", 50))
-        fallback_ten = int(getattr(config, "LOTTERY_TEN_COST", 900))
+        fallback_ten = int(getattr(config, "LOTTERY_TEN_COST", 888))
         fallback_refund = int(getattr(config, "LOTTERY_REFUND", 20))
 
         cost_single = max(1, int(cfg.get("cost_single", fallback_single)))
-        cost_ten = max(900, fallback_ten, cost_single, int(cfg.get("cost_ten", fallback_ten)))
+        cost_ten = max(888, fallback_ten, cost_single, int(cfg.get("cost_ten", fallback_ten)))
         cost = cost_ten if draw_count == 10 else cost_single * draw_count
 
         current_points = get_user_points(user.id, guild_id)
@@ -478,7 +478,7 @@ class RoleClaimView(discord.ui.View):
         data = load_role_data()
         cfg = get_lottery_config(data)
         single_cost = max(1, int(cfg.get("cost_single", int(getattr(config, "LOTTERY_COST", 50)))))
-        ten_cost = max(900, int(getattr(config, "LOTTERY_TEN_COST", 900)), single_cost, int(cfg.get("cost_ten", 900)))
+        ten_cost = max(888, int(getattr(config, "LOTTERY_TEN_COST", 888)), single_cost, int(cfg.get("cost_ten", 888)))
         sign_reward = int(getattr(config, "POINTS_SIGN_REWARD", 30))
         msg_daily_cap = int(getattr(config, "POINTS_DAILY_MSG_CAP", 100))
         post_reward = int(getattr(config, "POINTS_POST_REWARD", 10))
@@ -1024,8 +1024,8 @@ class LotteryCostModal(discord.ui.Modal):
         )
         self.ten_input = ui.InputText(
             label="十连消耗",
-            placeholder="例如 900",
-            value=str(config_data.get("cost_ten", 900)),
+            placeholder="例如 888",
+            value=str(config_data.get("cost_ten", 888)),
             required=True,
             max_length=6,
         )
@@ -1058,7 +1058,7 @@ class LotteryCostModal(discord.ui.Modal):
         await interaction.followup.send(
             f"✅ 抽奖消耗已更新（已保存）\n"
             f"- 单抽：{int(cfg.get('cost_single', single))}\n"
-            f"- 十连：{int(cfg.get('cost_ten', 900))}（十连最低 900）",
+            f"- 十连：{int(cfg.get('cost_ten', 888))}（十连最低 888）",
             ephemeral=True,
         )
 
@@ -1273,7 +1273,7 @@ class RoleManagerView(discord.ui.View):
         embed.add_field(
             name="💳 抽奖参数",
             value=(
-                f"单抽: **{int(cfg.get('cost_single', 50))}** | 十连: **{max(900, int(cfg.get('cost_ten', 900)))}**\n"
+                f"单抽: **{int(cfg.get('cost_single', 50))}** | 十连: **{max(888, int(cfg.get('cost_ten', 888)))}**\n"
                 f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 40))}/{int(weights.get(str(RARITY_NORMAL), 40))}/{int(weights.get(str(RARITY_RARE), 15))}/{int(weights.get(str(RARITY_LEGENDARY), 5))}**\n"
                 f"补偿(☆/★/★★/★★★): **{int(refunds.get(str(RARITY_JUNK), 8))}/{int(refunds.get(str(RARITY_NORMAL), 20))}/{int(refunds.get(str(RARITY_RARE), 40))}/{int(refunds.get(str(RARITY_LEGENDARY), 100))}**"
             ),

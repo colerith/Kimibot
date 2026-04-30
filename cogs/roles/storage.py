@@ -18,7 +18,7 @@ SUPPORTED_LOTTERY_KINDS = (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
 
 DEFAULT_LOTTERY_CONFIG = {
     "cost_single": 50,
-    "cost_ten": 900,
+    "cost_ten": 888,
     "weights": {
         str(RARITY_JUNK): 40,
         str(RARITY_NORMAL): 40,
@@ -80,7 +80,7 @@ def _normalize_role_data(data: dict) -> dict:
     refund = cfg.get("refund", {}) if isinstance(cfg.get("refund", {}), dict) else {}
     lottery_config = {
         "cost_single": int(cfg.get("cost_single", DEFAULT_LOTTERY_CONFIG["cost_single"])),
-        "cost_ten": max(900, int(cfg.get("cost_ten", DEFAULT_LOTTERY_CONFIG["cost_ten"]))),
+        "cost_ten": max(888, int(cfg.get("cost_ten", DEFAULT_LOTTERY_CONFIG["cost_ten"]))),
         "weights": {
             str(r): int(weights.get(str(r), DEFAULT_LOTTERY_CONFIG["weights"][str(r)]))
             for r in SUPPORTED_RARITIES
@@ -212,7 +212,7 @@ def update_lottery_config(
     if cost_single is not None:
         cfg["cost_single"] = max(1, int(cost_single))
     if cost_ten is not None:
-        cfg["cost_ten"] = max(900, cfg["cost_single"], int(cost_ten))
+        cfg["cost_ten"] = max(888, cfg["cost_single"], int(cost_ten))
 
     if isinstance(weights, dict):
         for rarity in SUPPORTED_RARITIES:
