@@ -30,8 +30,8 @@ class QuizStartView(discord.ui.View):
         if account_age < timedelta(days=MIN_ACCOUNT_AGE_DAYS):
             reasons.append(f"账号注册时间不足 {MIN_ACCOUNT_AGE_DAYS} 天")
 
-        mutual_guild_count = sum(1 for guild in self.cog.bot.guilds if guild.get_member(user.id))
-        if mutual_guild_count < MIN_MUTUAL_GUILDS:
+        mutual_guild_count = self._get_mutual_guild_count(user)
+        if mutual_guild_count is not None and mutual_guild_count < MIN_MUTUAL_GUILDS:
             reasons.append("当前仅加入本服务器，暂不开放自助答题")
 
         public_flags = getattr(user, "public_flags", None)
@@ -40,6 +40,21 @@ class QuizStartView(discord.ui.View):
             reasons.append("账号被系统标记为可疑/疑似垃圾账号")
 
         return reasons
+
+    def _get_mutual_guild_count(self, user: discord.abc.User):
+        """尽量使用可靠来源统计共同服务器数；无法可靠判断时返回 None。"""
+        mutual_guilds = getattr(user, "mutual_guilds", None)
+        if mutual_guilds is not None:
+            try:
+                return len(mutual_guilds)
+            except TypeError:
+                pass
+
+        # 仅在开启 members intent 时，才尝试使用缓存回退。
+        if getattr(self.cog.bot.intents, "members", False):
+            return sum(1 for guild in self.cog.bot.guilds if guild.get_member(user.id))
+
+        return None
 
     @discord.ui.button(label="📝 点击开始答题", style=discord.ButtonStyle.success, custom_id="quiz_entry_start")
     async def start_quiz(self, button: discord.ui.Button, interaction: discord.Interaction):
