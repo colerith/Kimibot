@@ -54,11 +54,34 @@ def _lottery_kind_label(kind: str) -> str:
 
 
 def _rules_text() -> str:
+    data = load_role_data()
+    cfg = get_lottery_config(data)
+
+    single_cost = max(1, int(cfg.get("cost_single", int(getattr(config, "LOTTERY_COST", 50)))))
+    ten_cost = max(
+        900,
+        int(getattr(config, "LOTTERY_TEN_COST", 900)),
+        single_cost,
+        int(cfg.get("cost_ten", 900)),
+    )
+
+    msg_daily_cap = int(getattr(config, "POINTS_DAILY_MSG_CAP", 100))
+    post_reward = int(getattr(config, "POINTS_POST_REWARD", 10))
+    post_daily_cap = int(getattr(config, "POINTS_DAILY_POST_CAP", 50))
+
+    weights = cfg.get("weights", {})
+    w_junk = int(weights.get(str(RARITY_JUNK), 40))
+    w_normal = int(weights.get(str(RARITY_NORMAL), 40))
+    w_rare = int(weights.get(str(RARITY_RARE), 15))
+    w_legend = int(weights.get(str(RARITY_LEGENDARY), 5))
+
     return (
-        "📌 **当前积分规则**\n"
-        "- 🎯 十连抽消耗：**900** 积分\n"
-        "- 💬 社区发言：每日最多获得 **100** 积分\n"
-        "- 🧵 社区发帖：每帖 **10** 积分，每日最多 **50** 积分"
+        "📌 **当前积分/抽奖规则**\n"
+        f"- 🎲 单抽消耗：**{single_cost}** 积分\n"
+        f"- 🎯 十连消耗：**{ten_cost}** 积分\n"
+        f"- 📈 抽奖概率(☆/★/★★/★★★)：**{w_junk}/{w_normal}/{w_rare}/{w_legend}**\n"
+        f"- 💬 社区发言：每日最多获得 **{msg_daily_cap}** 积分\n"
+        f"- 🧵 社区发帖：每帖 **{post_reward}** 积分，每日最多 **{post_daily_cap}** 积分"
     )
 
 # --- 抽奖界面 ---
@@ -1016,10 +1039,26 @@ class LotteryCostModal(discord.ui.Modal):
         except ValueError:
             return await interaction.response.send_message("❌ 输入格式错误，请填写数字。", ephemeral=True)
 
-        cfg = update_lottery_config(cost_single=single, cost_ten=ten)
-        await self.parent_view.refresh_content(interaction)
+        update_lottery_config(cost_single=single, cost_ten=ten)
+        # 重新读取，确保回执展示的是实际落盘后的值
+        cfg = get_lottery_config(load_role_data())
+
+        # Modal 交互并不总有 message 上下文，安全刷新主面板
+        self.parent_view.setup_ui()
+        embed = self.parent_view.build_dashboard_embed()
+        if interaction.message is not None:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=self.parent_view)
+            else:
+                await interaction.edit_original_response(embed=embed, view=self.parent_view)
+        else:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+
         await interaction.followup.send(
-            f"✅ 抽奖消耗已更新：单抽 {int(cfg.get('cost_single', single))} / 十连 {int(cfg.get('cost_ten', 900))}",
+            f"✅ 抽奖消耗已更新（已保存）\n"
+            f"- 单抽：{int(cfg.get('cost_single', single))}\n"
+            f"- 十连：{int(cfg.get('cost_ten', 900))}（十连最低 900）",
             ephemeral=True,
         )
 
@@ -1081,8 +1120,26 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
             },
         )
 
-        await self.parent_view.refresh_content(interaction)
-        await interaction.followup.send("✅ 概率与重复返还已更新。", ephemeral=True)
+        cfg = get_lottery_config(load_role_data())
+        self.parent_view.setup_ui()
+        embed = self.parent_view.build_dashboard_embed()
+        if interaction.message is not None:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=self.parent_view)
+            else:
+                await interaction.edit_original_response(embed=embed, view=self.parent_view)
+        else:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+
+        weights = cfg.get("weights", {})
+        refund = cfg.get("refund", {})
+        await interaction.followup.send(
+            "✅ 概率与重复返还已更新（已保存）\n"
+            f"- 概率(☆/★/★★/★★★)：{int(weights.get(str(RARITY_JUNK), 40))}/{int(weights.get(str(RARITY_NORMAL), 40))}/{int(weights.get(str(RARITY_RARE), 15))}/{int(weights.get(str(RARITY_LEGENDARY), 5))}\n"
+            f"- 补偿(☆/★/★★/★★★)：{int(refund.get(str(RARITY_JUNK), 8))}/{int(refund.get(str(RARITY_NORMAL), 20))}/{int(refund.get(str(RARITY_RARE), 40))}/{int(refund.get(str(RARITY_LEGENDARY), 100))}",
+            ephemeral=True,
+        )
 
 
 class AdminActionButton(discord.ui.Button):
