@@ -39,6 +39,14 @@ LOTTERY = {
     "COOLDOWN_SECONDS": 30
 }
 
+POINTS = {
+    "POINTS_SIGN_REWARD": 30,
+    "POINTS_DAILY_MSG_CAP": 70,
+    "POINTS_PER_MSG_MIN": 1,
+    "POINTS_PER_MSG_MAX": 3,
+    "POINTS_MSG_COOLDOWN": 30,
+}
+
 # --- 外观配置 ---
 STYLE = {"KIMI_YELLOW": 0xFFD700, "KIMI_FOOTER_TEXT": "请遵守社区规则，一起做个乖饱饱嘛~！"}
 
@@ -46,3 +54,4 @@ globals().update(IDS)
 globals().update(QUOTA)
 globals().update(STYLE)
 globals().update(LOTTERY)
+globals().update(POINTS)

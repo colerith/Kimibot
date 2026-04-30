@@ -1,13 +1,22 @@
 # cogs/points/cog.py
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import time
 import random
 import re
 
-from .storage import modify_user_points
-from config import COOLDOWN_SECONDS
+import config
+from .storage import add_message_points
+
+POINTS_DAILY_MSG_CAP = getattr(config, "POINTS_DAILY_MSG_CAP", 70)
+POINTS_PER_MSG_MIN = getattr(config, "POINTS_PER_MSG_MIN", 1)
+POINTS_PER_MSG_MAX = getattr(config, "POINTS_PER_MSG_MAX", 3)
+POINTS_MSG_COOLDOWN = getattr(
+    config,
+    "POINTS_MSG_COOLDOWN",
+    getattr(config, "COOLDOWN_SECONDS", 30),
+)
 
 def is_valid_comment(content: str) -> bool:
     """
@@ -38,36 +47,7 @@ class PointListener(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.user_cooldowns = {}    
-        self.point_cache = {} 
-        self.batch_save_task.start()
-
-    def cog_unload(self):
-        """当Cog被卸载时，取消后台任务。"""
-        self.batch_save_task.cancel()
-
-    @tasks.loop(minutes=2.0)
-    async def batch_save_task(self):
-        """每2分钟执行一次，将缓存中的积分批量写入文件。"""
-        if not self.point_cache:
-            return
-
-        print(f"🌊 [积分系统] 开始批量保存积分... (共 {len(self.point_cache)} 位用户)")
-
-        points_to_save = self.point_cache.copy()
-        self.point_cache.clear()
-
-        for user_id, points in points_to_save.items():
-            if points > 0:
-                new_total = modify_user_points(user_id, points)
-                print(f"  └─ 用户 {user_id}: 结算 +{points} 积分 -> 当前总分 {new_total}")
-
-        print(f"✨ [积分系统] 周期性保存完成。")
-
-    @batch_save_task.before_loop
-    async def before_batch_save(self):
-        """在任务开始前，等待机器人完全准备好。"""
-        await self.bot.wait_until_ready()
+        self.user_cooldowns = {}
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -76,14 +56,23 @@ class PointListener(commands.Cog):
 
         now = time.time()
         last_time = self.user_cooldowns.get(message.author.id, 0)
-        if (now - last_time) < COOLDOWN_SECONDS:
-            return 
+        if (now - last_time) < POINTS_MSG_COOLDOWN:
+            return
 
-        if len(message.content) > 2:
-            self.user_cooldowns[message.author.id] = now
+        if not is_valid_comment(message.content):
+            return
 
-            points_to_add = random.randint(1, 3)
-            current_cache = self.point_cache.get(message.author.id, 0)
-            self.point_cache[message.author.id] = current_cache + points_to_add
+        self.user_cooldowns[message.author.id] = now
+        points_to_add = random.randint(POINTS_PER_MSG_MIN, POINTS_PER_MSG_MAX)
 
-            print(f"💰 [积分缓存] {message.author.name} 发言有效，暂存 +{points_to_add} 积分。")
+        gained = add_message_points(
+            user_id=message.author.id,
+            guild_id=message.guild.id,
+            amount=points_to_add,
+            daily_cap=POINTS_DAILY_MSG_CAP,
+        )
+
+        if gained > 0:
+            print(
+                f"💰 [积分系统] {message.author.name} 发言有效，+{gained} 积分 (Guild {message.guild.id})"
+            )
