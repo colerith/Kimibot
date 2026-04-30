@@ -485,7 +485,7 @@ class RoleClaimView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, view=RoleLotteryView(), ephemeral=True)
 
-    @discord.ui.button(label="📅 每日签到", style=discord.ButtonStyle.secondary, emoji="🧧", custom_id="role_main_sign_in")
+    @discord.ui.button(label="📅 每日签到", style=discord.ButtonStyle.secondary, custom_id="role_main_sign_in")
     async def main_sign_in_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
@@ -762,25 +762,6 @@ class AdminRemoveSelect(Select):
             disabled=disabled, row=3
         )
 
-
-class AdminRemovePageButton(discord.ui.Button):
-    def __init__(self, parent_view: "RoleManagerView"):
-        super().__init__(
-            label=f"移除列表翻页 ({parent_view.remove_page + 1}/{parent_view.remove_total_pages})",
-            emoji="📄",
-            style=discord.ButtonStyle.secondary,
-            row=4,
-            disabled=(parent_view.remove_total_pages <= 1),
-        )
-        self.parent_view = parent_view
-
-    async def callback(self, interaction: discord.Interaction):
-        if self.parent_view.remove_total_pages <= 1:
-            return await interaction.response.defer()
-
-        self.parent_view.remove_page = (self.parent_view.remove_page + 1) % self.parent_view.remove_total_pages
-        await self.parent_view.refresh_content(interaction)
-
     async def callback(self, interaction: discord.Interaction):
         if not self.values or self.values[0] == "none":
             return await interaction.response.send_message("这里什么也没有。", ephemeral=True)
@@ -803,6 +784,25 @@ class AdminRemovePageButton(discord.ui.Button):
             await interaction.followup.send(f"🗑️ 已移除配置：{removed_count} 条记录", ephemeral=True)
         else:
             await interaction.response.send_message("❌ 数据库中未找到该记录。", ephemeral=True)
+
+
+class AdminRemovePageButton(discord.ui.Button):
+    def __init__(self, parent_view: "RoleManagerView"):
+        super().__init__(
+            label=f"移除列表翻页 ({parent_view.remove_page + 1}/{parent_view.remove_total_pages})",
+            emoji="📄",
+            style=discord.ButtonStyle.secondary,
+            row=4,
+            disabled=(parent_view.remove_total_pages <= 1),
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.parent_view.remove_total_pages <= 1:
+            return await interaction.response.defer()
+
+        self.parent_view.remove_page = (self.parent_view.remove_page + 1) % self.parent_view.remove_total_pages
+        await self.parent_view.refresh_content(interaction)
 
 
 class LotteryRarityRoleSelect(discord.ui.Select):
@@ -910,6 +910,24 @@ class LotteryRarityBackButton(discord.ui.Button):
         await self.parent_view.refresh_content(interaction)
 
 
+class LotteryRarityPageButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="翻页", emoji="📄", style=discord.ButtonStyle.secondary, row=4)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, LotteryRarityConfigView):
+            return await interaction.response.defer()
+
+        if panel.total_pages <= 1:
+            return await interaction.response.defer()
+
+        panel.page = (panel.page + 1) % panel.total_pages
+        panel.selected_role_ids = []
+        panel._build()
+        await interaction.response.edit_message(view=panel)
+
+
 class LotteryRarityConfigView(discord.ui.View):
     def __init__(self, parent_view: "RoleManagerView", guild: discord.Guild):
         super().__init__(timeout=300)
@@ -917,16 +935,19 @@ class LotteryRarityConfigView(discord.ui.View):
         self.selected_role_ids: list[int] = []
         self.selected_rarity: int | None = None
         self.selected_kind: str | None = None
+        self.page = 0
+        self.page_size = 25
+        self.total_pages = 1
 
         data = load_role_data()
-        options = []
+        self.all_options = []
         for rid in data.get("lottery_roles", []):
             role = guild.get_role(rid)
             if not role:
                 continue
             rarity = get_lottery_role_rarity(rid, data)
             kind = get_lottery_role_kind(rid, data)
-            options.append(
+            self.all_options.append(
                 discord.SelectOption(
                     label=role.name[:100],
                     value=str(rid),
@@ -935,16 +956,35 @@ class LotteryRarityConfigView(discord.ui.View):
                 )
             )
 
-        if options:
-            self.add_item(LotteryRarityRoleSelect(parent_view, options[:25]))
-            self.add_item(LotteryRarityValueSelect(parent_view))
-            self.add_item(LotteryKindValueSelect(parent_view))
-            self.add_item(LotteryRarityApplyButton(parent_view))
-            self.add_item(LotteryRarityBackButton(parent_view))
+        # 统一排序，分页时顺序稳定
+        self.all_options.sort(key=lambda o: o.label.lower())
+        self.total_pages = max(1, math.ceil(len(self.all_options) / self.page_size)) if self.all_options else 1
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        if self.all_options:
+            self.total_pages = max(1, math.ceil(len(self.all_options) / self.page_size))
+            self.page = max(0, min(self.page, self.total_pages - 1))
+            start = self.page * self.page_size
+            end = start + self.page_size
+            page_options = self.all_options[start:end]
+
+            role_select = LotteryRarityRoleSelect(self.parent_view, page_options)
+            role_select.placeholder = f"选择奖池身份组 ({self.page + 1}/{self.total_pages})"
+            self.add_item(role_select)
+            self.add_item(LotteryRarityValueSelect(self.parent_view))
+            self.add_item(LotteryKindValueSelect(self.parent_view))
+            self.add_item(LotteryRarityApplyButton(self.parent_view))
+            self.add_item(LotteryRarityBackButton(self.parent_view))
+            if self.total_pages > 1:
+                btn = LotteryRarityPageButton()
+                btn.label = f"翻页 ({self.page + 1}/{self.total_pages})"
+                self.add_item(btn)
         else:
             empty_btn = discord.ui.Button(label="奖池为空，无法设置", disabled=True, row=0)
             self.add_item(empty_btn)
-            self.add_item(LotteryRarityBackButton(parent_view))
+            self.add_item(LotteryRarityBackButton(self.parent_view))
 
 
 class LotteryCostModal(discord.ui.Modal):
