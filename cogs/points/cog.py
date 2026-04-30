@@ -7,11 +7,13 @@ import random
 import re
 
 import config
-from .storage import add_message_points
+from .storage import add_message_points, add_post_points
 
-POINTS_DAILY_MSG_CAP = getattr(config, "POINTS_DAILY_MSG_CAP", 70)
+POINTS_DAILY_MSG_CAP = getattr(config, "POINTS_DAILY_MSG_CAP", 100)
 POINTS_PER_MSG_MIN = getattr(config, "POINTS_PER_MSG_MIN", 1)
 POINTS_PER_MSG_MAX = getattr(config, "POINTS_PER_MSG_MAX", 3)
+POINTS_POST_REWARD = getattr(config, "POINTS_POST_REWARD", 10)
+POINTS_DAILY_POST_CAP = getattr(config, "POINTS_DAILY_POST_CAP", 50)
 POINTS_MSG_COOLDOWN = getattr(
     config,
     "POINTS_MSG_COOLDOWN",
@@ -75,4 +77,33 @@ class PointListener(commands.Cog):
         if gained > 0:
             print(
                 f"💰 [积分系统] {message.author.name} 发言有效，+{gained} 积分 (Guild {message.guild.id})"
+            )
+
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread):
+        """社区发帖积分：仅统计论坛帖，避免普通讨论串滥用。"""
+        if not thread or not thread.guild:
+            return
+
+        parent = thread.parent
+        if not isinstance(parent, discord.ForumChannel):
+            return
+
+        author_id = getattr(thread, "owner_id", None)
+        if not author_id:
+            return
+
+        member = thread.guild.get_member(author_id)
+        if not member or member.bot:
+            return
+
+        gained = add_post_points(
+            user_id=author_id,
+            guild_id=thread.guild.id,
+            amount=POINTS_POST_REWARD,
+            daily_cap=POINTS_DAILY_POST_CAP,
+        )
+        if gained > 0:
+            print(
+                f"🧵 [积分系统] {member.name} 社区发帖 +{gained} 积分 (Guild {thread.guild.id})"
             )

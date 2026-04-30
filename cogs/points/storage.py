@@ -54,6 +54,8 @@ def _ensure_user_record(data: dict, user_id: int, guild_id: int | None = None) -
             "last_sign_date": "",
             "daily_msg_pts": 0,
             "daily_msg_date": "",
+            "daily_post_pts": 0,
+            "daily_post_date": "",
         }
 
     record = users[key]
@@ -61,6 +63,8 @@ def _ensure_user_record(data: dict, user_id: int, guild_id: int | None = None) -
     record.setdefault("last_sign_date", "")
     record.setdefault("daily_msg_pts", 0)
     record.setdefault("daily_msg_date", "")
+    record.setdefault("daily_post_pts", 0)
+    record.setdefault("daily_post_date", "")
     return record, key
 
 def load_points_data():
@@ -154,6 +158,35 @@ def add_message_points(
 
     can_add = min(amount, daily_cap - today_pts)
     record["daily_msg_pts"] = today_pts + can_add
+    record["points"] = max(0, int(record.get("points", 0)) + can_add)
+    save_points_data(data)
+    return can_add
+
+
+def add_post_points(
+    user_id: int,
+    guild_id: int,
+    amount: int,
+    daily_cap: int,
+) -> int:
+    """发帖加分，受每日上限限制，返回本次实际加分。"""
+    if amount <= 0 or daily_cap <= 0:
+        return 0
+
+    data = load_points_data()
+    record, _ = _ensure_user_record(data, user_id, guild_id)
+
+    today = datetime.now(TZ_CN).date().isoformat()
+    if record.get("daily_post_date", "") != today:
+        record["daily_post_date"] = today
+        record["daily_post_pts"] = 0
+
+    today_pts = int(record.get("daily_post_pts", 0))
+    if today_pts >= daily_cap:
+        return 0
+
+    can_add = min(amount, daily_cap - today_pts)
+    record["daily_post_pts"] = today_pts + can_add
     record["points"] = max(0, int(record.get("points", 0)) + can_add)
     save_points_data(data)
     return can_add

@@ -43,6 +43,15 @@ def _rarity_short(rarity: int) -> str:
         RARITY_LEGENDARY: "★★★",
     }.get(rarity, "?")
 
+
+def _rules_text() -> str:
+    return (
+        "📌 **当前积分规则**\n"
+        "- 🎯 十连抽消耗：**900** 积分\n"
+        "- 💬 社区发言：每日最多获得 **100** 积分\n"
+        "- 🧵 社区发帖：每帖 **10** 积分，每日最多 **50** 积分"
+    )
+
 # --- 抽奖界面 ---
 class RoleLotteryView(discord.ui.View):
     def __init__(self):
@@ -60,10 +69,11 @@ class RoleLotteryView(discord.ui.View):
         cfg = get_lottery_config(data)
 
         fallback_single = int(getattr(config, "LOTTERY_COST", 50))
+        fallback_ten = int(getattr(config, "LOTTERY_TEN_COST", 900))
         fallback_refund = int(getattr(config, "LOTTERY_REFUND", 20))
 
         cost_single = max(1, int(cfg.get("cost_single", fallback_single)))
-        cost_ten = max(cost_single, int(cfg.get("cost_ten", cost_single * 9)))
+        cost_ten = max(900, fallback_ten, cost_single, int(cfg.get("cost_ten", fallback_ten)))
         cost = cost_ten if draw_count == 10 else cost_single * draw_count
 
         current_points = get_user_points(user.id, guild_id)
@@ -193,24 +203,6 @@ class RoleLotteryView(discord.ui.View):
     async def check_points(self, button, interaction: discord.Interaction):
         p = get_user_points(interaction.user.id, interaction.guild_id or 0)
         await interaction.response.send_message(f"💰 你当前的社区活跃积分是：**{p}**", ephemeral=True)
-
-    @discord.ui.button(label="📅 每日签到", style=discord.ButtonStyle.secondary, emoji="🧧", custom_id="lottery_daily_sign")
-    async def sign_in(self, button, interaction: discord.Interaction):
-        if not interaction.guild_id:
-            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-
-        reward = int(getattr(config, "POINTS_SIGN_REWARD", 30))
-        success, points = sign_in_user(interaction.user.id, interaction.guild_id, reward=reward)
-        if success:
-            await interaction.response.send_message(
-                f"✅ 今日签到成功，获得 **{reward}** 积分！\n💰 当前余额：**{points}**",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                f"🕒 今日已签到过啦。\n💰 当前余额：**{points}**",
-                ephemeral=True,
-            )
 
     @discord.ui.button(label="📊 奖池图鉴", style=discord.ButtonStyle.success, emoji="🌌", custom_id="lottery_collection_view")
     async def collection_callback(self, button, interaction: discord.Interaction):
@@ -426,7 +418,7 @@ class RoleClaimView(discord.ui.View):
         data = load_role_data()
         cfg = get_lottery_config(data)
         single_cost = max(1, int(cfg.get("cost_single", int(getattr(config, "LOTTERY_COST", 50)))))
-        ten_cost = max(single_cost, int(cfg.get("cost_ten", single_cost * 9)))
+        ten_cost = max(900, int(getattr(config, "LOTTERY_TEN_COST", 900)), single_cost, int(cfg.get("cost_ten", 900)))
 
         refund_cfg = cfg.get("refund", {})
         refund_line = (
@@ -447,6 +439,28 @@ class RoleClaimView(discord.ui.View):
             color=discord.Color.purple()
         )
         await interaction.response.send_message(embed=embed, view=RoleLotteryView(), ephemeral=True)
+
+    @discord.ui.button(label="📅 每日签到", style=discord.ButtonStyle.secondary, emoji="🧧", custom_id="role_main_sign_in")
+    async def main_sign_in_callback(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+
+        reward = int(getattr(config, "POINTS_SIGN_REWARD", 30))
+        success, points = sign_in_user(interaction.user.id, interaction.guild_id, reward=reward)
+        if success:
+            text = (
+                f"✅ 今日签到成功，获得 **{reward}** 积分！\n"
+                f"💰 当前余额：**{points}**\n\n"
+                f"{_rules_text()}"
+            )
+        else:
+            text = (
+                f"🕒 今日已签到过啦。\n"
+                f"💰 当前余额：**{points}**\n\n"
+                f"{_rules_text()}"
+            )
+
+        await interaction.response.send_message(text, ephemeral=True)
 
     @discord.ui.button(label="🧹 一键移除", style=discord.ButtonStyle.danger, custom_id="role_main_remove_all")
     async def remove_all_callback(self, button, interaction: discord.Interaction):
@@ -802,8 +816,8 @@ class LotteryCostModal(discord.ui.Modal):
         )
         self.ten_input = ui.InputText(
             label="十连消耗",
-            placeholder="例如 450",
-            value=str(config_data.get("cost_ten", 450)),
+            placeholder="例如 900",
+            value=str(config_data.get("cost_ten", 900)),
             required=True,
             max_length=6,
         )
@@ -817,10 +831,10 @@ class LotteryCostModal(discord.ui.Modal):
         except ValueError:
             return await interaction.response.send_message("❌ 输入格式错误，请填写数字。", ephemeral=True)
 
-        update_lottery_config(cost_single=single, cost_ten=ten)
+        cfg = update_lottery_config(cost_single=single, cost_ten=ten)
         await self.parent_view.refresh_content(interaction)
         await interaction.followup.send(
-            f"✅ 抽奖消耗已更新：单抽 {single} / 十连 {max(single, ten)}",
+            f"✅ 抽奖消耗已更新：单抽 {int(cfg.get('cost_single', single))} / 十连 {int(cfg.get('cost_ten', 900))}",
             ephemeral=True,
         )
 
@@ -989,7 +1003,7 @@ class RoleManagerView(discord.ui.View):
         embed.add_field(
             name="💳 抽奖参数",
             value=(
-                f"单抽: **{int(cfg.get('cost_single', 50))}** | 十连: **{int(cfg.get('cost_ten', 450))}**\n"
+                f"单抽: **{int(cfg.get('cost_single', 50))}** | 十连: **{max(900, int(cfg.get('cost_ten', 900)))}**\n"
                 f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 40))}/{int(weights.get(str(RARITY_NORMAL), 40))}/{int(weights.get(str(RARITY_RARE), 15))}/{int(weights.get(str(RARITY_LEGENDARY), 5))}**\n"
                 f"补偿(☆/★/★★/★★★): **{int(refunds.get(str(RARITY_JUNK), 8))}/{int(refunds.get(str(RARITY_NORMAL), 20))}/{int(refunds.get(str(RARITY_RARE), 40))}/{int(refunds.get(str(RARITY_LEGENDARY), 100))}**"
             ),
@@ -1038,9 +1052,7 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
                     "🔸 **开始装饰**：打开私密衣柜，查看并更换你的装饰。\n"
                     "🔸 **一键移除**：一键卸下所有在此处领取的装饰，恢复素颜。\n"
                     "🔸 **自动替换**：选择同系列新款式会自动替换旧的哦！\n"
-                    "🔸 **积分抽奖**：多种身份颜色任你选择，抽奖更刺激！\n\n"
-                    "📜 **当前上架款式一览**：\n"
-                    f"{role_list_str}",
+                    "🔸 **积分抽奖**：多种身份颜色任你选择，抽奖更刺激！\n\n",
         color=STYLE["KIMI_YELLOW"]
     )
 

@@ -34,6 +34,7 @@ QUOTA = {
 # --- 身份组抽奖相关配置 ---
 LOTTERY = {  
     "LOTTERY_COST": 50, 
+    "LOTTERY_TEN_COST": 900,
     "LOTTERY_REFUND": 20,
     "user_cooldowns": {},
     "COOLDOWN_SECONDS": 30
@@ -41,7 +42,9 @@ LOTTERY = {
 
 POINTS = {
     "POINTS_SIGN_REWARD": 30,
-    "POINTS_DAILY_MSG_CAP": 70,
+    "POINTS_DAILY_MSG_CAP": 100,
+    "POINTS_POST_REWARD": 10,
+    "POINTS_DAILY_POST_CAP": 50,
     "POINTS_PER_MSG_MIN": 1,
     "POINTS_PER_MSG_MAX": 3,
     "POINTS_MSG_COOLDOWN": 30,
