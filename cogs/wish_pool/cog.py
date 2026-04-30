@@ -58,7 +58,7 @@ class WishPoolCog(commands.Cog):
 
         embed = discord.Embed(
             title="✨ 奇米大王的许愿池",
-            description="有什么想要的新功能、角色卡、或者对社区的建议吗？\n\n"
+            description="有什么想要的电波系实现的新功能、角色卡、或者对社区的建议吗？\n\n"
                         "**点击下方的按钮选择你的愿望类型，然后告诉本大王吧！**",
             color=STYLE["KIMI_YELLOW"]
         )
