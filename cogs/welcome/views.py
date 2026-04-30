@@ -3,6 +3,7 @@
 import discord
 import asyncio
 import random
+from datetime import timedelta
 from discord.ext import commands
 
 from config import IDS, STYLE
@@ -10,12 +11,35 @@ from .data import QUIZ_QUESTIONS
 
 # --- 配置区 ---
 QUIZ_DURATION = 120
+MIN_ACCOUNT_AGE_DAYS = 30
+MIN_MUTUAL_GUILDS = 2
 
 class QuizStartView(discord.ui.View):
     # ✨ 修改点：初始化时接收 cog 实例
     def __init__(self, cog: commands.Cog):
         super().__init__(timeout=None)
         self.cog = cog 
+
+    def _collect_risk_reasons(self, interaction: discord.Interaction):
+        """收集不允许答题的风控原因。"""
+        reasons = []
+        user = interaction.user
+        now = discord.utils.utcnow()
+
+        account_age = now - user.created_at
+        if account_age < timedelta(days=MIN_ACCOUNT_AGE_DAYS):
+            reasons.append(f"账号注册时间不足 {MIN_ACCOUNT_AGE_DAYS} 天")
+
+        mutual_guild_count = sum(1 for guild in self.cog.bot.guilds if guild.get_member(user.id))
+        if mutual_guild_count < MIN_MUTUAL_GUILDS:
+            reasons.append("当前仅加入本服务器，暂不开放自助答题")
+
+        public_flags = getattr(user, "public_flags", None)
+        is_suspected_spammer = bool(getattr(public_flags, "spammer", False)) if public_flags else False
+        if is_suspected_spammer:
+            reasons.append("账号被系统标记为可疑/疑似垃圾账号")
+
+        return reasons
 
     @discord.ui.button(label="📝 点击开始答题", style=discord.ButtonStyle.success, custom_id="quiz_entry_start")
     async def start_quiz(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -28,6 +52,16 @@ class QuizStartView(discord.ui.View):
         has_hatched = hatched_role and hatched_role in interaction.user.roles
         if has_newbie or has_hatched:
             return await interaction.followup.send("你已经是新兵蛋子或正式成员啦，不需要再答题咯！", ephemeral=True)
+
+        risk_reasons = self._collect_risk_reasons(interaction)
+        if risk_reasons:
+            reason_text = "\n".join(f"• {reason}" for reason in risk_reasons)
+            return await interaction.followup.send(
+                "⚠️ 当前账号暂不满足自助答题条件：\n"
+                f"{reason_text}\n\n"
+                "请先在社区正常活跃一段时间，再联系管理员进行人工核验。",
+                ephemeral=True,
+            )
 
         if user_id in self.cog.sessions:
             session = self.cog.sessions[user_id]
