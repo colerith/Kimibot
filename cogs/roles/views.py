@@ -4,6 +4,7 @@ import discord
 from discord import ui
 import asyncio
 import random
+import math
 import config
 
 from .storage import (
@@ -707,14 +708,28 @@ class AdminAddRoleSelect(discord.ui.Select):
         )
 
 class AdminRemoveSelect(Select):
-    def __init__(self, role_datas, view_parent):
+    def __init__(self, role_datas, view_parent, page: int = 0, page_size: int = 25):
         self.view_parent = view_parent
         if isinstance(role_datas, list):
             role_datas = {r: "unknown" for r in role_datas}
 
-        options = []
+        role_entries = []
         for role, r_type in role_datas.items():
             if not isinstance(role, discord.Role): continue
+            role_entries.append((role, r_type))
+
+        # 按显示名稳定排序，翻页时避免选项顺序抖动
+        role_entries.sort(key=lambda item: item[0].name.lower())
+
+        total_options = len(role_entries)
+        total_pages = max(1, math.ceil(total_options / page_size)) if total_options > 0 else 1
+        page = max(0, min(page, total_pages - 1))
+
+        start = page * page_size
+        end = start + page_size
+
+        options = []
+        for role, r_type in role_entries[start:end]:
 
             # 图标区分
             emoji_map = {"lottery": "🎟️", "claimable": "🎨", "notification": "🔔"}
@@ -732,14 +747,39 @@ class AdminRemoveSelect(Select):
         if not options:
             options.append(discord.SelectOption(label="暂无身份组", value="none", description="列表中空空如也"))
             disabled = True
+            placeholder = "➖ 选择要移除的身份组..."
         else:
             disabled = False
+            placeholder = (
+                f"➖ 选择要移除的身份组... ({page + 1}/{total_pages})"
+                if total_options > page_size
+                else "➖ 选择要移除的身份组..."
+            )
 
         super().__init__(
-            placeholder="➖ 选择要移除的身份组...",
+            placeholder=placeholder,
             min_values=1, max_values=min(25, len(options)), options=options, custom_id="admin_remove_select",
             disabled=disabled, row=3
         )
+
+
+class AdminRemovePageButton(discord.ui.Button):
+    def __init__(self, parent_view: "RoleManagerView"):
+        super().__init__(
+            label=f"移除列表翻页 ({parent_view.remove_page + 1}/{parent_view.remove_total_pages})",
+            emoji="📄",
+            style=discord.ButtonStyle.secondary,
+            row=4,
+            disabled=(parent_view.remove_total_pages <= 1),
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.parent_view.remove_total_pages <= 1:
+            return await interaction.response.defer()
+
+        self.parent_view.remove_page = (self.parent_view.remove_page + 1) % self.parent_view.remove_total_pages
+        await self.parent_view.refresh_content(interaction)
 
     async def callback(self, interaction: discord.Interaction):
         if not self.values or self.values[0] == "none":
@@ -1036,6 +1076,9 @@ class RoleManagerView(discord.ui.View):
         super().__init__(timeout=600)
         self.ctx = ctx
         self.guild = ctx.guild if ctx else None
+        self.remove_page = 0
+        self.remove_page_size = 25
+        self.remove_total_pages = 1
         if self.guild:
             self.setup_ui()
 
@@ -1054,16 +1097,22 @@ class RoleManagerView(discord.ui.View):
         load_to_map("lottery_roles", "lottery")
         load_to_map("notification_roles", "notification") # 新增
 
+        total_remove_items = len(role_map)
+        self.remove_total_pages = max(1, math.ceil(total_remove_items / self.remove_page_size)) if total_remove_items > 0 else 1
+        if self.remove_page >= self.remove_total_pages:
+            self.remove_page = max(0, self.remove_total_pages - 1)
+
         # 添加组件
         self.add_item(AdminAddRoleSelect(self, pool_type="lottery"))      # Row 0
         self.add_item(AdminAddRoleSelect(self, pool_type="claimable"))    # Row 1
         self.add_item(AdminAddRoleSelect(self, pool_type="notification")) # Row 2 (新增)
-        self.add_item(AdminRemoveSelect(role_map, self))                  # Row 3
+        self.add_item(AdminRemoveSelect(role_map, self, page=self.remove_page, page_size=self.remove_page_size))  # Row 3
 
         # 功能按钮 Row 4
         self.add_item(AdminActionButton(self, "rarity", label="稀有度", emoji="⭐"))
         self.add_item(AdminActionButton(self, "cost", label="抽奖消耗", emoji="💳"))
         self.add_item(AdminActionButton(self, "weights", label="概率/补偿", emoji="🎚️"))
+        self.add_item(AdminRemovePageButton(self))
         ref_btn = discord.ui.Button(label="🔄 刷新", style=discord.ButtonStyle.secondary, row=4, custom_id="admin_refresh")
         ref_btn.callback = self.refresh_callback
         self.add_item(ref_btn)
