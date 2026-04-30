@@ -11,15 +11,19 @@ from .storage import (
     save_role_data,
     add_to_collection,
     get_user_collection,
-    get_lottery_pools_by_rarity,
+    get_lottery_pools_by_kind_and_rarity,
     get_lottery_config,
     get_lottery_role_rarity,
+    get_lottery_role_kind,
     set_lottery_role_rarity,
+    set_lottery_role_kind,
     update_lottery_config,
     RARITY_NORMAL,
     RARITY_RARE,
     RARITY_LEGENDARY,
     RARITY_JUNK,
+    LOTTERY_KIND_COLOR,
+    LOTTERY_KIND_ICON,
 )
 from cogs.points.storage import get_user_points, modify_user_points, sign_in_user
 from config import STYLE
@@ -42,6 +46,10 @@ def _rarity_short(rarity: int) -> str:
         RARITY_RARE: "★★",
         RARITY_LEGENDARY: "★★★",
     }.get(rarity, "?")
+
+
+def _lottery_kind_label(kind: str) -> str:
+    return "颜色" if kind == LOTTERY_KIND_COLOR else "图标"
 
 
 def _rules_text() -> str:
@@ -87,14 +95,18 @@ class RoleLotteryView(discord.ui.View):
         if not pool_ids:
             return await interaction.followup.send("🏜️ 奖池目前是空的，请联系管理员进货！", ephemeral=True)
 
-        pools_by_rarity = {r: [] for r in (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)}
-        for rarity, ids in get_lottery_pools_by_rarity(data).items():
-            for rid in ids:
-                role = interaction.guild.get_role(rid)
-                if role:
-                    pools_by_rarity[rarity].append(role)
+        pools_by_kind_rarity = {
+            LOTTERY_KIND_COLOR: {r: [] for r in (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)},
+            LOTTERY_KIND_ICON: {r: [] for r in (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)},
+        }
+        for kind, rarity_map in get_lottery_pools_by_kind_and_rarity(data).items():
+            for rarity, ids in rarity_map.items():
+                for rid in ids:
+                    role = interaction.guild.get_role(rid)
+                    if role:
+                        pools_by_kind_rarity[kind][rarity].append(role)
 
-        if not any(pools_by_rarity.values()):
+        if not any(pools_by_kind_rarity[k][r] for k in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON) for r in (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)):
             return await interaction.followup.send("⚠️ 奖池里的身份组好像失效了，请联系管理员。", ephemeral=True)
 
         modify_user_points(user.id, -cost, guild_id)
@@ -118,21 +130,27 @@ class RoleLotteryView(discord.ui.View):
         total_refund = 0
 
         for rarity in picked_rarities:
-            candidates = pools_by_rarity.get(rarity, [])
-            if not candidates:
+            available_kinds = [
+                k for k in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
+                if pools_by_kind_rarity.get(k, {}).get(rarity, [])
+            ]
+            if not available_kinds:
                 results.append({"role": None, "rarity": 0, "dupe": False, "refund": 0})
                 continue
+
+            picked_kind = random.choice(available_kinds)
+            candidates = pools_by_kind_rarity[picked_kind][rarity]
 
             won_role = random.choice(candidates)
             if won_role.id in user_collection_ids:
                 refund_amt = max(0, int(refund_cfg.get(str(rarity), fallback_refund)))
                 total_refund += refund_amt
-                results.append({"role": won_role, "rarity": rarity, "dupe": True, "refund": refund_amt})
+                results.append({"role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": True, "refund": refund_amt})
             else:
                 add_to_collection(user.id, won_role.id)
                 user_collection_ids.add(won_role.id)
                 granted_roles.append(won_role)
-                results.append({"role": won_role, "rarity": rarity, "dupe": False, "refund": 0})
+                results.append({"role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": False, "refund": 0})
 
         if total_refund > 0:
             modify_user_points(user.id, total_refund, guild_id)
@@ -140,12 +158,14 @@ class RoleLotteryView(discord.ui.View):
         equipped_role = granted_roles[-1] if granted_roles else None
         equip_error = None
         if equipped_role:
+            equipped_kind = get_lottery_role_kind(equipped_role.id, data)
+            exclusive_type = "lottery_color" if equipped_kind == LOTTERY_KIND_COLOR else "lottery_icon"
             try:
                 await remove_all_decorations(
                     user,
                     interaction.guild,
                     keep_role_id=equipped_role.id,
-                    exclusive_type="lottery",
+                    exclusive_type=exclusive_type,
                 )
                 await user.add_roles(equipped_role, reason="积分抽奖获取")
             except Exception as e:
@@ -167,11 +187,13 @@ class RoleLotteryView(discord.ui.View):
 
             role = row["role"]
             rarity = row["rarity"]
+            kind = row.get("kind", LOTTERY_KIND_COLOR)
             rarity_text = _rarity_label(rarity)
+            kind_text = _lottery_kind_label(kind)
             if row["dupe"]:
-                lines.append(f"♻️ {rarity_text} · {role.mention} (重复 +{row['refund']})")
+                lines.append(f"♻️ [{kind_text}] {rarity_text} · {role.mention} (重复 +{row['refund']})")
             else:
-                lines.append(f"✨ {rarity_text} · {role.mention} (新解锁)")
+                lines.append(f"✨ [{kind_text}] {rarity_text} · {role.mention} (新解锁)")
 
         embed.description = "\n".join(lines) if lines else "本次没有可展示的结果。"
         embed.add_field(
@@ -244,11 +266,13 @@ class RoleLotteryView(discord.ui.View):
         pool_desc_list = []
         for r in sorted(valid_roles_in_pool, key=lambda role: role.name):
             rarity = get_lottery_role_rarity(r.id, data)
+            kind = get_lottery_role_kind(r.id, data)
             rarity_text = _rarity_label(rarity)
+            kind_text = _lottery_kind_label(kind)
             if r in owned_lottery_roles:
-                pool_desc_list.append(f"✅ **{r.name}** [{rarity_text}] (已拥有)")
+                pool_desc_list.append(f"✅ **{r.name}** [{kind_text} | {rarity_text}] (已拥有)")
             else:
-                pool_desc_list.append(f"❔ {r.name} [{rarity_text}]")
+                pool_desc_list.append(f"❔ {r.name} [{kind_text} | {rarity_text}]")
 
         pool_text = "\n".join(pool_desc_list)
         if len(pool_text) > 1000:
@@ -313,7 +337,8 @@ class RoleClaimSelect(discord.ui.Select):
         if target_role.id in claimable_ids:
             exclusive_type = "claimable"
         elif target_role.id in lottery_ids:
-            exclusive_type = "lottery"
+            lot_kind = get_lottery_role_kind(target_role.id, data)
+            exclusive_type = "lottery_color" if lot_kind == LOTTERY_KIND_COLOR else "lottery_icon"
 
         # 2. 根据类型执行互斥移除并添加
         if target_role not in interaction.user.roles:
@@ -394,13 +419,24 @@ class RoleClaimView(discord.ui.View):
 
         # 3. 构建当前状态文本，分别显示
         user_current_claimable = [r.name for r in interaction.user.roles if r.id in claimable_ids]
-        user_current_lottery = [r.name for r in interaction.user.roles if r.id in lottery_ids]
+        lottery_color_ids = {
+            rid for rid in lottery_ids
+            if get_lottery_role_kind(rid, data) == LOTTERY_KIND_COLOR
+        }
+        lottery_icon_ids = {
+            rid for rid in lottery_ids
+            if get_lottery_role_kind(rid, data) == LOTTERY_KIND_ICON
+        }
+        user_current_lottery_color = [r.name for r in interaction.user.roles if r.id in lottery_color_ids]
+        user_current_lottery_icon = [r.name for r in interaction.user.roles if r.id in lottery_icon_ids]
 
         status_parts = []
         if user_current_claimable:
             status_parts.append(f"🎨 **普通装饰**: {', '.join(user_current_claimable)}")
-        if user_current_lottery:
-            status_parts.append(f"🎰 **稀有装饰**: {', '.join(user_current_lottery)}")
+        if user_current_lottery_color:
+            status_parts.append(f"🎰 **稀有颜色**: {', '.join(user_current_lottery_color)}")
+        if user_current_lottery_icon:
+            status_parts.append(f"🏷️ **稀有图标**: {', '.join(user_current_lottery_icon)}")
 
         status_text = "\n".join(status_parts) if status_parts else "你目前还没有佩戴任何装饰哦。"
 
@@ -419,6 +455,10 @@ class RoleClaimView(discord.ui.View):
         cfg = get_lottery_config(data)
         single_cost = max(1, int(cfg.get("cost_single", int(getattr(config, "LOTTERY_COST", 50)))))
         ten_cost = max(900, int(getattr(config, "LOTTERY_TEN_COST", 900)), single_cost, int(cfg.get("cost_ten", 900)))
+        sign_reward = int(getattr(config, "POINTS_SIGN_REWARD", 30))
+        msg_daily_cap = int(getattr(config, "POINTS_DAILY_MSG_CAP", 100))
+        post_reward = int(getattr(config, "POINTS_POST_REWARD", 10))
+        post_daily_cap = int(getattr(config, "POINTS_DAILY_POST_CAP", 50))
 
         refund_cfg = cfg.get("refund", {})
         refund_line = (
@@ -435,7 +475,11 @@ class RoleClaimView(discord.ui.View):
                         f"💳 **单抽消耗**: {single_cost} 积分\n"
                         f"💳 **十连消耗**: {ten_cost} 积分\n"
                         f"🔄 **重复补偿**: {refund_line}\n"
-                        f"💰 **你的积蓄**: **{points}**\n\n",
+                        f"💰 **你的积蓄**: **{points}**\n\n"
+                        f"📌 **积分获取**\n"
+                        f"- 📅 每日签到：+{sign_reward}\n"
+                        f"- 💬 社区发言：每日最多 +{msg_daily_cap}\n"
+                        f"- 🧵 社区发帖：每帖 +{post_reward}，每日最多 +{post_daily_cap}\n",
             color=discord.Color.purple()
         )
         await interaction.response.send_message(embed=embed, view=RoleLotteryView(), ephemeral=True)
@@ -744,9 +788,32 @@ class LotteryRarityValueSelect(discord.ui.Select):
         await interaction.response.defer()
 
 
+class LotteryKindValueSelect(discord.ui.Select):
+    def __init__(self, parent_view: "RoleManagerView"):
+        super().__init__(
+            placeholder="选择分类",
+            options=[
+                discord.SelectOption(label="颜色身份组", value=LOTTERY_KIND_COLOR, emoji="🎨"),
+                discord.SelectOption(label="图标身份组", value=LOTTERY_KIND_ICON, emoji="🏷️"),
+            ],
+            min_values=1,
+            max_values=1,
+            row=2,
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, LotteryRarityConfigView):
+            return await interaction.response.defer()
+
+        panel.selected_kind = self.values[0]
+        await interaction.response.defer()
+
+
 class LotteryRarityApplyButton(discord.ui.Button):
     def __init__(self, parent_view: "RoleManagerView"):
-        super().__init__(label="应用设置", emoji="✅", style=discord.ButtonStyle.success, row=2)
+        super().__init__(label="应用设置", emoji="✅", style=discord.ButtonStyle.success, row=3)
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
@@ -754,18 +821,22 @@ class LotteryRarityApplyButton(discord.ui.Button):
         if not isinstance(panel, LotteryRarityConfigView):
             return await interaction.response.send_message("❌ 面板状态异常。", ephemeral=True)
 
-        if panel.selected_role_id is None or panel.selected_rarity is None:
-            return await interaction.response.send_message("❌ 请先选择身份组和稀有度。", ephemeral=True)
+        if panel.selected_role_id is None or panel.selected_rarity is None or panel.selected_kind is None:
+            return await interaction.response.send_message("❌ 请先选择身份组、稀有度和分类。", ephemeral=True)
 
         ok = set_lottery_role_rarity(panel.selected_role_id, panel.selected_rarity)
         if not ok:
             return await interaction.response.send_message("❌ 设置失败：该身份组不在抽奖池中。", ephemeral=True)
 
+        ok_kind = set_lottery_role_kind(panel.selected_role_id, panel.selected_kind)
+        if not ok_kind:
+            return await interaction.response.send_message("❌ 分类设置失败。", ephemeral=True)
+
         role = interaction.guild.get_role(panel.selected_role_id) if interaction.guild else None
         role_name = role.mention if role else str(panel.selected_role_id)
         await self.parent_view.refresh_content(interaction)
         await interaction.followup.send(
-            f"✅ 已将 {role_name} 设为 {_rarity_label(panel.selected_rarity)}",
+            f"✅ 已将 {role_name} 设为 [{_lottery_kind_label(panel.selected_kind)}] {_rarity_label(panel.selected_rarity)}",
             ephemeral=True,
         )
 
@@ -776,6 +847,7 @@ class LotteryRarityConfigView(discord.ui.View):
         self.parent_view = parent_view
         self.selected_role_id: int | None = None
         self.selected_rarity: int | None = None
+        self.selected_kind: str | None = None
 
         data = load_role_data()
         options = []
@@ -784,11 +856,12 @@ class LotteryRarityConfigView(discord.ui.View):
             if not role:
                 continue
             rarity = get_lottery_role_rarity(rid, data)
+            kind = get_lottery_role_kind(rid, data)
             options.append(
                 discord.SelectOption(
                     label=role.name[:100],
                     value=str(rid),
-                    description=f"当前: {_rarity_label(rarity)}",
+                    description=f"当前: {_lottery_kind_label(kind)} | {_rarity_label(rarity)}",
                     emoji="🎟️",
                 )
             )
@@ -796,6 +869,7 @@ class LotteryRarityConfigView(discord.ui.View):
         if options:
             self.add_item(LotteryRarityRoleSelect(parent_view, options[:25]))
             self.add_item(LotteryRarityValueSelect(parent_view))
+            self.add_item(LotteryKindValueSelect(parent_view))
             self.add_item(LotteryRarityApplyButton(parent_view))
         else:
             empty_btn = discord.ui.Button(label="奖池为空，无法设置", disabled=True, row=0)
@@ -911,7 +985,7 @@ class AdminActionButton(discord.ui.Button):
         if self.action == "rarity":
             rarity_view = LotteryRarityConfigView(self.parent_view, interaction.guild)
             await interaction.response.send_message(
-                "请选择一个奖池身份组，再选择稀有度后点击【应用设置】。",
+                "请选择一个奖池身份组，再选择稀有度和分类后点击【应用设置】。",
                 view=rarity_view,
                 ephemeral=True,
             )
@@ -984,12 +1058,20 @@ class RoleManagerView(discord.ui.View):
         weights = cfg.get("weights", {})
 
         rarity_lines = []
+        kind_color_lines = []
+        kind_icon_lines = []
         for rid in data.get("lottery_roles", []):
             role = self.guild.get_role(rid)
             if not role:
                 continue
             rarity = get_lottery_role_rarity(rid, data)
-            rarity_lines.append(f"{_rarity_short(rarity)} {role.mention}")
+            kind = get_lottery_role_kind(rid, data)
+            line = f"{_rarity_short(rarity)} {role.mention}"
+            rarity_lines.append(line)
+            if kind == LOTTERY_KIND_COLOR:
+                kind_color_lines.append(line)
+            else:
+                kind_icon_lines.append(line)
 
         rarity_text = "\n".join(rarity_lines[:10]) if rarity_lines else "*未配置*"
         if len(rarity_lines) > 10:
@@ -998,6 +1080,16 @@ class RoleManagerView(discord.ui.View):
         embed.add_field(
             name="⭐ 奖池稀有度",
             value=rarity_text,
+            inline=False,
+        )
+        embed.add_field(
+            name="🎨 抽奖池-颜色",
+            value="\n".join(kind_color_lines[:10]) if kind_color_lines else "*空*",
+            inline=False,
+        )
+        embed.add_field(
+            name="🏷️ 抽奖池-图标",
+            value="\n".join(kind_icon_lines[:10]) if kind_icon_lines else "*空*",
             inline=False,
         )
         embed.add_field(
@@ -1094,7 +1186,7 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
     """
     移除用户身上指定类型的互斥身份组。
     - keep_role_id: 如果提供了这个ID，则在移除时保留这个身份组（适用于换装时保留新装饰）
-    - exclusive_type: "claimable", "lottery" 或 None (表示移除所有相关类型)，用于确定要清理哪个池的身份组
+    - exclusive_type: "claimable", "lottery", "lottery_color", "lottery_icon" 或 None
     """
     data = load_role_data()
     target_ids = set()
@@ -1104,6 +1196,16 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
         target_ids = set(data.get("claimable_roles", []))
     elif exclusive_type == "lottery":
         target_ids = set(data.get("lottery_roles", []))
+    elif exclusive_type == "lottery_color":
+        target_ids = {
+            rid for rid in data.get("lottery_roles", [])
+            if get_lottery_role_kind(rid, data) == LOTTERY_KIND_COLOR
+        }
+    elif exclusive_type == "lottery_icon":
+        target_ids = {
+            rid for rid in data.get("lottery_roles", [])
+            if get_lottery_role_kind(rid, data) == LOTTERY_KIND_ICON
+        }
     # 如果没有指定类型 (例如“一键移除”按钮)，则清理所有装饰
     else:
         target_ids = set(data.get("claimable_roles", []) + data.get("lottery_roles", []))

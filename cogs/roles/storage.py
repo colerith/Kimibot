@@ -12,6 +12,9 @@ RARITY_RARE = 2
 RARITY_LEGENDARY = 3
 RARITY_JUNK = 4
 SUPPORTED_RARITIES = (RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY, RARITY_JUNK)
+LOTTERY_KIND_COLOR = "color"
+LOTTERY_KIND_ICON = "icon"
+SUPPORTED_LOTTERY_KINDS = (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
 
 DEFAULT_LOTTERY_CONFIG = {
     "cost_single": 50,
@@ -61,10 +64,13 @@ def _normalize_role_data(data: dict) -> dict:
             rarity = int(meta.get("rarity", RARITY_NORMAL)) if isinstance(meta, dict) else RARITY_NORMAL
             if rarity not in SUPPORTED_RARITIES:
                 rarity = RARITY_NORMAL
-            role_meta[str(rid)] = {"rarity": rarity}
+            kind = str(meta.get("kind", LOTTERY_KIND_COLOR)) if isinstance(meta, dict) else LOTTERY_KIND_COLOR
+            if kind not in SUPPORTED_LOTTERY_KINDS:
+                kind = LOTTERY_KIND_COLOR
+            role_meta[str(rid)] = {"rarity": rarity, "kind": kind}
     else:
         for rid in lottery:
-            role_meta[str(rid)] = {"rarity": RARITY_NORMAL}
+            role_meta[str(rid)] = {"rarity": RARITY_NORMAL, "kind": LOTTERY_KIND_COLOR}
 
     cfg = data.get("lottery_config", {})
     if not isinstance(cfg, dict):
@@ -124,12 +130,32 @@ def get_lottery_role_rarity(role_id: int, role_data: dict | None = None) -> int:
     return rarity if rarity in SUPPORTED_RARITIES else RARITY_NORMAL
 
 
+def get_lottery_role_kind(role_id: int, role_data: dict | None = None) -> str:
+    data = role_data if role_data is not None else load_role_data()
+    meta = data.get("lottery_role_meta", {})
+    kind = str(meta.get(str(role_id), {}).get("kind", LOTTERY_KIND_COLOR))
+    return kind if kind in SUPPORTED_LOTTERY_KINDS else LOTTERY_KIND_COLOR
+
+
 def get_lottery_pools_by_rarity(role_data: dict | None = None) -> Dict[int, List[int]]:
     data = role_data if role_data is not None else load_role_data()
     pools = {r: [] for r in SUPPORTED_RARITIES}
     for rid in data.get("lottery_roles", []):
         rarity = get_lottery_role_rarity(rid, data)
         pools[rarity].append(rid)
+    return pools
+
+
+def get_lottery_pools_by_kind_and_rarity(role_data: dict | None = None) -> Dict[str, Dict[int, List[int]]]:
+    data = role_data if role_data is not None else load_role_data()
+    pools = {
+        LOTTERY_KIND_COLOR: {r: [] for r in SUPPORTED_RARITIES},
+        LOTTERY_KIND_ICON: {r: [] for r in SUPPORTED_RARITIES},
+    }
+    for rid in data.get("lottery_roles", []):
+        kind = get_lottery_role_kind(rid, data)
+        rarity = get_lottery_role_rarity(rid, data)
+        pools[kind][rarity].append(rid)
     return pools
 
 
@@ -147,7 +173,28 @@ def set_lottery_role_rarity(role_id: int, rarity: int) -> bool:
     if role_id not in data.get("lottery_roles", []):
         return False
 
-    data.setdefault("lottery_role_meta", {})[str(role_id)] = {"rarity": rarity}
+    current = data.setdefault("lottery_role_meta", {}).get(str(role_id), {})
+    kind = str(current.get("kind", LOTTERY_KIND_COLOR))
+    if kind not in SUPPORTED_LOTTERY_KINDS:
+        kind = LOTTERY_KIND_COLOR
+    data.setdefault("lottery_role_meta", {})[str(role_id)] = {"rarity": rarity, "kind": kind}
+    save_role_data(data)
+    return True
+
+
+def set_lottery_role_kind(role_id: int, kind: str) -> bool:
+    if kind not in SUPPORTED_LOTTERY_KINDS:
+        return False
+
+    data = load_role_data()
+    if role_id not in data.get("lottery_roles", []):
+        return False
+
+    current = data.setdefault("lottery_role_meta", {}).get(str(role_id), {})
+    rarity = int(current.get("rarity", RARITY_NORMAL))
+    if rarity not in SUPPORTED_RARITIES:
+        rarity = RARITY_NORMAL
+    data.setdefault("lottery_role_meta", {})[str(role_id)] = {"rarity": rarity, "kind": kind}
     save_role_data(data)
     return True
 
