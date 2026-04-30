@@ -648,16 +648,16 @@ class AdminAddRoleSelect(discord.ui.Select):
 
         super().__init__(
             placeholder=map_titles.get(pool_type, "选择身份组..."),
-            min_values=1, max_values=1,
+            min_values=1, max_values=25,
             row=row_map.get(pool_type, 0),
             select_type=discord.ComponentType.role_select
         )
         self.parent_view = parent_view
 
     async def callback(self, interaction):
-        role_id = int(interaction.data['values'][0])
-        role = interaction.guild.get_role(role_id)
-        if not role: return
+        selected_ids = [int(v) for v in interaction.data.get("values", [])]
+        if not selected_ids:
+            return await interaction.response.send_message("❌ 未选择任何身份组。", ephemeral=True)
 
         data = load_role_data()
 
@@ -673,16 +673,38 @@ class AdminAddRoleSelect(discord.ui.Select):
         # 确保数据结构存在
         if target_list_key not in data: data[target_list_key] = []
 
-        # 检查逻辑：全池查重
+        # 检查逻辑：全池查重（支持批量）
         all_lists = ["claimable_roles", "lottery_roles", "notification_roles"]
-        for k in all_lists:
-            if role.id in data.get(k, []):
-                return await interaction.response.send_message(f"⚠️ 该身份组已存在于【{k}】中，请先移除！", ephemeral=True)
+        added = []
+        skipped = []
+        for role_id in selected_ids:
+            role = interaction.guild.get_role(role_id)
+            if not role:
+                skipped.append(f"{role_id}(失效)")
+                continue
 
-        data[target_list_key].append(role.id)
+            duplicated = False
+            for k in all_lists:
+                if role_id in data.get(k, []):
+                    duplicated = True
+                    break
+
+            if duplicated:
+                skipped.append(role.name)
+                continue
+
+            data[target_list_key].append(role_id)
+            added.append(role.name)
+
         save_role_data(data)
         await self.parent_view.refresh_content(interaction)
-        await interaction.followup.send(f"✅ 添加成功 ({self.pool_type})：{role.name}", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ 添加成功({self.pool_type})：{len(added)} 项\n"
+            f"⚠️ 跳过：{len(skipped)} 项"
+            + (f"\n- 已添加：{', '.join(added[:10])}" if added else "")
+            + (f"\n- 已跳过：{', '.join(skipped[:10])}" if skipped else ""),
+            ephemeral=True,
+        )
 
 class AdminRemoveSelect(Select):
     def __init__(self, role_datas, view_parent):
@@ -715,30 +737,30 @@ class AdminRemoveSelect(Select):
 
         super().__init__(
             placeholder="➖ 选择要移除的身份组...",
-            min_values=1, max_values=1, options=options, custom_id="admin_remove_select",
+            min_values=1, max_values=min(25, len(options)), options=options, custom_id="admin_remove_select",
             disabled=disabled, row=3
         )
 
     async def callback(self, interaction: discord.Interaction):
-        role_id = self.values[0]
-        if role_id == "none":
+        if not self.values or self.values[0] == "none":
             return await interaction.response.send_message("这里什么也没有。", ephemeral=True)
 
         data = load_role_data()
-        target_rid = int(role_id)
-        removed = False
+        target_ids = {int(v) for v in self.values}
+        removed_count = 0
 
         # 遍历所有可能的列表进行删除
         keys = ["claimable_roles", "lottery_roles", "notification_roles"]
         for k in keys:
-            if target_rid in data.get(k, []):
-                data[k].remove(target_rid)
-                removed = True
+            source = data.get(k, [])
+            kept = [rid for rid in source if rid not in target_ids]
+            removed_count += len(source) - len(kept)
+            data[k] = kept
 
-        if removed:
+        if removed_count > 0:
             save_role_data(data)
-            await interaction.response.send_message(f"🗑️ 已移除身份组配置", ephemeral=True)
             await self.view_parent.refresh_content(interaction)
+            await interaction.followup.send(f"🗑️ 已移除配置：{removed_count} 条记录", ephemeral=True)
         else:
             await interaction.response.send_message("❌ 数据库中未找到该记录。", ephemeral=True)
 
@@ -749,7 +771,7 @@ class LotteryRarityRoleSelect(discord.ui.Select):
             placeholder="选择奖池身份组",
             options=role_options,
             min_values=1,
-            max_values=1,
+            max_values=min(25, len(role_options)),
             row=0,
         )
         self.parent_view = parent_view
@@ -759,7 +781,7 @@ class LotteryRarityRoleSelect(discord.ui.Select):
         if not isinstance(panel, LotteryRarityConfigView):
             return await interaction.response.defer()
 
-        panel.selected_role_id = int(self.values[0])
+        panel.selected_role_ids = [int(v) for v in self.values]
         await interaction.response.defer()
 
 
@@ -821,31 +843,38 @@ class LotteryRarityApplyButton(discord.ui.Button):
         if not isinstance(panel, LotteryRarityConfigView):
             return await interaction.response.send_message("❌ 面板状态异常。", ephemeral=True)
 
-        if panel.selected_role_id is None or panel.selected_rarity is None or panel.selected_kind is None:
+        if not panel.selected_role_ids or panel.selected_rarity is None or panel.selected_kind is None:
             return await interaction.response.send_message("❌ 请先选择身份组、稀有度和分类。", ephemeral=True)
 
-        ok = set_lottery_role_rarity(panel.selected_role_id, panel.selected_rarity)
-        if not ok:
-            return await interaction.response.send_message("❌ 设置失败：该身份组不在抽奖池中。", ephemeral=True)
+        success_count = 0
+        for rid in panel.selected_role_ids:
+            ok = set_lottery_role_rarity(rid, panel.selected_rarity)
+            ok_kind = set_lottery_role_kind(rid, panel.selected_kind)
+            if ok and ok_kind:
+                success_count += 1
 
-        ok_kind = set_lottery_role_kind(panel.selected_role_id, panel.selected_kind)
-        if not ok_kind:
-            return await interaction.response.send_message("❌ 分类设置失败。", ephemeral=True)
-
-        role = interaction.guild.get_role(panel.selected_role_id) if interaction.guild else None
-        role_name = role.mention if role else str(panel.selected_role_id)
         await self.parent_view.refresh_content(interaction)
         await interaction.followup.send(
-            f"✅ 已将 {role_name} 设为 [{_lottery_kind_label(panel.selected_kind)}] {_rarity_label(panel.selected_rarity)}",
+            f"✅ 批量设置完成：{success_count}/{len(panel.selected_role_ids)} 项\n"
+            f"目标：[{_lottery_kind_label(panel.selected_kind)}] {_rarity_label(panel.selected_rarity)}",
             ephemeral=True,
         )
+
+
+class LotteryRarityBackButton(discord.ui.Button):
+    def __init__(self, parent_view: "RoleManagerView"):
+        super().__init__(label="返回管理", emoji="↩️", style=discord.ButtonStyle.secondary, row=3)
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.parent_view.refresh_content(interaction)
 
 
 class LotteryRarityConfigView(discord.ui.View):
     def __init__(self, parent_view: "RoleManagerView", guild: discord.Guild):
         super().__init__(timeout=300)
         self.parent_view = parent_view
-        self.selected_role_id: int | None = None
+        self.selected_role_ids: list[int] = []
         self.selected_rarity: int | None = None
         self.selected_kind: str | None = None
 
@@ -871,9 +900,11 @@ class LotteryRarityConfigView(discord.ui.View):
             self.add_item(LotteryRarityValueSelect(parent_view))
             self.add_item(LotteryKindValueSelect(parent_view))
             self.add_item(LotteryRarityApplyButton(parent_view))
+            self.add_item(LotteryRarityBackButton(parent_view))
         else:
             empty_btn = discord.ui.Button(label="奖池为空，无法设置", disabled=True, row=0)
             self.add_item(empty_btn)
+            self.add_item(LotteryRarityBackButton(parent_view))
 
 
 class LotteryCostModal(discord.ui.Modal):
@@ -984,11 +1015,12 @@ class AdminActionButton(discord.ui.Button):
         cfg = get_lottery_config(load_role_data())
         if self.action == "rarity":
             rarity_view = LotteryRarityConfigView(self.parent_view, interaction.guild)
-            await interaction.response.send_message(
-                "请选择一个奖池身份组，再选择稀有度和分类后点击【应用设置】。",
-                view=rarity_view,
-                ephemeral=True,
+            embed = discord.Embed(
+                title="⚙️ 抽奖身份组批量配置",
+                description="请选择奖池身份组（支持多选），再选择稀有度和分类，最后点击【应用设置】。",
+                color=0x2B2D31,
             )
+            await interaction.response.edit_message(embed=embed, view=rarity_view)
             return
         if self.action == "cost":
             await interaction.response.send_modal(LotteryCostModal(self.parent_view, cfg))
