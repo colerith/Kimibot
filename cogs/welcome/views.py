@@ -12,7 +12,6 @@ from .data import QUIZ_QUESTIONS
 # --- 配置区 ---
 QUIZ_DURATION = 120
 MIN_ACCOUNT_AGE_DAYS = 30
-MIN_MUTUAL_GUILDS = 2
 
 class QuizStartView(discord.ui.View):
     # ✨ 修改点：初始化时接收 cog 实例
@@ -20,96 +19,20 @@ class QuizStartView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog 
 
-    async def _collect_risk_reasons(self, interaction: discord.Interaction):
-        """收集不允许答题的风控原因。"""
+    def _collect_risk_reasons(self, interaction: discord.Interaction):
+        """仅校验账号注册时长和可疑账号标记。"""
         reasons = []
-        user = interaction.user
-        now = discord.utils.utcnow()
-        debug_lines = []
 
-        debug_lines.append(
-            f"[QuizRisk] user_id={user.id} guild_id={getattr(interaction.guild, 'id', 'N/A')} "
-            f"created_at={user.created_at.isoformat()}"
-        )
-
-        account_age = now - user.created_at
-        debug_lines.append(f"[QuizRisk] account_age_days={account_age.days}")
+        account_age = discord.utils.utcnow() - interaction.user.created_at
         if account_age < timedelta(days=MIN_ACCOUNT_AGE_DAYS):
             reasons.append(f"账号注册时间不足 {MIN_ACCOUNT_AGE_DAYS} 天")
-            debug_lines.append("[QuizRisk] hit=account_age")
 
-        owner_id = IDS.get("SERVER_OWNER_ID")
-        mutual_guild_count = await self._get_mutual_guild_count_with_owner(user.id, owner_id, debug_lines)
-        debug_lines.append(f"[QuizRisk] owner_id={owner_id} mutual_guild_count={mutual_guild_count}")
-        if mutual_guild_count is not None and mutual_guild_count < MIN_MUTUAL_GUILDS:
-            reasons.append("当前仅加入本服务器，暂不开放自助答题")
-            debug_lines.append("[QuizRisk] hit=owner_mutual_guild_count")
-
-        public_flags = getattr(user, "public_flags", None)
+        public_flags = getattr(interaction.user, "public_flags", None)
         is_suspected_spammer = bool(getattr(public_flags, "spammer", False)) if public_flags else False
-        debug_lines.append(f"[QuizRisk] spammer_flag={is_suspected_spammer}")
         if is_suspected_spammer:
             reasons.append("账号被系统标记为可疑/疑似垃圾账号")
-            debug_lines.append("[QuizRisk] hit=spammer")
-
-        debug_lines.append(f"[QuizRisk] reasons={reasons if reasons else 'none'}")
-        print("\n".join(debug_lines))
 
         return reasons
-
-    async def _get_mutual_guild_count_with_owner(self, user_id: int, owner_id: int | None, debug_lines: list[str]):
-        """统计“用户与服主”共同所在服务器数；无法可靠判断时返回 None。"""
-        if not owner_id:
-            debug_lines.append("[QuizRisk] owner_id_missing=True")
-            return None
-
-        if not getattr(self.cog.bot.intents, "members", False):
-            debug_lines.append("[QuizRisk] members_intent=False")
-            return None
-
-        mutual_count = 0
-        owner_visible = False
-        for guild in self.cog.bot.guilds:
-            owner_member = guild.get_member(owner_id)
-            if not owner_member:
-                try:
-                    owner_member = await guild.fetch_member(owner_id)
-                    debug_lines.append(f"[QuizRisk] guild={guild.id} owner_source=fetch")
-                except (discord.NotFound, discord.Forbidden):
-                    debug_lines.append(f"[QuizRisk] guild={guild.id} owner_source=none")
-                    continue
-                except discord.HTTPException as e:
-                    debug_lines.append(f"[QuizRisk] guild={guild.id} owner_fetch_error={e}")
-                    continue
-            else:
-                debug_lines.append(f"[QuizRisk] guild={guild.id} owner_source=cache")
-
-            owner_visible = True
-            user_member = guild.get_member(user_id)
-            if not user_member:
-                try:
-                    user_member = await guild.fetch_member(user_id)
-                    debug_lines.append(f"[QuizRisk] guild={guild.id} user_source=fetch")
-                except (discord.NotFound, discord.Forbidden):
-                    debug_lines.append(f"[QuizRisk] guild={guild.id} user_source=none")
-                    user_member = None
-                except discord.HTTPException as e:
-                    debug_lines.append(f"[QuizRisk] guild={guild.id} user_fetch_error={e}")
-                    user_member = None
-            else:
-                debug_lines.append(f"[QuizRisk] guild={guild.id} user_source=cache")
-
-            if user_member:
-                mutual_count += 1
-                debug_lines.append(f"[QuizRisk] guild={guild.id} counted=True")
-            else:
-                debug_lines.append(f"[QuizRisk] guild={guild.id} counted=False")
-
-        if not owner_visible:
-            debug_lines.append("[QuizRisk] owner_visible=False")
-            return None
-
-        return mutual_count
 
     @discord.ui.button(label="📝 点击开始答题", style=discord.ButtonStyle.success, custom_id="quiz_entry_start")
     async def start_quiz(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -123,13 +46,11 @@ class QuizStartView(discord.ui.View):
         if has_newbie or has_hatched:
             return await interaction.followup.send("你已经是新兵蛋子或正式成员啦，不需要再答题咯！", ephemeral=True)
 
-        risk_reasons = await self._collect_risk_reasons(interaction)
+        risk_reasons = self._collect_risk_reasons(interaction)
         if risk_reasons:
             reason_text = "\n".join(f"• {reason}" for reason in risk_reasons)
             return await interaction.followup.send(
-                "⚠️ 当前账号暂不满足自助答题条件：\n"
-                f"{reason_text}\n\n"
-                "请先在社区正常活跃一段时间，再联系管理员进行人工核验。",
+                f"⚠️ 当前账号暂不满足自助答题条件：\n{reason_text}",
                 ephemeral=True,
             )
 
