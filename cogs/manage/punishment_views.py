@@ -89,7 +89,7 @@ class ManagementControlView(ui.View):
         elif self.selected_user_id: info = f"ID: `{self.selected_user_id}`"
         else: info = "🔴 **未选择**"
         embed.add_field(name="1. 目标", value=info, inline=True)
-        act_map = {"warn": "⚠️ 警告", "mute": "🤐 禁言", "ad": "📢 广告", "kick": "🚀 踢出", "ban": "🚫 封禁", "unmute": "🎤 解禁", "unban": "🔓 解封"}
+        act_map = {"warn": "⚠️ 警告", "mute": "🤐 禁言", "kick": "🚀 踢出", "ban": "🚫 封禁", "unmute": "🎤 解禁", "unban": "🔓 解封"}
         embed.add_field(name="2. 动作", value=act_map.get(self.action_type, "⚪ **未选择**"), inline=True)
         link_only_count = len([link for link in self.evidence_links if link not in self.attachment_urls])
         desc = f"> **理由:** {self.reason}\n"
@@ -119,7 +119,6 @@ class ManagementControlView(ui.View):
         options=[
             discord.SelectOption(label="警告 (Warn)", value="warn", emoji="⚠️"),
             discord.SelectOption(label="禁言 (Mute)", value="mute", emoji="🤐"),
-            discord.SelectOption(label="广告 (Ad)", value="ad", emoji="📢"),
             discord.SelectOption(label="踢出 (Kick)", value="kick", emoji="🚀"),
             discord.SelectOption(label="封禁 (Ban)", value="ban", emoji="🚫"),
             discord.SelectOption(label="解除禁言", value="unmute", emoji="🎤"),
@@ -176,24 +175,6 @@ class ManagementControlView(ui.View):
                     await member.timeout(discord.utils.utcnow() + datetime.timedelta(seconds=secs), reason=self.reason)
                 else:
                     raise ValueError("用户不存在或时长无效")
-            elif act == "ad":
-                msg_act, color = "广告清理", 0xFF8800
-                if member:
-                    roles_to_remove = [r for r in member.roles if r != guild.default_role]
-                    if roles_to_remove:
-                        await member.remove_roles(*roles_to_remove, reason=self.reason)
-                else:
-                    raise ValueError("用户不存在")
-                cleanup_stats = (0, 0, 0, 0, 0)
-                punishment_cog = interaction.client.get_cog("处罚系统") or interaction.client.get_cog("PunishmentCog")
-                if punishment_cog and hasattr(punishment_cog, "_cleanup_ad_messages"):
-                    cleanup_stats = await punishment_cog._cleanup_ad_messages(
-                        guild=guild,
-                        user_id=tid,
-                        reason=self.reason
-                    )
-                else:
-                    raise ValueError("未找到处罚模块，无法执行跨频道广告清理")
             elif act == "kick":
                 msg_act, color = "踢出", 0xFF0000
                 if member: await member.kick(reason=self.reason)
@@ -211,7 +192,7 @@ class ManagementControlView(ui.View):
 
             # --- 数据库记录 ---
             new_count = db.get_strikes(tid)
-            if act in ["warn", "mute", "ad", "kick", "ban"]:
+            if act in ["warn", "mute", "kick", "ban"]:
                 new_count = db.add_strike(tid)
 
             # --- 文件准备 ---
@@ -242,17 +223,6 @@ class ManagementControlView(ui.View):
                 log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
                 if act == "mute":
                     log_embed.add_field(name="时长", value=self.duration_str, inline=True)
-                if act == "ad":
-                    deleted_count, attempted_count, tracked_count, fallback_deleted, fallback_scanned = cleanup_stats
-                    log_embed.add_field(
-                        name="清理结果",
-                        value=(
-                            f"已删 {deleted_count} 条 / 命中 {attempted_count} 条 / 缓存记录 {tracked_count} 条\n"
-                            f"兜底扫描命中 {fallback_deleted} 条 / 扫描用户消息 {fallback_scanned} 条"
-                        ),
-                        inline=False
-                    )
-
                 link_only_urls = [link for link in self.evidence_links if link not in self.attachment_urls]
                 if link_only_urls:
                     log_embed.add_field(name="外部链接", value="\n".join(link_only_urls), inline=False)
@@ -264,16 +234,7 @@ class ManagementControlView(ui.View):
                 await log_chan.send(embed=log_embed, view=log_view, files=files_for_log)
 
             # --- 3. 反馈与清理 ---
-            if act == "ad":
-                deleted_count, attempted_count, tracked_count, fallback_deleted, fallback_scanned = cleanup_stats
-                await interaction.followup.send(
-                    "✅ 执行成功！已发送公示与日志。\n"
-                    f"🧹 清理统计：已删 {deleted_count} 条 / 命中 {attempted_count} 条 / 缓存记录 {tracked_count} 条 / "
-                    f"兜底命中 {fallback_deleted} 条。",
-                    ephemeral=True
-                )
-            else:
-                await interaction.followup.send("✅ 执行成功！已发送公示与日志。", ephemeral=True)
+            await interaction.followup.send("✅ 执行成功！已发送公示与日志。", ephemeral=True)
             self.clear_items()
             original_msg = await interaction.original_response()
             fin_embed = original_msg.embeds[0]
