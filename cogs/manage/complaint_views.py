@@ -75,6 +75,19 @@ class ComplaintSubmitModal(ui.Modal):
         except Exception as e:
             return await interaction.followup.send(f"❌ 创建投诉工单失败: {e}", ephemeral=True)
 
+        # 私密帖子由机器人创建时，需显式把投诉人加入子区。
+        try:
+            await thread.add_user(interaction.user)
+        except Exception as e:
+            try:
+                await thread.delete(reason="投诉工单创建回滚：无法将投诉人加入子区")
+            except Exception:
+                pass
+            return await interaction.followup.send(
+                f"❌ 无法将你加入投诉子区，工单已回滚：{e}",
+                ephemeral=True,
+            )
+
         detail_embed = discord.Embed(title="📌 投诉详情", color=0xF5A623)
         detail_embed.add_field(name="投诉人", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=True)
         detail_embed.add_field(name="工单号", value=f"`{thread.id}`", inline=True)
