@@ -47,6 +47,25 @@ class PunishmentDB:
         self.conn.commit()
         return self.get_strikes(user_id)
 
+    def remove_strike(self, user_id: int):
+        current = self.get_strikes(user_id)
+        new_count = max(0, current - 1)
+        if current == 0:
+            return 0
+
+        self.cursor.execute(
+            """
+            INSERT INTO strikes (user_id, count, last_updated)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+            count = excluded.count,
+            last_updated = excluded.last_updated
+            """,
+            (user_id, new_count, datetime.datetime.now()),
+        )
+        self.conn.commit()
+        return new_count
+
     def get_strikes(self, user_id: int) -> int:
         self.cursor.execute("SELECT count FROM strikes WHERE user_id = ?", (user_id,))
         res = self.cursor.fetchone()

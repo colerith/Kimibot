@@ -54,6 +54,9 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
         try:
             if action == "warn":
+                if not member:
+                    raise ValueError("用户不在服务器内，无法执行警告")
+
                 if member:
                     try:
                         dm_embed = discord.Embed(
@@ -64,6 +67,45 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                         await member.send(embed=dm_embed)
                     except discord.Forbidden:
                         pass
+
+                strike = db.add_strike(target_id)
+                linked_action = "无"
+                try:
+                    if strike == 1:
+                        await member.timeout(
+                            discord.utils.utcnow() + datetime.timedelta(days=1),
+                            reason=reason,
+                        )
+                        linked_action = "禁言 1 天"
+                    elif strike == 2:
+                        await member.timeout(
+                            discord.utils.utcnow() + datetime.timedelta(days=7),
+                            reason=reason,
+                        )
+                        linked_action = "禁言 7 天"
+                    elif strike >= 3:
+                        await guild.ban(discord.Object(id=target_id), reason=reason)
+                        linked_action = "永久封禁"
+                except (discord.Forbidden, discord.HTTPException, ValueError) as linked_err:
+                    linked_action = f"自动处罚失败: {linked_err}"
+
+                return {
+                    "ok": True,
+                    "target_id": target_id,
+                    "member": member,
+                    "strike": strike,
+                    "linked_action": linked_action,
+                }
+
+            elif action == "unwarn":
+                strike = db.remove_strike(target_id)
+                return {
+                    "ok": True,
+                    "target_id": target_id,
+                    "member": member,
+                    "strike": strike,
+                    "linked_action": "仅撤销累计，不自动反向解除处罚",
+                }
 
             elif action == "mute":
                 if not member:
@@ -93,14 +135,13 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 raise ValueError("不支持的处罚动作")
 
             strike = db.get_strikes(target_id)
-            if action in {"warn", "mute", "kick", "ban"}:
-                strike = db.add_strike(target_id)
 
             return {
                 "ok": True,
                 "target_id": target_id,
                 "member": member,
                 "strike": strike,
+                "linked_action": "",
             }
 
         except (discord.Forbidden, discord.HTTPException, ValueError) as e:
@@ -162,7 +203,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         action: Option(
             str,
             "处罚动作",
-            choices=["warn", "mute", "kick", "ban", "unmute", "unban"],
+            choices=["warn", "unwarn", "mute", "kick", "ban", "unmute", "unban"],
         ),
         reason: Option(str, "处罚理由", required=False) = "违反社区规范",
         duration: Option(str, "禁言时长(仅 mute 生效，如 10m/1h/3d)", required=False) = "1h",
@@ -216,6 +257,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
         action_map = {
             "warn": "⚠️ 警告",
+            "unwarn": "✅ 撤销警告",
             "mute": "🤐 禁言",
             "kick": "🚀 踢出",
             "ban": "🚫 封禁",
@@ -224,6 +266,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         }
         color_map = {
             "warn": 0xFFAA00,
+            "unwarn": 0x66CC99,
             "mute": 0xFF5555,
             "kick": 0xFF0000,
             "ban": 0x000000,
@@ -251,6 +294,12 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             p_embed.description = f"**理由:**\n{reason}\n\n**目标列表:**\n{display_mentions}"
             if action == "mute":
                 p_embed.add_field(name="禁言时长", value=duration, inline=True)
+            if action in {"warn", "unwarn"}:
+                p_embed.add_field(
+                    name="累计说明",
+                    value="仅警告动作影响累计次数",
+                    inline=True,
+                )
             p_embed.set_footer(text="请大家遵守社区规范，共建良好环境。")
             p_embed.timestamp = discord.utils.utcnow()
             public_msg = await public_chan.send(embed=p_embed)
@@ -267,6 +316,17 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             )
             if action == "mute":
                 log_embed.add_field(name="时长", value=duration, inline=True)
+            if action == "warn":
+                linked_preview = [
+                    f"<@{item['target_id']}>: {item.get('linked_action') or '无'}"
+                    for item in success[:10]
+                ]
+                if linked_preview:
+                    log_embed.add_field(
+                        name="自动处罚结果",
+                        value="\n".join(linked_preview),
+                        inline=False,
+                    )
 
             success_list = [f"<@{item['target_id']}>" for item in success]
             failed_list = [f"`{item['target_id']}`: {item['error']}" for item in failed]

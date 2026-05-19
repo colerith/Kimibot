@@ -89,7 +89,15 @@ class ManagementControlView(ui.View):
         elif self.selected_user_id: info = f"ID: `{self.selected_user_id}`"
         else: info = "🔴 **未选择**"
         embed.add_field(name="1. 目标", value=info, inline=True)
-        act_map = {"warn": "⚠️ 警告", "mute": "🤐 禁言", "kick": "🚀 踢出", "ban": "🚫 封禁", "unmute": "🎤 解禁", "unban": "🔓 解封"}
+        act_map = {
+            "warn": "⚠️ 警告",
+            "unwarn": "✅ 撤销警告",
+            "mute": "🤐 禁言",
+            "kick": "🚀 踢出",
+            "ban": "🚫 封禁",
+            "unmute": "🎤 解禁",
+            "unban": "🔓 解封",
+        }
         embed.add_field(name="2. 动作", value=act_map.get(self.action_type, "⚪ **未选择**"), inline=True)
         link_only_count = len([link for link in self.evidence_links if link not in self.attachment_urls])
         desc = f"> **理由:** {self.reason}\n"
@@ -97,7 +105,12 @@ class ManagementControlView(ui.View):
         desc += f"> **证据:** {len(self.attachments)} 个附件, {link_only_count} 个链接"
         if self.selected_user_id:
             current_strikes = db.get_strikes(self.selected_user_id)
-            desc += f"\n> **历史违规:** {current_strikes} 次 (本次将+1)"
+            if self.action_type == "warn":
+                desc += f"\n> **警告累计:** {current_strikes} 次 (本次将+1)"
+            elif self.action_type == "unwarn":
+                desc += f"\n> **警告累计:** {current_strikes} 次 (本次将-1，最低0)"
+            else:
+                desc += f"\n> **警告累计:** {current_strikes} 次 (仅警告/撤销警告会变更)"
         embed.add_field(name="配置详情", value=desc, inline=False)
         embed.set_footer(text=temp_notify or "请按顺序选择目标和动作...")
         try:
@@ -118,6 +131,7 @@ class ManagementControlView(ui.View):
         placeholder="🔨 选择动作...", row=1, custom_id="sel_act",
         options=[
             discord.SelectOption(label="警告 (Warn)", value="warn", emoji="⚠️"),
+            discord.SelectOption(label="撤销警告 (Unwarn)", value="unwarn", emoji="✅"),
             discord.SelectOption(label="禁言 (Mute)", value="mute", emoji="🤐"),
             discord.SelectOption(label="踢出 (Kick)", value="kick", emoji="🚀"),
             discord.SelectOption(label="封禁 (Ban)", value="ban", emoji="🚫"),
@@ -157,7 +171,11 @@ class ManagementControlView(ui.View):
         try:
             # --- Discord 操作 ---
             msg_act, color = "", 0x999999
+            linked_action = ""
             if act == "warn":
+                if not member:
+                    raise ValueError("用户不在服务器内，无法执行警告")
+
                 msg_act, color = "进行警告", 0xFFAA00
                 if member:
                     try:
@@ -168,6 +186,34 @@ class ManagementControlView(ui.View):
                         await member.send(embed=dm_embed, files=dm_files)
                     except (discord.Forbidden, IndexError):
                         pass # 无法私信或无附件
+
+                new_count = db.add_strike(tid)
+                try:
+                    if new_count == 1:
+                        await member.timeout(
+                            discord.utils.utcnow() + datetime.timedelta(days=1),
+                            reason=self.reason,
+                        )
+                        linked_action = "禁言 1 天"
+                    elif new_count == 2:
+                        await member.timeout(
+                            discord.utils.utcnow() + datetime.timedelta(days=7),
+                            reason=self.reason,
+                        )
+                        linked_action = "禁言 7 天"
+                    elif new_count >= 3:
+                        await guild.ban(discord.Object(id=tid), reason=self.reason)
+                        linked_action = "永久封禁"
+                    else:
+                        linked_action = "无"
+                except (discord.Forbidden, discord.HTTPException, ValueError) as linked_err:
+                    linked_action = f"自动处罚失败: {linked_err}"
+
+            elif act == "unwarn":
+                msg_act, color = "撤销警告", 0x66CC99
+                new_count = db.remove_strike(tid)
+                linked_action = "仅撤销累计，不自动反向解除处罚"
+
             elif act == "mute":
                 msg_act, color = f"禁言 ({self.duration_str})", 0xFF5555
                 secs = parse_duration(self.duration_str)
@@ -191,9 +237,8 @@ class ManagementControlView(ui.View):
                 await guild.unban(discord.Object(id=tid), reason=self.reason)
 
             # --- 数据库记录 ---
-            new_count = db.get_strikes(tid)
-            if act in ["warn", "mute", "kick", "ban"]:
-                new_count = db.add_strike(tid)
+            if act not in ["warn", "unwarn"]:
+                new_count = db.get_strikes(tid)
 
             # --- 文件准备 ---
             files_for_pub = [await att.to_file(spoiler=True) for att in self.attachments]
@@ -207,6 +252,8 @@ class ManagementControlView(ui.View):
                 p_embed = discord.Embed(title=f"🚨 违规公示 | {msg_act}", color=color)
                 p_embed.add_field(name="违规者", value=f"<@{tid}> (`{user_obj.name}`)", inline=True)
                 p_embed.add_field(name="累计违规", value=f"**{new_count}** 次", inline=True)
+                if act == "warn" and linked_action:
+                    p_embed.add_field(name="自动处罚", value=linked_action, inline=True)
                 p_embed.description = f"**理由:**\n{self.reason}"
                 p_embed.set_footer(text="请大家遵守社区规范，共建良好环境。")
                 p_embed.timestamp = discord.utils.utcnow()
@@ -223,6 +270,8 @@ class ManagementControlView(ui.View):
                 log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
                 if act == "mute":
                     log_embed.add_field(name="时长", value=self.duration_str, inline=True)
+                if act in {"warn", "unwarn"} and linked_action:
+                    log_embed.add_field(name="自动处罚/说明", value=linked_action, inline=False)
                 link_only_urls = [link for link in self.evidence_links if link not in self.attachment_urls]
                 if link_only_urls:
                     log_embed.add_field(name="外部链接", value="\n".join(link_only_urls), inline=False)
