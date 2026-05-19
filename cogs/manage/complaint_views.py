@@ -4,7 +4,6 @@ from discord import ui
 from config import IDS
 
 DEFAULT_NOTICE = (
-    "### ⚠️ 投诉须知\n\n"
     "1. 受理范围：本社区相关 & 跨平台「商业化红线」\n"
     "原则上，本社区仅受理发生在**社区内**的违规行为，不处理社区外的争议，请勿引入外部社区纠纷。\n"
     "**__【红线特例】__**\n"
@@ -114,7 +113,7 @@ class ComplaintPanelView(ui.View):
 
 class EditComplaintNoticeModal(ui.Modal):
     def __init__(self, cog, panel_message: discord.Message, current_notice: str):
-        super().__init__(title="📝 编辑投诉面板文案")
+        super().__init__(title="✒️ 编辑投诉面板文案")
         self.cog = cog
         self.panel_message = panel_message
         self.add_item(
