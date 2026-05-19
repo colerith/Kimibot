@@ -1,8 +1,10 @@
 import json
+import asyncio
 from pathlib import Path
 
 import discord
 from discord.ext import commands
+from discord import Option
 
 from ..shared.utils import is_super_egg
 from .complaint_views import (
@@ -76,6 +78,13 @@ class ComplaintCog(commands.Cog, name="投诉面板"):
         view = ComplaintPanelView()
         await message.edit(embed=embed, view=view)
 
+    def _is_complaint_thread(self, channel: discord.abc.GuildChannel):
+        if not isinstance(channel, discord.Thread):
+            return False
+
+        parent_id = getattr(channel, "parent_id", None) or getattr(getattr(channel, "parent", None), "id", None)
+        return parent_id == PANEL_CHANNEL_ID
+
     async def ensure_panel(self):
         channel = self.bot.get_channel(PANEL_CHANNEL_ID)
         if channel is None:
@@ -133,3 +142,49 @@ class ComplaintCog(commands.Cog, name="投诉面板"):
         await ctx.defer(ephemeral=True)
         await self.ensure_panel()
         await ctx.followup.send("✅ 已刷新投诉面板。", ephemeral=True)
+
+    @discord.slash_command(name="投诉归档", description="关闭当前投诉工单（10秒倒计时）")
+    @is_super_egg()
+    async def archive_complaint_ticket(
+        self,
+        ctx: discord.ApplicationContext,
+        reason: Option(str, "关闭理由（可选）", required=False, default="无"), # pyright: ignore[reportInvalidTypeForm]
+    ):
+        channel = ctx.channel
+        if not self._is_complaint_thread(channel):
+            return await ctx.respond("❌ 该命令仅可在投诉工单帖子中使用。", ephemeral=True)
+
+        if getattr(channel, "archived", False):
+            return await ctx.respond("ℹ️ 该投诉工单已归档。", ephemeral=True)
+
+        close_reason = reason.strip() if reason else "无"
+        operator = f"{ctx.author.mention} (`{ctx.author.id}`)"
+
+        await ctx.respond("✅ 已开始归档流程，将在 10 秒后关闭该投诉工单。", ephemeral=True)
+
+        countdown_msg = await channel.send(
+            f"📦 该投诉工单将由 {operator} 关闭。\n"
+            f"关闭理由：{close_reason}\n"
+            "⏳ 10 秒后自动归档并锁定..."
+        )
+
+        for seconds_left in range(9, 0, -1):
+            await asyncio.sleep(1)
+            try:
+                await countdown_msg.edit(
+                    content=(
+                        f"📦 该投诉工单将由 {operator} 关闭。\n"
+                        f"关闭理由：{close_reason}\n"
+                        f"⏳ {seconds_left} 秒后自动归档并锁定..."
+                    )
+                )
+            except discord.HTTPException:
+                pass
+
+        await asyncio.sleep(1)
+        try:
+            await channel.edit(archived=True, locked=True, reason=f"投诉归档: {close_reason}")
+        except discord.Forbidden:
+            return await channel.send("❌ 归档失败：机器人缺少管理帖子权限。")
+        except discord.HTTPException as e:
+            return await channel.send(f"❌ 归档失败：{e}")

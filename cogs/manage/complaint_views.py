@@ -5,7 +5,7 @@ from config import IDS
 
 DEFAULT_NOTICE = (
     "1. 受理范围：本社区相关 & 跨平台「商业化红线」\n"
-    "原则上，本社区仅受理发生在**社区内**的违规行为，不处理社区外的争议，请勿引入外部社区纠纷。\n"
+    "原则上，本社区仅受理发生在**社区内**的违规行为，不处理社区外的争议，请勿引入外部社区纠纷。\n\n"
     "**__【红线特例】__**\n"
     "若本社区成员在其他平台涉及商业化行为（如贩卖/倒卖 API、利用 SillyTavern 进行商业盈利等），此为最高红线。\n"
     "只要证据确凿，一律受理并直接予以封禁。\n\n"
@@ -120,7 +120,7 @@ class EditComplaintNoticeModal(ui.Modal):
             ui.InputText(
                 label="投诉须知文案",
                 style=discord.InputTextStyle.paragraph,
-                default=current_notice,
+                value=current_notice,
                 required=True,
                 max_length=2000,
             )
