@@ -131,6 +131,38 @@ class ManagementControlView(ui.View):
         return interaction.client.get_cog("处罚系统") or interaction.client.get_cog("PunishmentCog")
 
     @staticmethod
+    async def _resolve_sendable_channel(guild: discord.Guild, channel_id: int | None):
+        if not channel_id:
+            return None
+
+        channel = guild.get_thread(channel_id) or guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return None
+
+        if hasattr(channel, "send"):
+            return channel
+        return None
+
+    @staticmethod
+    def _clone_discord_file(src: discord.File):
+        try:
+            src.fp.seek(0)
+        except Exception:
+            pass
+
+        data = src.fp.read()
+
+        try:
+            src.fp.seek(0)
+        except Exception:
+            pass
+
+        return discord.File(io.BytesIO(data), filename=src.filename, spoiler=src.spoiler)
+
+    @staticmethod
     def get_strike_status_text(strikes: int):
         if strikes <= 0:
             return "无记录 (下次警告: 禁言 1 天)"
@@ -414,15 +446,10 @@ class ManagementControlView(ui.View):
             color = color_map.get(act, 0x999999)
 
             files_for_pub = [await att.to_file(spoiler=True) for att in self.attachments]
-            files_for_log = [
-                discord.File(io.BytesIO(f.fp.getvalue()), filename=f.filename, spoiler=f.spoiler)
-                for f in files_for_pub
-            ]
-            for f in files_for_pub:
-                f.fp.seek(0)
+            files_for_log = [self._clone_discord_file(f) for f in files_for_pub]
 
             public_msg = None
-            public_chan = guild.get_channel(self.public_channel_id)
+            public_chan = await self._resolve_sendable_channel(guild, self.public_channel_id)
             if public_chan and success:
                 success_mentions = [f"<@{item['target_id']}>" for item in success]
                 display_mentions = "\n".join(success_mentions[:20])
@@ -445,45 +472,53 @@ class ManagementControlView(ui.View):
                 p_embed.timestamp = discord.utils.utcnow()
                 public_msg = await public_chan.send(embed=p_embed, files=files_for_pub)
 
-            log_chan = guild.get_channel(self.log_channel_id)
+            log_chan = await self._resolve_sendable_channel(guild, self.log_channel_id)
+            log_error = None
             if log_chan:
-                log_embed = discord.Embed(title=f"🛡️ 管理执行日志: BATCH-{act.upper()}", color=color)
-                log_embed.description = f"**理由:** {self.reason}"
-                log_embed.add_field(name="执行人 (Executor)", value=interaction.user.mention, inline=True)
-                log_embed.add_field(
-                    name="结果统计",
-                    value=f"成功 {len(success)} / 失败 {len(failed)} / 总计 {len(target_ids)}",
-                    inline=True,
-                )
-                if act == "mute":
-                    log_embed.add_field(name="时长", value=self.duration_str, inline=True)
-                if act == "warn":
-                    linked_preview = [
-                        f"<@{item['target_id']}>: {item.get('linked_action') or '无'}"
-                        for item in success[:10]
-                    ]
-                    if linked_preview:
-                        log_embed.add_field(name="自动处罚结果", value="\n".join(linked_preview), inline=False)
+                try:
+                    log_embed = discord.Embed(title=f"🛡️ 管理执行日志: BATCH-{act.upper()}", color=color)
+                    log_embed.description = f"**理由:** {self.reason}"
+                    log_embed.add_field(name="执行人 (Executor)", value=interaction.user.mention, inline=True)
+                    log_embed.add_field(
+                        name="结果统计",
+                        value=f"成功 {len(success)} / 失败 {len(failed)} / 总计 {len(target_ids)}",
+                        inline=True,
+                    )
+                    if act == "mute":
+                        log_embed.add_field(name="时长", value=self.duration_str, inline=True)
+                    if act == "warn":
+                        linked_preview = [
+                            f"<@{item['target_id']}>: {item.get('linked_action') or '无'}"
+                            for item in success[:10]
+                        ]
+                        if linked_preview:
+                            log_embed.add_field(name="自动处罚结果", value="\n".join(linked_preview), inline=False)
 
-                success_list = [f"<@{item['target_id']}>" for item in success]
-                failed_list = [f"`{item['target_id']}`: {item['error']}" for item in failed]
+                    success_list = [f"<@{item['target_id']}>" for item in success]
+                    failed_list = [f"`{item['target_id']}`: {item['error']}" for item in failed]
 
-                if success_list:
-                    text = "\n".join(success_list[:20])
-                    if len(success_list) > 20:
-                        text += f"\n... 以及其余 {len(success_list) - 20} 人"
-                    log_embed.add_field(name="成功目标", value=text, inline=False)
+                    if success_list:
+                        text = "\n".join(success_list[:20])
+                        if len(success_list) > 20:
+                            text += f"\n... 以及其余 {len(success_list) - 20} 人"
+                        log_embed.add_field(name="成功目标", value=text, inline=False)
 
-                if failed_list:
-                    text = "\n".join(failed_list[:10])
-                    if len(failed_list) > 10:
-                        text += f"\n... 以及其余 {len(failed_list) - 10} 条失败"
-                    log_embed.add_field(name="失败详情", value=text, inline=False)
+                    if failed_list:
+                        text = "\n".join(failed_list[:10])
+                        if len(failed_list) > 10:
+                            text += f"\n... 以及其余 {len(failed_list) - 10} 条失败"
+                        log_embed.add_field(name="失败详情", value=text, inline=False)
 
-                log_view = ui.View()
-                if public_msg:
-                    log_view.add_item(ui.Button(label="查看公示", url=public_msg.jump_url, style=discord.ButtonStyle.link))
-                await log_chan.send(embed=log_embed, view=log_view, files=files_for_log)
+                    log_view = ui.View()
+                    if public_msg:
+                        log_view.add_item(ui.Button(label="查看公示", url=public_msg.jump_url, style=discord.ButtonStyle.link))
+                    await log_chan.send(embed=log_embed, view=log_view, files=files_for_log)
+                except discord.HTTPException as e:
+                    log_error = str(e)
+                except Exception as e:
+                    log_error = str(e)
+            else:
+                log_error = f"找不到日志频道/线程: {self.log_channel_id}"
 
             summary = [
                 f"✅ 批量处罚执行完成：**{act_label}**",
@@ -495,6 +530,8 @@ class ManagementControlView(ui.View):
                 fail_lines = [f"`{item['target_id']}`: {item['error']}" for item in failed[:8]]
                 summary.append("\n失败示例：\n" + "\n".join(fail_lines))
 
+            if log_error:
+                summary.append(f"\n⚠️ 日志发送失败: {log_error}")
             await interaction.followup.send("\n".join(summary), ephemeral=True)
             self.clear_items()
             original_msg = await interaction.original_response()
@@ -583,12 +620,11 @@ class ManagementControlView(ui.View):
 
             # --- 文件准备 ---
             files_for_pub = [await att.to_file(spoiler=True) for att in self.attachments]
-            files_for_log = [discord.File(io.BytesIO(f.fp.getvalue()), filename=f.filename, spoiler=f.spoiler) for f in files_for_pub]
-            [f.fp.seek(0) for f in files_for_pub]
+            files_for_log = [self._clone_discord_file(f) for f in files_for_pub]
 
             # --- 1. 发送公开公示 ---
             public_msg, user_obj = None, member or self.selected_user or await self.ctx.bot.fetch_user(tid)
-            public_chan = guild.get_channel(self.public_channel_id)
+            public_chan = await self._resolve_sendable_channel(guild, self.public_channel_id)
             if public_chan:
                 p_embed = discord.Embed(title=f"🚨 违规公示 | {msg_act}", color=color)
                 p_embed.add_field(name="违规者", value=f"<@{tid}> (`{user_obj.name}`)", inline=True)
@@ -603,28 +639,39 @@ class ManagementControlView(ui.View):
                 public_msg = await public_chan.send(embed=p_embed, files=files_for_pub)
 
             # --- 2. 发送内部日志 (常规 Embed 样式) ---
-            log_chan = guild.get_channel(self.log_channel_id)
+            log_chan = await self._resolve_sendable_channel(guild, self.log_channel_id)
+            log_error = None
             if log_chan:
-                log_embed = discord.Embed(title=f"🛡️ 管理执行日志: {act.upper()}", color=color)
-                log_embed.description = f"**理由:** {self.reason}"
-                log_embed.add_field(name="执行人 (Executor)", value=interaction.user.mention, inline=True)
-                log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
-                if act == "mute":
-                    log_embed.add_field(name="时长", value=self.duration_str, inline=True)
-                if act in {"warn", "unwarn"} and linked_action:
-                    log_embed.add_field(name="自动处罚/说明", value=linked_action, inline=False)
-                link_only_urls = [link for link in self.evidence_links if link not in self.attachment_urls]
-                if link_only_urls:
-                    log_embed.add_field(name="外部链接", value="\n".join(link_only_urls), inline=False)
+                try:
+                    log_embed = discord.Embed(title=f"🛡️ 管理执行日志: {act.upper()}", color=color)
+                    log_embed.description = f"**理由:** {self.reason}"
+                    log_embed.add_field(name="执行人 (Executor)", value=interaction.user.mention, inline=True)
+                    log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
+                    if act == "mute":
+                        log_embed.add_field(name="时长", value=self.duration_str, inline=True)
+                    if act in {"warn", "unwarn"} and linked_action:
+                        log_embed.add_field(name="自动处罚/说明", value=linked_action, inline=False)
+                    link_only_urls = [link for link in self.evidence_links if link not in self.attachment_urls]
+                    if link_only_urls:
+                        log_embed.add_field(name="外部链接", value="\n".join(link_only_urls), inline=False)
 
-                log_view = ui.View()
-                if public_msg:
-                    log_view.add_item(ui.Button(label="查看公示", url=public_msg.jump_url, style=discord.ButtonStyle.link))
+                    log_view = ui.View()
+                    if public_msg:
+                        log_view.add_item(ui.Button(label="查看公示", url=public_msg.jump_url, style=discord.ButtonStyle.link))
 
-                await log_chan.send(embed=log_embed, view=log_view, files=files_for_log)
+                    await log_chan.send(embed=log_embed, view=log_view, files=files_for_log)
+                except discord.HTTPException as e:
+                    log_error = str(e)
+                except Exception as e:
+                    log_error = str(e)
+            else:
+                log_error = f"找不到日志频道/线程: {self.log_channel_id}"
 
             # --- 3. 反馈与清理 ---
-            await interaction.followup.send("✅ 执行成功！已发送公示与日志。", ephemeral=True)
+            if log_error:
+                await interaction.followup.send(f"✅ 执行成功，但日志发送失败：{log_error}", ephemeral=True)
+            else:
+                await interaction.followup.send("✅ 执行成功！已发送公示与日志。", ephemeral=True)
             self.clear_items()
             original_msg = await interaction.original_response()
             fin_embed = original_msg.embeds[0]
