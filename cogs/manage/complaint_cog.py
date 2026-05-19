@@ -117,7 +117,7 @@ class ComplaintCog(commands.Cog, name="投诉面板"):
 
         await self.ensure_panel()
 
-    @discord.message_command(name="✏️编辑投诉面板文案")
+    @discord.message_command(name="✏编辑投诉面板文案")
     @is_super_egg()
     async def edit_panel_context(self, ctx: discord.ApplicationContext, message: discord.Message):
         if message.channel_id != PANEL_CHANNEL_ID or not self._is_panel_message(message):
