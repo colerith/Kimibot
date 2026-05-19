@@ -1,16 +1,15 @@
 # cogs/manage/punishment_cog.py
 
 import datetime
-import re
+import asyncio
 
 import discord
-from discord import Option
 from discord.ext import commands
 
 from config import IDS, STYLE
 from .punishment_db import db
 from .punishment_views import ManagementControlView
-from ..shared.utils import is_super_egg, parse_duration
+from ..shared.utils import is_super_egg
 
 PUBLIC_NOTICE_CHANNEL_ID = IDS.get("PUBLIC_NOTICE_CHANNEL_ID")
 LOG_CHANNEL_ID = IDS.get("LOG_CHANNEL_ID", 1468508677144055818)
@@ -20,22 +19,69 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
     def __init__(self, bot):
         self.bot = bot
         self.persistent_view = None
+        self.evidence_sessions = {}
 
-    @staticmethod
-    def _parse_user_ids(raw_text: str | None):
-        if not raw_text:
+    def _session_key(self, user_id: int, channel_id: int):
+        return (user_id, channel_id)
+
+    def get_evidence_session(self, user_id: int, channel_id: int):
+        return self.evidence_sessions.get(self._session_key(user_id, channel_id))
+
+    async def _expire_evidence_session(
+        self,
+        user_id: int,
+        channel_id: int,
+        expires_at: datetime.datetime,
+    ):
+        delay = max((expires_at - discord.utils.utcnow()).total_seconds(), 0)
+        try:
+            await asyncio.sleep(delay)
+            key = self._session_key(user_id, channel_id)
+            session = self.evidence_sessions.get(key)
+            if not session or session["expires_at"] != expires_at:
+                return
+            self.evidence_sessions.pop(key, None)
+            print(
+                f"[Punishment] evidence-session-expired: user={user_id} channel={channel_id} attachments={len(session['attachments'])}"
+            )
+        except asyncio.CancelledError:
+            pass
+
+    def start_evidence_session(self, user_id: int, channel_id: int, duration_seconds: int = 300):
+        key = self._session_key(user_id, channel_id)
+        old = self.evidence_sessions.pop(key, None)
+        if old and old.get("task"):
+            old["task"].cancel()
+
+        expires_at = discord.utils.utcnow() + datetime.timedelta(seconds=duration_seconds)
+        task = self.bot.loop.create_task(
+            self._expire_evidence_session(user_id, channel_id, expires_at)
+        )
+        self.evidence_sessions[key] = {
+            "attachments": [],
+            "message_ids": set(),
+            "expires_at": expires_at,
+            "task": task,
+        }
+        return expires_at
+
+    def finish_evidence_session(self, user_id: int, channel_id: int):
+        key = self._session_key(user_id, channel_id)
+        session = self.evidence_sessions.pop(key, None)
+        if not session:
             return []
+        if session.get("task"):
+            session["task"].cancel()
+        return list(session["attachments"])
 
-        matches = re.findall(r"\d{15,20}", raw_text)
-        seen = set()
-        ordered_ids = []
-        for item in matches:
-            uid = int(item)
-            if uid in seen:
-                continue
-            seen.add(uid)
-            ordered_ids.append(uid)
-        return ordered_ids
+    def cancel_evidence_session(self, user_id: int, channel_id: int):
+        key = self._session_key(user_id, channel_id)
+        session = self.evidence_sessions.pop(key, None)
+        if not session:
+            return 0
+        if session.get("task"):
+            session["task"].cancel()
+        return len(session["attachments"])
 
     async def _apply_single_action(
         self,
@@ -165,26 +211,60 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
         print("[Punishment] Cog loaded and view registered (if persistent).")
 
+    def cog_unload(self):
+        for session in self.evidence_sessions.values():
+            task = session.get("task")
+            if task:
+                task.cancel()
+        self.evidence_sessions.clear()
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.attachments:
+            return
+
+        key = self._session_key(message.author.id, message.channel.id)
+        session = self.evidence_sessions.get(key)
+        if not session:
+            return
+
+        now = discord.utils.utcnow()
+        if now >= session["expires_at"]:
+            self.evidence_sessions.pop(key, None)
+            return
+
+        if message.id in session["message_ids"]:
+            return
+
+        session["message_ids"].add(message.id)
+
+        before_count = len(session["attachments"])
+        for att in message.attachments:
+            if att.url and any(saved.url == att.url for saved in session["attachments"]):
+                continue
+            session["attachments"].append(att)
+
+        collected = len(session["attachments"]) - before_count
+        if collected <= 0:
+            return
+
+        try:
+            await message.reply(
+                f"📎 已收纳 {collected} 个证据附件。可在处罚面板点击“完成收集”继续。",
+                mention_author=False,
+                delete_after=12,
+            )
+        except Exception:
+            pass
+
     @discord.slash_command(name="处罚", description="打开管理面板 (可上传证据)")
     @is_super_egg()
     async def punishment_panel(
         self,
         ctx: discord.ApplicationContext,
-        file1: Option(discord.Attachment, "证据1", required=False) = None,
-        file2: Option(discord.Attachment, "证据2", required=False) = None,
-        file3: Option(discord.Attachment, "证据3", required=False) = None,
-        file4: Option(discord.Attachment, "证据4", required=False) = None,
-        file5: Option(discord.Attachment, "证据5", required=False) = None,
-        file6: Option(discord.Attachment, "证据6", required=False) = None,
-        file7: Option(discord.Attachment, "证据7", required=False) = None,
-        file8: Option(discord.Attachment, "证据8", required=False) = None,
-        file9: Option(discord.Attachment, "证据9", required=False) = None,
     ):
-        files = [f for f in [file1, file2, file3, file4, file5, file6, file7, file8, file9] if f]
-
         view = ManagementControlView(
             ctx,
-            initial_files=files,
             public_channel_id=PUBLIC_NOTICE_CHANNEL_ID,
             log_channel_id=LOG_CHANNEL_ID,
         )
@@ -195,185 +275,3 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         )
         await view.refresh_view(ctx.interaction)
 
-    @discord.slash_command(name="批量处罚", description="一次对多个用户执行同一种处罚")
-    @is_super_egg()
-    async def batch_punishment(
-        self,
-        ctx: discord.ApplicationContext,
-        action: Option(
-            str,
-            "处罚动作",
-            choices=["warn", "unwarn", "mute", "kick", "ban", "unmute", "unban"],
-        ),
-        reason: Option(str, "处罚理由", required=False) = "违反社区规范",
-        duration: Option(str, "禁言时长(仅 mute 生效，如 10m/1h/3d)", required=False) = "1h",
-        id_text: Option(str, "输入多个ID或@提及（空格/逗号/换行分隔）", required=False) = None,
-        user1: Option(discord.User, "选择用户1", required=False) = None,
-        user2: Option(discord.User, "选择用户2", required=False) = None,
-        user3: Option(discord.User, "选择用户3", required=False) = None,
-        user4: Option(discord.User, "选择用户4", required=False) = None,
-        user5: Option(discord.User, "选择用户5", required=False) = None,
-    ):
-        await ctx.defer(ephemeral=True)
-        guild = ctx.guild
-        if not guild:
-            return await ctx.followup.send("❌ 无法在私信中使用。", ephemeral=True)
-
-        target_ids = {u.id for u in [user1, user2, user3, user4, user5] if u}
-        target_ids.update(self._parse_user_ids(id_text))
-
-        if not target_ids:
-            return await ctx.followup.send(
-                "❌ 请至少提供一个目标（用户选择器或ID文本）。",
-                ephemeral=True,
-            )
-
-        duration_secs = 0
-        if action == "mute":
-            duration_secs = parse_duration(duration or "")
-            if duration_secs <= 0:
-                return await ctx.followup.send(
-                    "❌ 禁言时长无效，请使用如 `10m` / `1h` / `3d`。",
-                    ephemeral=True,
-                )
-
-        sorted_targets = sorted(target_ids)
-        success = []
-        failed = []
-
-        for target_id in sorted_targets:
-            result = await self._apply_single_action(
-                guild=guild,
-                target_id=target_id,
-                action=action,
-                reason=reason,
-                duration_secs=duration_secs,
-            )
-
-            if result["ok"]:
-                success.append(result)
-            else:
-                failed.append(result)
-
-        action_map = {
-            "warn": "⚠️ 警告",
-            "unwarn": "✅ 撤销警告",
-            "mute": "🤐 禁言",
-            "kick": "🚀 踢出",
-            "ban": "🚫 封禁",
-            "unmute": "🎤 解除禁言",
-            "unban": "🔓 解封",
-        }
-        color_map = {
-            "warn": 0xFFAA00,
-            "unwarn": 0x66CC99,
-            "mute": 0xFF5555,
-            "kick": 0xFF0000,
-            "ban": 0x000000,
-            "unmute": 0x55FF55,
-            "unban": 0x00AAFF,
-        }
-        act_label = action_map.get(action, action)
-        color = color_map.get(action, 0x999999)
-
-        public_msg = None
-        public_chan = guild.get_channel(PUBLIC_NOTICE_CHANNEL_ID)
-        if public_chan and success:
-            success_mentions = [f"<@{item['target_id']}>" for item in success]
-            display_mentions = "\n".join(success_mentions[:20])
-            if len(success_mentions) > 20:
-                display_mentions += f"\n... 以及其余 {len(success_mentions) - 20} 人"
-
-            p_embed = discord.Embed(title=f"🚨 违规公示 | 批量{act_label}", color=color)
-            p_embed.add_field(
-                name="目标数量",
-                value=f"成功 **{len(success)}** / 总计 **{len(sorted_targets)}**",
-                inline=True,
-            )
-            p_embed.add_field(name="执行人", value=ctx.user.mention, inline=True)
-            p_embed.description = f"**理由:**\n{reason}\n\n**目标列表:**\n{display_mentions}"
-            if action == "mute":
-                p_embed.add_field(name="禁言时长", value=duration, inline=True)
-            if action in {"warn", "unwarn"}:
-                p_embed.add_field(
-                    name="累计说明",
-                    value="仅警告动作影响累计次数",
-                    inline=True,
-                )
-            p_embed.set_footer(text="请大家遵守社区规范，共建良好环境。")
-            p_embed.timestamp = discord.utils.utcnow()
-            public_msg = await public_chan.send(embed=p_embed)
-
-        log_chan = guild.get_channel(LOG_CHANNEL_ID)
-        if log_chan:
-            log_embed = discord.Embed(title=f"🛡️ 管理执行日志: BATCH-{action.upper()}", color=color)
-            log_embed.description = f"**理由:** {reason}"
-            log_embed.add_field(name="执行人 (Executor)", value=ctx.user.mention, inline=True)
-            log_embed.add_field(
-                name="结果统计",
-                value=f"成功 {len(success)} / 失败 {len(failed)} / 总计 {len(sorted_targets)}",
-                inline=True,
-            )
-            if action == "mute":
-                log_embed.add_field(name="时长", value=duration, inline=True)
-            if action == "warn":
-                linked_preview = [
-                    f"<@{item['target_id']}>: {item.get('linked_action') or '无'}"
-                    for item in success[:10]
-                ]
-                if linked_preview:
-                    log_embed.add_field(
-                        name="自动处罚结果",
-                        value="\n".join(linked_preview),
-                        inline=False,
-                    )
-
-            success_list = [f"<@{item['target_id']}>" for item in success]
-            failed_list = [f"`{item['target_id']}`: {item['error']}" for item in failed]
-
-            if success_list:
-                text = "\n".join(success_list[:20])
-                if len(success_list) > 20:
-                    text += f"\n... 以及其余 {len(success_list) - 20} 人"
-                log_embed.add_field(name="成功目标", value=text, inline=False)
-
-            if failed_list:
-                text = "\n".join(failed_list[:10])
-                if len(failed_list) > 10:
-                    text += f"\n... 以及其余 {len(failed_list) - 10} 条失败"
-                log_embed.add_field(name="失败详情", value=text, inline=False)
-
-            log_view = discord.ui.View()
-            if public_msg:
-                log_view.add_item(
-                    discord.ui.Button(
-                        label="查看公示",
-                        url=public_msg.jump_url,
-                        style=discord.ButtonStyle.link,
-                    )
-                )
-
-            await log_chan.send(embed=log_embed, view=log_view)
-
-        summary = [
-            f"✅ 批量处罚执行完成：**{act_label}**",
-            f"- 成功：{len(success)}",
-            f"- 失败：{len(failed)}",
-            f"- 总计：{len(sorted_targets)}",
-        ]
-
-        if failed:
-            fail_lines = [f"`{item['target_id']}`: {item['error']}" for item in failed[:8]]
-            summary.append("\n失败示例：\n" + "\n".join(fail_lines))
-
-        await ctx.followup.send("\n".join(summary), ephemeral=True)
-
-    @discord.slash_command(name="重置处罚", description="清空某用户的违规计数")
-    @is_super_egg()
-    async def reset_strikes(
-        self,
-        ctx: discord.ApplicationContext,
-        user: Option(discord.User, "选择用户"),
-    ):
-        db.reset_strikes(user.id)
-        await ctx.respond(f"✅ 已清空 {user.mention} 的所有违规计数。", ephemeral=True)

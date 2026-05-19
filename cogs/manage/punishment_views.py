@@ -4,6 +4,7 @@ import discord
 from discord import ui
 import datetime
 import io
+import re
 
 from config import STYLE
 from .punishment_db import db
@@ -31,20 +32,40 @@ class IDInputModal(ui.Modal):
         except Exception as e:
             await interaction.followup.send(f"❌ 查找用户时发生错误: {e}", ephemeral=True)
             return
+        self.view_ref.target_ids = [uid]
         await self.view_ref.refresh_view(interaction, temp_notify=msg)
 
-class EvidenceAppendModal(ui.Modal):
+class BatchTargetModal(ui.Modal):
     def __init__(self, view_ref):
-        super().__init__(title="📸 追加证据链接")
+        super().__init__(title="👥 批量目标")
         self.view_ref = view_ref
-        self.add_item(ui.InputText(
-            label="链接 (每行一个)", style=discord.InputTextStyle.paragraph, required=True))
+        self.add_item(
+            ui.InputText(
+                label="输入ID或@提及（空格/逗号/换行分隔）",
+                style=discord.InputTextStyle.paragraph,
+                required=True,
+            )
+        )
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        new_links = [line.strip() for line in self.children[0].value.strip().split('\n') if line.strip()]
-        self.view_ref.evidence_links.extend(new_links)
-        await self.view_ref.refresh_view(interaction, temp_notify=f"✅ 已追加 {len(new_links)} 条证据")
+        raw = self.children[0].value.strip()
+        ids = []
+        seen = set()
+        for item in re.findall(r"\d{15,20}", raw):
+            uid = int(item)
+            if uid in seen:
+                continue
+            seen.add(uid)
+            ids.append(uid)
+
+        if not ids:
+            return await interaction.followup.send("❌ 未解析到有效用户ID。", ephemeral=True)
+
+        self.view_ref.selected_user = None
+        self.view_ref.selected_user_id = None
+        self.view_ref.target_ids = ids
+        await self.view_ref.refresh_view(interaction, temp_notify=f"✅ 已载入 {len(ids)} 个批量目标")
 
 class ReasonInputModal(ui.Modal):
     def __init__(self, view_ref):
@@ -59,6 +80,37 @@ class ReasonInputModal(ui.Modal):
         self.view_ref.duration_str = self.children[1].value or "1h"
         await self.view_ref.refresh_view(interaction)
 
+
+class StrikeQueryModal(ui.Modal):
+    def __init__(self, view_ref):
+        super().__init__(title="🔎 警告查询")
+        self.view_ref = view_ref
+        self.add_item(
+            ui.InputText(
+                label="用户名 / 昵称 / ID / @提及",
+                placeholder="例如: 123456789012345678 或 某个用户名",
+                required=True,
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        query = self.children[0].value.strip()
+        member, user_id, error = await self.view_ref.resolve_user_query(interaction, query)
+        if error:
+            return await interaction.followup.send(f"❌ {error}", ephemeral=True)
+
+        strikes = db.get_strikes(user_id)
+        status_text = self.view_ref.get_strike_status_text(strikes)
+        display_name = member.display_name if member else f"用户 {user_id}"
+        mention_text = member.mention if member else f"`{user_id}`"
+
+        embed = discord.Embed(title="📊 警告状态查询", color=0x66CCFF)
+        embed.add_field(name="目标", value=f"{display_name}\n{mention_text}", inline=True)
+        embed.add_field(name="当前警告", value=f"**{strikes}/3**", inline=True)
+        embed.add_field(name="状态说明", value=status_text, inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 # --- 主视图 ---
 class ManagementControlView(ui.View):
     def __init__(self, ctx, initial_files=None, public_channel_id=None, log_channel_id=None, *, timeout=900):
@@ -70,11 +122,65 @@ class ManagementControlView(ui.View):
         self.attachment_urls = {f.url for f in self.attachments}
         self.evidence_links = [f.url for f in self.attachments]
         self.selected_user = None; self.selected_user_id = None
+        self.target_ids = []
         self.action_type = None; self.reason = "违反社区规范"; self.duration_str = "1h"
         self.update_components()
 
+    @staticmethod
+    def _get_punishment_cog(interaction: discord.Interaction):
+        return interaction.client.get_cog("处罚系统") or interaction.client.get_cog("PunishmentCog")
+
+    @staticmethod
+    def get_strike_status_text(strikes: int):
+        if strikes <= 0:
+            return "无记录 (下次警告: 禁言 1 天)"
+        if strikes == 1:
+            return "严重警告 (下次警告: 禁言 7 天)"
+        if strikes >= 2:
+            return "高危警告 (下次警告: 永久封禁)"
+        return "未知异常"
+
+    async def resolve_user_query(self, interaction: discord.Interaction, query: str):
+        guild = interaction.guild
+        if not guild:
+            return None, None, "无法在私信中查询"
+
+        id_matches = re.findall(r"\d{15,20}", query)
+        if id_matches:
+            target_id = int(id_matches[0])
+            member = guild.get_member(target_id)
+            if not member:
+                try:
+                    member = await guild.fetch_member(target_id)
+                except discord.NotFound:
+                    member = None
+                except Exception as e:
+                    return None, None, f"查询用户失败: {e}"
+            return member, target_id, None
+
+        q = query.lower()
+        candidates = []
+        for m in guild.members:
+            name = (m.name or "").lower()
+            display_name = (m.display_name or "").lower()
+            nick = (m.nick or "").lower() if hasattr(m, "nick") and m.nick else ""
+            if q == name or q == display_name or (nick and q == nick):
+                return m, m.id, None
+            if q in name or q in display_name or (nick and q in nick):
+                candidates.append(m)
+
+        if not candidates:
+            return None, None, "未找到匹配用户，请改用 ID 或 @提及"
+        if len(candidates) > 1:
+            preview = "\n".join([f"- {m.display_name} (`{m.id}`)" for m in candidates[:5]])
+            if len(candidates) > 5:
+                preview += f"\n- ... 以及其余 {len(candidates) - 5} 人"
+            return None, None, f"匹配到多个用户，请使用更精确关键词或ID:\n{preview}"
+        m = candidates[0]
+        return m, m.id, None
+
     def update_components(self):
-        can_exec = self.selected_user_id is not None and self.action_type is not None
+        can_exec = bool(self.target_ids) and self.action_type is not None
         for child in self.children:
             if isinstance(child, ui.Button) and child.custom_id == "btn_execute":
                 child.disabled = not can_exec
@@ -83,11 +189,20 @@ class ManagementControlView(ui.View):
     async def refresh_view(self, interaction, temp_notify=None):
         self.update_components()
         embed = discord.Embed(title="🛡️ 处罚控制台", color=STYLE["KIMI_YELLOW"])
-        if self.selected_user:
-            info = f"**{self.selected_user.name}**\n`{self.selected_user.id}`"
-            embed.set_thumbnail(url=self.selected_user.display_avatar.url)
-        elif self.selected_user_id: info = f"ID: `{self.selected_user_id}`"
-        else: info = "🔴 **未选择**"
+        if not self.target_ids:
+            info = "🔴 **未选择**"
+        elif len(self.target_ids) == 1:
+            tid = self.target_ids[0]
+            if self.selected_user and self.selected_user.id == tid:
+                info = f"**{self.selected_user.name}**\n`{tid}`"
+                embed.set_thumbnail(url=self.selected_user.display_avatar.url)
+            else:
+                info = f"ID: `{tid}`"
+        else:
+            preview_ids = "\n".join([f"`{tid}`" for tid in self.target_ids[:5]])
+            if len(self.target_ids) > 5:
+                preview_ids += f"\n... 以及其余 {len(self.target_ids) - 5} 人"
+            info = f"👥 批量目标: **{len(self.target_ids)}** 人\n{preview_ids}"
         embed.add_field(name="1. 目标", value=info, inline=True)
         act_map = {
             "warn": "⚠️ 警告",
@@ -99,18 +214,31 @@ class ManagementControlView(ui.View):
             "unban": "🔓 解封",
         }
         embed.add_field(name="2. 动作", value=act_map.get(self.action_type, "⚪ **未选择**"), inline=True)
-        link_only_count = len([link for link in self.evidence_links if link not in self.attachment_urls])
         desc = f"> **理由:** {self.reason}\n"
         if self.action_type == "mute": desc += f"> **时长:** `{self.duration_str}`\n"
-        desc += f"> **证据:** {len(self.attachments)} 个附件, {link_only_count} 个链接"
-        if self.selected_user_id:
-            current_strikes = db.get_strikes(self.selected_user_id)
+        desc += f"> **证据:** {len(self.attachments)} 个附件"
+        channel_id = getattr(interaction, "channel_id", None)
+        punish_cog = self._get_punishment_cog(interaction)
+        if punish_cog and self.ctx and channel_id:
+            session = punish_cog.get_evidence_session(self.ctx.user.id, channel_id)
+            if session:
+                expire_text = discord.utils.format_dt(session["expires_at"], "R")
+                desc += (
+                    f"\n> **收集会话:** 进行中 ({expire_text})"
+                    f"\n> **待收纳:** {len(session['attachments'])} 个附件"
+                )
+            else:
+                desc += "\n> **收集会话:** 未开启"
+        if len(self.target_ids) == 1:
+            current_strikes = db.get_strikes(self.target_ids[0])
             if self.action_type == "warn":
                 desc += f"\n> **警告累计:** {current_strikes} 次 (本次将+1)"
             elif self.action_type == "unwarn":
                 desc += f"\n> **警告累计:** {current_strikes} 次 (本次将-1，最低0)"
             else:
                 desc += f"\n> **警告累计:** {current_strikes} 次 (仅警告/撤销警告会变更)"
+        elif len(self.target_ids) > 1:
+            desc += "\n> **警告累计:** 批量模式下按目标分别计算"
         embed.add_field(name="配置详情", value=desc, inline=False)
         embed.set_footer(text=temp_notify or "请按顺序选择目标和动作...")
         try:
@@ -124,6 +252,7 @@ class ManagementControlView(ui.View):
         await interaction.response.defer()
         self.selected_user = select.values[0]
         self.selected_user_id = self.selected_user.id
+        self.target_ids = [self.selected_user_id]
         await self.refresh_view(interaction)
 
     # ✅ 修正: SelectOption 的初始化方式
@@ -149,19 +278,231 @@ class ManagementControlView(ui.View):
     async def cb_id(self, button: ui.Button, interaction: discord.Interaction):
         await interaction.response.send_modal(IDInputModal(self))
 
-    @ui.button(label="追加证据", style=discord.ButtonStyle.secondary, row=2, emoji="📎", custom_id="btn_ev")
-    async def cb_ev(self, button: ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_modal(EvidenceAppendModal(self))
+    @ui.button(label="批量目标", style=discord.ButtonStyle.secondary, row=2, emoji="👥", custom_id="btn_batch_target")
+    async def cb_batch_target(self, button: ui.Button, interaction: discord.Interaction):
+        await interaction.response.send_modal(BatchTargetModal(self))
 
     @ui.button(label="理由/时长", style=discord.ButtonStyle.primary, row=2, emoji="📝", custom_id="btn_reason")
     async def cb_rsn(self, button: ui.Button, interaction: discord.Interaction):
         await interaction.response.send_modal(ReasonInputModal(self))
 
+    @ui.button(label="开始收集", style=discord.ButtonStyle.secondary, row=3, emoji="📥", custom_id="btn_collect_start")
+    async def cb_collect_start(self, button: ui.Button, interaction: discord.Interaction):
+        punish_cog = self._get_punishment_cog(interaction)
+        if not punish_cog:
+            return await interaction.response.send_message("❌ 无法找到处罚模块实例。", ephemeral=True)
+
+        expires_at = punish_cog.start_evidence_session(
+            interaction.user.id,
+            interaction.channel_id,
+            duration_seconds=300,
+        )
+        await interaction.response.defer(ephemeral=True)
+        expire_text = discord.utils.format_dt(expires_at, "R")
+        await self.refresh_view(interaction, temp_notify=f"📥 已开启证据收集，会话将在 {expire_text} 结束")
+
+    @ui.button(label="完成收集", style=discord.ButtonStyle.success, row=3, emoji="✅", custom_id="btn_collect_finish")
+    async def cb_collect_finish(self, button: ui.Button, interaction: discord.Interaction):
+        punish_cog = self._get_punishment_cog(interaction)
+        if not punish_cog:
+            return await interaction.response.send_message("❌ 无法找到处罚模块实例。", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        collected = punish_cog.finish_evidence_session(interaction.user.id, interaction.channel_id)
+        if not collected:
+            await self.refresh_view(interaction, temp_notify="⚠️ 当前没有可提交的证据收集会话")
+            return
+
+        added = 0
+        for att in collected:
+            if not att.url or att.url in self.attachment_urls:
+                continue
+            self.attachments.append(att)
+            self.attachment_urls.add(att.url)
+            self.evidence_links.append(att.url)
+            added += 1
+
+        await self.refresh_view(interaction, temp_notify=f"✅ 已收纳 {added} 个证据附件")
+
+    @ui.button(label="跳过证据", style=discord.ButtonStyle.secondary, row=3, emoji="⏭️", custom_id="btn_collect_skip")
+    async def cb_collect_skip(self, button: ui.Button, interaction: discord.Interaction):
+        punish_cog = self._get_punishment_cog(interaction)
+        if punish_cog:
+            punish_cog.cancel_evidence_session(interaction.user.id, interaction.channel_id)
+
+        self.attachments = []
+        self.attachment_urls = set()
+        self.evidence_links = []
+
+        await interaction.response.defer(ephemeral=True)
+        await self.refresh_view(interaction, temp_notify="⏭️ 已跳过证据上传，可直接执行处罚")
+
+    @ui.button(label="警告查询", style=discord.ButtonStyle.secondary, row=4, emoji="🔎", custom_id="btn_query_strike")
+    async def cb_query_strike(self, button: ui.Button, interaction: discord.Interaction):
+        await interaction.response.send_modal(StrikeQueryModal(self))
+
+    @ui.button(label="重置警告", style=discord.ButtonStyle.secondary, row=4, emoji="♻️", custom_id="btn_reset_strike")
+    async def cb_reset_strike(self, button: ui.Button, interaction: discord.Interaction):
+        if not self.target_ids:
+            return await interaction.response.send_message("❌ 请先选择目标后再重置。", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        count = 0
+        for tid in sorted(set(self.target_ids)):
+            db.reset_strikes(tid)
+            count += 1
+
+        if count == 1:
+            await self.refresh_view(interaction, temp_notify="✅ 已重置该目标的警告累计")
+        else:
+            await self.refresh_view(interaction, temp_notify=f"✅ 已重置 {count} 个目标的警告累计")
+
     # --- 执行逻辑 ---
-    @ui.button(label="⚡ 确认执行", style=discord.ButtonStyle.danger, row=3, disabled=True, custom_id="btn_execute")
+    @ui.button(label="⚡ 确认执行", style=discord.ButtonStyle.danger, row=4, disabled=True, custom_id="btn_execute")
     async def cb_exec(self, button: ui.Button, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        tid, act, guild = self.selected_user_id, self.action_type, interaction.guild
+        act, guild = self.action_type, interaction.guild
+        target_ids = sorted(set(self.target_ids))
+        if not target_ids:
+            return await interaction.followup.send("❌ 请先选择目标。", ephemeral=True)
+
+        punish_cog = self._get_punishment_cog(interaction)
+        if not punish_cog:
+            return await interaction.followup.send("❌ 无法找到处罚模块实例。", ephemeral=True)
+
+        if len(target_ids) > 1:
+            duration_secs = 0
+            if act == "mute":
+                duration_secs = parse_duration(self.duration_str)
+                if duration_secs <= 0:
+                    return await interaction.followup.send("❌ 禁言时长无效。", ephemeral=True)
+
+            success = []
+            failed = []
+            for tid in target_ids:
+                result = await punish_cog._apply_single_action(
+                    guild=guild,
+                    target_id=tid,
+                    action=act,
+                    reason=self.reason,
+                    duration_secs=duration_secs,
+                )
+                if result["ok"]:
+                    success.append(result)
+                else:
+                    failed.append(result)
+
+            action_map = {
+                "warn": "⚠️ 警告",
+                "unwarn": "✅ 撤销警告",
+                "mute": "🤐 禁言",
+                "kick": "🚀 踢出",
+                "ban": "🚫 封禁",
+                "unmute": "🎤 解除禁言",
+                "unban": "🔓 解封",
+            }
+            color_map = {
+                "warn": 0xFFAA00,
+                "unwarn": 0x66CC99,
+                "mute": 0xFF5555,
+                "kick": 0xFF0000,
+                "ban": 0x000000,
+                "unmute": 0x55FF55,
+                "unban": 0x00AAFF,
+            }
+            act_label = action_map.get(act, act)
+            color = color_map.get(act, 0x999999)
+
+            files_for_pub = [await att.to_file(spoiler=True) for att in self.attachments]
+            files_for_log = [
+                discord.File(io.BytesIO(f.fp.getvalue()), filename=f.filename, spoiler=f.spoiler)
+                for f in files_for_pub
+            ]
+            for f in files_for_pub:
+                f.fp.seek(0)
+
+            public_msg = None
+            public_chan = guild.get_channel(self.public_channel_id)
+            if public_chan and success:
+                success_mentions = [f"<@{item['target_id']}>" for item in success]
+                display_mentions = "\n".join(success_mentions[:20])
+                if len(success_mentions) > 20:
+                    display_mentions += f"\n... 以及其余 {len(success_mentions) - 20} 人"
+
+                p_embed = discord.Embed(title=f"🚨 违规公示 | 批量{act_label}", color=color)
+                p_embed.add_field(
+                    name="目标数量",
+                    value=f"成功 **{len(success)}** / 总计 **{len(target_ids)}**",
+                    inline=True,
+                )
+                p_embed.add_field(name="执行人", value=interaction.user.mention, inline=True)
+                p_embed.description = f"**理由:**\n{self.reason}\n\n**目标列表:**\n{display_mentions}"
+                if act == "mute":
+                    p_embed.add_field(name="禁言时长", value=self.duration_str, inline=True)
+                if act in {"warn", "unwarn"}:
+                    p_embed.add_field(name="累计说明", value="仅警告动作影响累计次数", inline=True)
+                p_embed.set_footer(text="请大家遵守社区规范，共建良好环境。")
+                p_embed.timestamp = discord.utils.utcnow()
+                public_msg = await public_chan.send(embed=p_embed, files=files_for_pub)
+
+            log_chan = guild.get_channel(self.log_channel_id)
+            if log_chan:
+                log_embed = discord.Embed(title=f"🛡️ 管理执行日志: BATCH-{act.upper()}", color=color)
+                log_embed.description = f"**理由:** {self.reason}"
+                log_embed.add_field(name="执行人 (Executor)", value=interaction.user.mention, inline=True)
+                log_embed.add_field(
+                    name="结果统计",
+                    value=f"成功 {len(success)} / 失败 {len(failed)} / 总计 {len(target_ids)}",
+                    inline=True,
+                )
+                if act == "mute":
+                    log_embed.add_field(name="时长", value=self.duration_str, inline=True)
+                if act == "warn":
+                    linked_preview = [
+                        f"<@{item['target_id']}>: {item.get('linked_action') or '无'}"
+                        for item in success[:10]
+                    ]
+                    if linked_preview:
+                        log_embed.add_field(name="自动处罚结果", value="\n".join(linked_preview), inline=False)
+
+                success_list = [f"<@{item['target_id']}>" for item in success]
+                failed_list = [f"`{item['target_id']}`: {item['error']}" for item in failed]
+
+                if success_list:
+                    text = "\n".join(success_list[:20])
+                    if len(success_list) > 20:
+                        text += f"\n... 以及其余 {len(success_list) - 20} 人"
+                    log_embed.add_field(name="成功目标", value=text, inline=False)
+
+                if failed_list:
+                    text = "\n".join(failed_list[:10])
+                    if len(failed_list) > 10:
+                        text += f"\n... 以及其余 {len(failed_list) - 10} 条失败"
+                    log_embed.add_field(name="失败详情", value=text, inline=False)
+
+                log_view = ui.View()
+                if public_msg:
+                    log_view.add_item(ui.Button(label="查看公示", url=public_msg.jump_url, style=discord.ButtonStyle.link))
+                await log_chan.send(embed=log_embed, view=log_view, files=files_for_log)
+
+            summary = [
+                f"✅ 批量处罚执行完成：**{act_label}**",
+                f"- 成功：{len(success)}",
+                f"- 失败：{len(failed)}",
+                f"- 总计：{len(target_ids)}",
+            ]
+            if failed:
+                fail_lines = [f"`{item['target_id']}`: {item['error']}" for item in failed[:8]]
+                summary.append("\n失败示例：\n" + "\n".join(fail_lines))
+
+            await interaction.followup.send("\n".join(summary), ephemeral=True)
+            self.clear_items()
+            original_msg = await interaction.original_response()
+            fin_embed = original_msg.embeds[0]
+            fin_embed.color = discord.Color.green(); fin_embed.title = "✅ 处理完毕"
+            return await interaction.edit_original_response(embed=fin_embed, view=self)
+
+        tid = target_ids[0]
         member = None
         try:
             member = guild.get_member(tid) or await guild.fetch_member(tid)
