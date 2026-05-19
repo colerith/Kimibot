@@ -153,7 +153,7 @@ class ThreadToolsCog(commands.Cog, name="帖子工具"):
 
         await self._toggle_mark(ctx, target)
 
-    @discord.message_command(name="标注消息")
+    @discord.message_command(name="📌标注消息")
     async def mark_message_context_menu(self, ctx: discord.ApplicationContext, message: discord.Message):
         if not await self._ensure_thread_owner(ctx):
             return
