@@ -340,11 +340,16 @@ class ManagementControlView(ui.View):
             return await interaction.response.send_message("❌ 无法找到处罚模块实例。", ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
-        collected = punish_cog.finish_evidence_session(interaction.user.id, interaction.channel_id)
-        if not collected:
+        result = await punish_cog.finish_evidence_session(
+            interaction.user.id,
+            interaction.channel_id,
+            cleanup_channel=interaction.channel,
+        )
+        if not result:
             await self.refresh_view(interaction, temp_notify="⚠️ 当前没有可提交的证据收集会话")
             return
 
+        collected = result["attachments"]
         added = 0
         for att in collected:
             if not att.url or att.url in self.attachment_urls:
@@ -354,7 +359,12 @@ class ManagementControlView(ui.View):
             self.evidence_links.append(att.url)
             added += 1
 
-        await self.refresh_view(interaction, temp_notify=f"✅ 已收纳 {added} 个证据附件")
+        deleted = result.get("deleted_messages", 0)
+        failed = result.get("failed_deletions", 0)
+        notify = f"✅ 已收纳 {added} 个证据附件，并清理 {deleted} 条原消息"
+        if failed:
+            notify += f"（{failed} 条未能删除）"
+        await self.refresh_view(interaction, temp_notify=notify)
 
     @ui.button(label="跳过证据", style=discord.ButtonStyle.secondary, row=3, emoji="⏭️", custom_id="btn_collect_skip")
     async def cb_collect_skip(self, button: ui.Button, interaction: discord.Interaction):

@@ -65,14 +65,49 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         }
         return expires_at
 
-    def finish_evidence_session(self, user_id: int, channel_id: int):
+    async def finish_evidence_session(
+        self,
+        user_id: int,
+        channel_id: int,
+        cleanup_channel: discord.abc.Messageable | None = None,
+    ):
         key = self._session_key(user_id, channel_id)
         session = self.evidence_sessions.pop(key, None)
         if not session:
-            return []
+            return None
         if session.get("task"):
             session["task"].cancel()
-        return list(session["attachments"])
+
+        deleted = 0
+        failed = 0
+        if cleanup_channel and session["message_ids"]:
+            for message_id in session["message_ids"]:
+                try:
+                    await cleanup_channel.delete_messages(
+                        [discord.Object(id=message_id)],
+                        reason="证据收集完成后自动清理原消息",
+                    )
+                    deleted += 1
+                except AttributeError:
+                    try:
+                        partial = cleanup_channel.get_partial_message(message_id)
+                        await partial.delete(reason="证据收集完成后自动清理原消息")
+                        deleted += 1
+                    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                        failed += 1
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    try:
+                        partial = cleanup_channel.get_partial_message(message_id)
+                        await partial.delete(reason="证据收集完成后自动清理原消息")
+                        deleted += 1
+                    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                        failed += 1
+
+        return {
+            "attachments": list(session["attachments"]),
+            "deleted_messages": deleted,
+            "failed_deletions": failed,
+        }
 
     def cancel_evidence_session(self, user_id: int, channel_id: int):
         key = self._session_key(user_id, channel_id)
