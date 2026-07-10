@@ -98,14 +98,14 @@ class PresetFeatureView(discord.ui.View):
     async def aurora(self, b, i): await i.response.send_modal(DetailedWishModal("预设功能-极光"))
     @discord.ui.button(label="🏛️ 象牙塔", style=discord.ButtonStyle.secondary)
     async def ivory(self, b, i): await i.response.send_modal(DetailedWishModal("预设功能-象牙塔"))
+    @discord.ui.button(label="⚖️ 日月西", style=discord.ButtonStyle.secondary)
+    async def sun_moon_west(self, b, i): await i.response.send_modal(DetailedWishModal("预设功能-日月西"))
 
 class WishSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(placeholder="👇 选择愿望类型...", min_values=1, max_values=1, custom_id="wish_panel_select",
             options=[
                 discord.SelectOption(label="预设新功能", emoji="💡", value="preset_feature"),
-                discord.SelectOption(label="角色卡", emoji="🎭", value="角色卡"),
-                discord.SelectOption(label="社区美化", emoji="🎨", value="社区美化"),
                 discord.SelectOption(label="社区建设", emoji="🏗️", value="社区建设"),
                 discord.SelectOption(label="其他", emoji="💭", value="其他"),
             ])
