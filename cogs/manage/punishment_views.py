@@ -119,8 +119,12 @@ class ManagementControlView(ui.View):
         self.public_channel_id = public_channel_id
         self.log_channel_id = log_channel_id
         self.attachments = initial_files or []
-        self.attachment_urls = {f.url for f in self.attachments}
-        self.evidence_links = [f.url for f in self.attachments]
+        self.attachment_urls = {
+            self._evidence_url(f) for f in self.attachments if self._evidence_url(f)
+        }
+        self.evidence_links = [
+            self._evidence_url(f) for f in self.attachments if self._evidence_url(f)
+        ]
         self.selected_user = None; self.selected_user_id = None
         self.target_ids = []
         self.action_type = None; self.reason = "违反社区规范"; self.duration_str = "1h"
@@ -161,6 +165,43 @@ class ManagementControlView(ui.View):
             pass
 
         return discord.File(io.BytesIO(data), filename=src.filename, spoiler=src.spoiler)
+
+    @staticmethod
+    def _evidence_url(evidence):
+        return getattr(evidence, "url", None)
+
+    @classmethod
+    async def _evidence_to_file(cls, evidence, *, spoiler: bool = True):
+        if isinstance(evidence, discord.File):
+            return cls._clone_discord_file(evidence)
+
+        try:
+            return await evidence.to_file(spoiler=spoiler)
+        except discord.NotFound:
+            try:
+                return await evidence.to_file(use_cached=True, spoiler=spoiler)
+            except (TypeError, discord.HTTPException):
+                pass
+        except discord.HTTPException:
+            pass
+
+        url = cls._evidence_url(evidence)
+        print(f"[Punishment] evidence-attachment-missing: url={url}")
+        return None
+
+    @classmethod
+    async def _evidence_to_files(cls, evidences, *, spoiler: bool = True):
+        files = []
+        missing_urls = []
+        for evidence in evidences:
+            file = await cls._evidence_to_file(evidence, spoiler=spoiler)
+            if file:
+                files.append(file)
+            else:
+                url = cls._evidence_url(evidence)
+                if url:
+                    missing_urls.append(url)
+        return files, missing_urls
 
     @staticmethod
     def get_strike_status_text(strikes: int):
@@ -352,11 +393,12 @@ class ManagementControlView(ui.View):
         collected = result["attachments"]
         added = 0
         for att in collected:
-            if not att.url or att.url in self.attachment_urls:
+            att_url = self._evidence_url(att)
+            if not att_url or att_url in self.attachment_urls:
                 continue
             self.attachments.append(att)
-            self.attachment_urls.add(att.url)
-            self.evidence_links.append(att.url)
+            self.attachment_urls.add(att_url)
+            self.evidence_links.append(att_url)
             added += 1
 
         deleted = result.get("deleted_messages", 0)
@@ -455,7 +497,7 @@ class ManagementControlView(ui.View):
             act_label = action_map.get(act, act)
             color = color_map.get(act, 0x999999)
 
-            files_for_pub = [await att.to_file(spoiler=True) for att in self.attachments]
+            files_for_pub, missing_evidence_urls = await self._evidence_to_files(self.attachments, spoiler=True)
             files_for_log = [self._clone_discord_file(f) for f in files_for_pub]
 
             public_msg = None
@@ -503,6 +545,12 @@ class ManagementControlView(ui.View):
                         ]
                         if linked_preview:
                             log_embed.add_field(name="自动处罚结果", value="\n".join(linked_preview), inline=False)
+                    if missing_evidence_urls:
+                        log_embed.add_field(
+                            name="失效证据链接",
+                            value="\n".join(missing_evidence_urls[:10]),
+                            inline=False,
+                        )
 
                     success_list = [f"<@{item['target_id']}>" for item in success]
                     failed_list = [f"`{item['target_id']}`: {item['error']}" for item in failed]
@@ -567,7 +615,7 @@ class ManagementControlView(ui.View):
                 msg_act, color = "进行警告", 0xFFAA00
                 if member:
                     try:
-                        dm_files = [await att.to_file(spoiler=True) for att in self.attachments]
+                        dm_files, _ = await self._evidence_to_files(self.attachments, spoiler=True)
                         dm_embed = discord.Embed(title=f"⚠️ {guild.name} 社区警告", description=f"**理由:** {self.reason}", color=color)
                         if dm_files:
                             dm_embed.set_image(url=f"attachment://{dm_files[0].filename}")
@@ -629,7 +677,7 @@ class ManagementControlView(ui.View):
                 new_count = db.get_strikes(tid)
 
             # --- 文件准备 ---
-            files_for_pub = [await att.to_file(spoiler=True) for att in self.attachments]
+            files_for_pub, missing_evidence_urls = await self._evidence_to_files(self.attachments, spoiler=True)
             files_for_log = [self._clone_discord_file(f) for f in files_for_pub]
 
             # --- 1. 发送公开公示 ---
@@ -664,6 +712,8 @@ class ManagementControlView(ui.View):
                     link_only_urls = [link for link in self.evidence_links if link not in self.attachment_urls]
                     if link_only_urls:
                         log_embed.add_field(name="外部链接", value="\n".join(link_only_urls), inline=False)
+                    if missing_evidence_urls:
+                        log_embed.add_field(name="失效证据链接", value="\n".join(missing_evidence_urls[:10]), inline=False)
 
                     log_view = ui.View()
                     if public_msg:

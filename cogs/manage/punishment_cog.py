@@ -2,6 +2,7 @@
 
 import datetime
 import asyncio
+import io
 
 import discord
 from discord.ext import commands
@@ -13,6 +14,23 @@ from ..shared.utils import is_super_egg
 
 PUBLIC_NOTICE_CHANNEL_ID = IDS.get("PUBLIC_NOTICE_CHANNEL_ID")
 LOG_CHANNEL_ID = IDS.get("LOG_CHANNEL_ID", 1468508677144055818)
+
+
+class CachedEvidenceAttachment:
+    def __init__(self, attachment: discord.Attachment, data: bytes):
+        self.url = attachment.url
+        self.proxy_url = getattr(attachment, "proxy_url", None)
+        self.filename = attachment.filename
+        self.content_type = getattr(attachment, "content_type", None)
+        self.size = getattr(attachment, "size", len(data))
+        self._data = data
+
+    async def to_file(self, *, spoiler: bool = False):
+        return discord.File(
+            io.BytesIO(self._data),
+            filename=self.filename,
+            spoiler=spoiler,
+        )
 
 
 class PunishmentCog(commands.Cog, name="处罚系统"):
@@ -277,7 +295,20 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         for att in message.attachments:
             if att.url and any(saved.url == att.url for saved in session["attachments"]):
                 continue
-            session["attachments"].append(att)
+
+            try:
+                try:
+                    data = await att.read(use_cached=True)
+                except discord.NotFound:
+                    data = await att.read(use_cached=False)
+            except (discord.NotFound, discord.HTTPException) as e:
+                print(
+                    f"[Punishment] evidence-attachment-read-failed: "
+                    f"message={message.id} attachment={att.id} error={e}"
+                )
+                continue
+
+            session["attachments"].append(CachedEvidenceAttachment(att, data))
 
         collected = len(session["attachments"]) - before_count
         if collected <= 0:
