@@ -17,13 +17,14 @@ LOTTERY_KIND_ICON = "icon"
 SUPPORTED_LOTTERY_KINDS = (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
 
 DEFAULT_LOTTERY_CONFIG = {
-    "cost_single": 3.0,
-    "cost_ten": 25.0,
+    "cost_single": 1.0,
+    "cost_five": 5.0,
+    "cost_ten": 10.0,
     "weights": {
-        str(RARITY_JUNK): 40,
-        str(RARITY_NORMAL): 40,
-        str(RARITY_RARE): 15,
-        str(RARITY_LEGENDARY): 5,
+        str(RARITY_JUNK): 55,
+        str(RARITY_NORMAL): 37,
+        str(RARITY_RARE): 6,
+        str(RARITY_LEGENDARY): 2,
     },
     "refund": {
             str(RARITY_JUNK): 0.5,
@@ -60,6 +61,23 @@ def _migrate_lottery_refund(value, default: float) -> float:
     if amount >= 8:
         return default
     return round(max(0.0, amount), 1)
+
+
+def _normalize_lottery_weights(weights: dict) -> dict:
+    default_weights = DEFAULT_LOTTERY_CONFIG["weights"]
+    normalized = {
+        str(r): int(weights.get(str(r), default_weights[str(r)]))
+        for r in SUPPORTED_RARITIES
+    }
+    old_default = {
+        str(RARITY_JUNK): 40,
+        str(RARITY_NORMAL): 40,
+        str(RARITY_RARE): 15,
+        str(RARITY_LEGENDARY): 5,
+    }
+    if normalized == old_default:
+        return dict(default_weights)
+    return normalized
 
 
 def _uniq_ids(values) -> list[int]:
@@ -110,17 +128,19 @@ def _normalize_role_data(data: dict) -> dict:
         "cost_single": _migrate_lottery_cost(
             cfg.get("cost_single", DEFAULT_LOTTERY_CONFIG["cost_single"]),
             DEFAULT_LOTTERY_CONFIG["cost_single"],
-            old_defaults=(50.0,),
+            old_defaults=(3.0, 50.0),
+        ),
+        "cost_five": _migrate_lottery_cost(
+            cfg.get("cost_five", DEFAULT_LOTTERY_CONFIG["cost_five"]),
+            DEFAULT_LOTTERY_CONFIG["cost_five"],
+            old_defaults=(),
         ),
         "cost_ten": _migrate_lottery_cost(
             cfg.get("cost_ten", DEFAULT_LOTTERY_CONFIG["cost_ten"]),
             DEFAULT_LOTTERY_CONFIG["cost_ten"],
-            old_defaults=(888.0, 900.0),
+            old_defaults=(25.0, 888.0, 900.0),
         ),
-        "weights": {
-            str(r): int(weights.get(str(r), DEFAULT_LOTTERY_CONFIG["weights"][str(r)]))
-            for r in SUPPORTED_RARITIES
-        },
+        "weights": _normalize_lottery_weights(weights),
         "refund": {
                 str(r): _migrate_lottery_refund(
                     refund.get(str(r), DEFAULT_LOTTERY_CONFIG["refund"][str(r)]),
@@ -240,8 +260,9 @@ def set_lottery_role_kind(role_id: int, kind: str) -> bool:
 
 def update_lottery_config(
     *,
-    cost_single: int | None = None,
-    cost_ten: int | None = None,
+    cost_single: float | None = None,
+    cost_five: float | None = None,
+    cost_ten: float | None = None,
     weights: dict | None = None,
     refund: dict | None = None,
 ) -> dict:
@@ -250,8 +271,10 @@ def update_lottery_config(
 
     if cost_single is not None:
         cfg["cost_single"] = round(max(0.1, float(cost_single)), 1)
+    if cost_five is not None:
+        cfg["cost_five"] = round(max(cfg["cost_single"], float(cost_five)), 1)
     if cost_ten is not None:
-        cfg["cost_ten"] = round(max(cfg["cost_single"], float(cost_ten)), 1)
+        cfg["cost_ten"] = round(max(cfg.get("cost_five", cfg["cost_single"]), float(cost_ten)), 1)
 
     if isinstance(weights, dict):
         for rarity in SUPPORTED_RARITIES:

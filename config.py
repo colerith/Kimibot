@@ -35,8 +35,9 @@ QUOTA = {
 
 # --- 身份组抽奖相关配置 ---
 LOTTERY = {  
-    "LOTTERY_COST": 3.0, 
-    "LOTTERY_TEN_COST": 25.0,
+    "LOTTERY_COST": 1.0,
+    "LOTTERY_FIVE_COST": 5.0,
+    "LOTTERY_TEN_COST": 10.0,
     "LOTTERY_REFUND": 1.0,
     "user_cooldowns": {},
     "COOLDOWN_SECONDS": 30
@@ -73,8 +74,9 @@ SHELLS = {
         {"id": "day_10", "label": "减10天", "days": 10, "cost": 60.0},
     ],
     "ACCELERATION_CARD_MAX_DAYS": 25,
-    "ROLE_LOTTERY_SINGLE_COST": 3.0,
-    "ROLE_LOTTERY_TEN_COST": 25.0,
+    "ROLE_LOTTERY_SINGLE_COST": 1.0,
+    "ROLE_LOTTERY_FIVE_COST": 5.0,
+    "ROLE_LOTTERY_TEN_COST": 10.0,
     "RED_PACKET_EXPIRE_HOURS": 24,
 }
 

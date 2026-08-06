@@ -64,26 +64,24 @@ def _rules_text() -> str:
     data = load_role_data()
     cfg = get_lottery_config(data)
 
-    single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 3.0)))))
-    ten_cost = max(
-        single_cost,
-        float(getattr(config, "LOTTERY_TEN_COST", 25.0)),
-        float(cfg.get("cost_ten", 25.0)),
-    )
+    single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 1.0)))))
+    five_cost = max(single_cost, float(cfg.get("cost_five", float(getattr(config, "LOTTERY_FIVE_COST", 5.0)))))
+    ten_cost = max(five_cost, float(cfg.get("cost_ten", float(getattr(config, "LOTTERY_TEN_COST", 10.0)))))
 
     sign_reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
     post_reward = float(getattr(config, "POINTS_POST_REWARD", 5.0))
     post_daily_cap = float(getattr(config, "POINTS_DAILY_POST_CAP", 15.0))
 
     weights = cfg.get("weights", {})
-    w_junk = int(weights.get(str(RARITY_JUNK), 40))
-    w_normal = int(weights.get(str(RARITY_NORMAL), 40))
-    w_rare = int(weights.get(str(RARITY_RARE), 15))
-    w_legend = int(weights.get(str(RARITY_LEGENDARY), 5))
+    w_junk = int(weights.get(str(RARITY_JUNK), 55))
+    w_normal = int(weights.get(str(RARITY_NORMAL), 37))
+    w_rare = int(weights.get(str(RARITY_RARE), 6))
+    w_legend = int(weights.get(str(RARITY_LEGENDARY), 2))
 
     return (
         "📌 **当前蛋壳/抽奖规则**\n"
         f"- 🎲 单抽消耗：**{format_shells(single_cost)}** 蛋壳\n"
+        f"- 🍀 五抽消耗：**{format_shells(five_cost)}** 蛋壳\n"
         f"- 🎯 十连消耗：**{format_shells(ten_cost)}** 蛋壳\n"
         f"- 📈 抽奖概率(☆/★/★★/★★★)：**{w_junk}/{w_normal}/{w_rare}/{w_legend}**\n"
         f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
@@ -107,13 +105,20 @@ class RoleLotteryView(discord.ui.View):
         data = load_role_data()
         cfg = get_lottery_config(data)
 
-        fallback_single = float(getattr(config, "LOTTERY_COST", 3.0))
-        fallback_ten = float(getattr(config, "LOTTERY_TEN_COST", 25.0))
+        fallback_single = float(getattr(config, "LOTTERY_COST", 1.0))
+        fallback_five = float(getattr(config, "LOTTERY_FIVE_COST", 5.0))
+        fallback_ten = float(getattr(config, "LOTTERY_TEN_COST", 10.0))
         fallback_refund = float(getattr(config, "LOTTERY_REFUND", 1.0))
 
         cost_single = max(0.1, float(cfg.get("cost_single", fallback_single)))
-        cost_ten = max(cost_single, fallback_ten, float(cfg.get("cost_ten", fallback_ten)))
-        cost = cost_ten if draw_count == 10 else cost_single * draw_count
+        cost_five = max(cost_single, float(cfg.get("cost_five", fallback_five)))
+        cost_ten = max(cost_five, float(cfg.get("cost_ten", fallback_ten)))
+        if draw_count == 10:
+            cost = cost_ten
+        elif draw_count == 5:
+            cost = cost_five
+        else:
+            cost = cost_single * draw_count
 
         current_points = get_user_points(user.id, guild_id)
         if current_points < cost:
@@ -149,7 +154,7 @@ class RoleLotteryView(discord.ui.View):
             for r in rarity_pool
         ]
         if sum(weights) <= 0:
-            weights = [40, 40, 15, 5]
+            weights = [55, 37, 6, 2]
 
         picked_rarities = random.choices(rarity_pool, weights=weights, k=draw_count)
 
@@ -207,7 +212,12 @@ class RoleLotteryView(discord.ui.View):
         dupe_count = sum(1 for row in results if row["dupe"])
         miss_count = sum(1 for row in results if row["role"] is None)
 
-        title = "🎰 命运之轮转动了..." if draw_count == 1 else "🎰 十连演算已完成"
+        title_map = {
+            1: "🎰 命运之轮转动了...",
+            5: "🎰 五连小蛋已开奖",
+            10: "🎰 十连演算已完成",
+        }
+        title = title_map.get(draw_count, "🎰 小蛋抽奖已完成")
         embed = discord.Embed(title=title, color=discord.Color.gold())
 
         lines = []
@@ -247,6 +257,10 @@ class RoleLotteryView(discord.ui.View):
     @discord.ui.button(label="🎲 试试手气", style=discord.ButtonStyle.primary, emoji="🎰", custom_id="lottery_draw_btn")
     async def draw_callback(self, button, interaction: discord.Interaction):
         await self._run_draw(interaction, draw_count=1)
+
+    @discord.ui.button(label="🍀 五连试炼", style=discord.ButtonStyle.success, emoji="🍀", custom_id="lottery_draw_five_btn")
+    async def draw_five_callback(self, button, interaction: discord.Interaction):
+        await self._run_draw(interaction, draw_count=5)
 
     @discord.ui.button(label="🎯 十连试炼", style=discord.ButtonStyle.success, emoji="💫", custom_id="lottery_draw_ten_btn")
     async def draw_ten_callback(self, button, interaction: discord.Interaction):
@@ -674,8 +688,9 @@ class RoleClaimView(discord.ui.View):
     async def lottery_entry_callback(self, button, interaction: discord.Interaction):
         data = load_role_data()
         cfg = get_lottery_config(data)
-        single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 3.0)))))
-        ten_cost = max(float(getattr(config, "LOTTERY_TEN_COST", 25.0)), single_cost, float(cfg.get("cost_ten", 25.0)))
+        single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 1.0)))))
+        five_cost = max(single_cost, float(cfg.get("cost_five", float(getattr(config, "LOTTERY_FIVE_COST", 5.0)))))
+        ten_cost = max(five_cost, float(cfg.get("cost_ten", float(getattr(config, "LOTTERY_TEN_COST", 10.0)))))
         sign_reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
         post_reward = float(getattr(config, "POINTS_POST_REWARD", 5.0))
         post_daily_cap = float(getattr(config, "POINTS_DAILY_POST_CAP", 15.0))
@@ -693,6 +708,7 @@ class RoleClaimView(discord.ui.View):
             title="🌌 **奇米蛋 · 身份抽奖**",
             description=f"这里藏着一些无法直接领取的 **稀有款式**！\n你会是那个被命运选中的孩子吗？\n\n"
                         f"💳 **单抽消耗**: {format_shells(single_cost)} 蛋壳\n"
+                        f"💳 **五抽消耗**: {format_shells(five_cost)} 蛋壳\n"
                         f"💳 **十连消耗**: {format_shells(ten_cost)} 蛋壳\n"
                         f"🔄 **重复补偿**: {refund_line} 蛋壳\n"
                         f"🥚 **你的蛋壳**: **{format_shells(points)}**\n\n"
@@ -1235,29 +1251,38 @@ class LotteryCostModal(discord.ui.Modal):
 
         self.single_input = ui.InputText(
             label="单抽消耗（蛋壳）",
-            placeholder="例如 3.0",
-            value=str(config_data.get("cost_single", 3.0)),
+            placeholder="例如 1.0",
+            value=str(config_data.get("cost_single", 1.0)),
+            required=True,
+            max_length=6,
+        )
+        self.five_input = ui.InputText(
+            label="五抽消耗（蛋壳）",
+            placeholder="例如 5.0",
+            value=str(config_data.get("cost_five", 5.0)),
             required=True,
             max_length=6,
         )
         self.ten_input = ui.InputText(
             label="十连消耗（蛋壳）",
-            placeholder="例如 25.0",
-            value=str(config_data.get("cost_ten", 25.0)),
+            placeholder="例如 10.0",
+            value=str(config_data.get("cost_ten", 10.0)),
             required=True,
             max_length=6,
         )
         self.add_item(self.single_input)
+        self.add_item(self.five_input)
         self.add_item(self.ten_input)
 
     async def callback(self, interaction: discord.Interaction):
         try:
             single = float((self.single_input.value or "").strip())
+            five = float((self.five_input.value or "").strip())
             ten = float((self.ten_input.value or "").strip())
         except ValueError:
             return await interaction.response.send_message("❌ 输入格式错误，请填写数字。", ephemeral=True)
 
-        update_lottery_config(cost_single=single, cost_ten=ten)
+        update_lottery_config(cost_single=single, cost_five=five, cost_ten=ten)
         # 重新读取，确保回执展示的是实际落盘后的值
         cfg = get_lottery_config(load_role_data())
 
@@ -1276,6 +1301,7 @@ class LotteryCostModal(discord.ui.Modal):
         await interaction.followup.send(
             f"✅ 抽奖消耗已更新（已保存）\n"
             f"- 单抽：{format_shells(cfg.get('cost_single', single))} 蛋壳\n"
+            f"- 五抽：{format_shells(cfg.get('cost_five', five))} 蛋壳\n"
             f"- 十连：{format_shells(cfg.get('cost_ten', ten))} 蛋壳",
             ephemeral=True,
         )
@@ -1291,8 +1317,8 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
 
         self.weights_input = ui.InputText(
             label="概率(☆,★,★★,★★★)",
-            placeholder="例如 40,40,15,5",
-            value=f"{int(w.get(str(RARITY_JUNK), 40))},{int(w.get(str(RARITY_NORMAL), 40))},{int(w.get(str(RARITY_RARE), 15))},{int(w.get(str(RARITY_LEGENDARY), 5))}",
+            placeholder="例如 55,37,6,2",
+            value=f"{int(w.get(str(RARITY_JUNK), 55))},{int(w.get(str(RARITY_NORMAL), 37))},{int(w.get(str(RARITY_RARE), 6))},{int(w.get(str(RARITY_LEGENDARY), 2))}",
             required=True,
             max_length=32,
         )
@@ -1354,7 +1380,7 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
         refund = cfg.get("refund", {})
         await interaction.followup.send(
             "✅ 概率与重复返还已更新（已保存）\n"
-            f"- 概率(☆/★/★★/★★★)：{int(weights.get(str(RARITY_JUNK), 40))}/{int(weights.get(str(RARITY_NORMAL), 40))}/{int(weights.get(str(RARITY_RARE), 15))}/{int(weights.get(str(RARITY_LEGENDARY), 5))}\n"
+            f"- 概率(☆/★/★★/★★★)：{int(weights.get(str(RARITY_JUNK), 55))}/{int(weights.get(str(RARITY_NORMAL), 37))}/{int(weights.get(str(RARITY_RARE), 6))}/{int(weights.get(str(RARITY_LEGENDARY), 2))}\n"
             f"- 补偿(☆/★/★★/★★★)：{format_shells(refund.get(str(RARITY_JUNK), 0.5))}/{format_shells(refund.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refund.get(str(RARITY_RARE), 2.0))}/{format_shells(refund.get(str(RARITY_LEGENDARY), 5.0))} 蛋壳",
             ephemeral=True,
         )
@@ -1491,8 +1517,10 @@ class RoleManagerView(discord.ui.View):
         embed.add_field(
             name="💳 抽奖参数",
             value=(
-                f"单抽: **{format_shells(cfg.get('cost_single', 3.0))}** 蛋壳 | 十连: **{format_shells(cfg.get('cost_ten', 25.0))}** 蛋壳\n"
-                f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 40))}/{int(weights.get(str(RARITY_NORMAL), 40))}/{int(weights.get(str(RARITY_RARE), 15))}/{int(weights.get(str(RARITY_LEGENDARY), 5))}**\n"
+                f"单抽: **{format_shells(cfg.get('cost_single', 1.0))}** 蛋壳 | "
+                f"五抽: **{format_shells(cfg.get('cost_five', 5.0))}** 蛋壳 | "
+                f"十连: **{format_shells(cfg.get('cost_ten', 10.0))}** 蛋壳\n"
+                f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 55))}/{int(weights.get(str(RARITY_NORMAL), 37))}/{int(weights.get(str(RARITY_RARE), 6))}/{int(weights.get(str(RARITY_LEGENDARY), 2))}**\n"
                 f"补偿(☆/★/★★/★★★): **{format_shells(refunds.get(str(RARITY_JUNK), 0.5))}/{format_shells(refunds.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refunds.get(str(RARITY_RARE), 2.0))}/{format_shells(refunds.get(str(RARITY_LEGENDARY), 5.0))}** 蛋壳"
             ),
             inline=False,
