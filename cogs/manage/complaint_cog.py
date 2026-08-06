@@ -188,3 +188,14 @@ class ComplaintCog(commands.Cog, name="投诉面板"):
             return await channel.send("❌ 归档失败：机器人缺少管理帖子权限。")
         except discord.HTTPException as e:
             return await channel.send(f"❌ 归档失败：{e}")
+
+        try:
+            await countdown_msg.edit(
+                content=(
+                    f"📦 该投诉工单已由 {operator} 关闭。\n"
+                    f"关闭理由：{close_reason}\n"
+                    "✅ 本工单已归档！"
+                )
+            )
+        except discord.HTTPException:
+            pass
