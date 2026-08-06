@@ -3,6 +3,7 @@ import discord
 import config
 from config import STYLE
 from cogs.points.storage import format_shells, modify_user_points
+from cogs.shared.utils import has_verification_role
 
 from .storage import draw_prequiz_questions, get_attempt, load_question_bank, save_attempt
 
@@ -71,6 +72,11 @@ class PreQuizQuestionView(discord.ui.View):
     async def finalize(self, interaction: discord.Interaction, short_answer: str):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        if has_verification_role(interaction.user):
+            return await interaction.response.send_message(
+                "你已经通过验证答题啦，不需要再参加预答题。",
+                ephemeral=True,
+            )
 
         if get_attempt(interaction.user.id, interaction.guild_id):
             return await interaction.response.send_message("你已经完成过预答题了，每个用户只能答一次。", ephemeral=True)
@@ -162,6 +168,11 @@ class PreQuizPanelView(discord.ui.View):
     async def start_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        if has_verification_role(interaction.user):
+            return await interaction.response.send_message(
+                "你已经通过验证答题啦，不需要再参加预答题。",
+                ephemeral=True,
+            )
         existing = get_attempt(interaction.user.id, interaction.guild_id)
         if existing:
             status = "通过" if existing.get("passed") else "未通过"

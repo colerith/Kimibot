@@ -28,12 +28,12 @@ from .storage import (
 )
 from cogs.points.storage import format_shells, get_user_points, get_user_summary, modify_user_points, sign_in_user
 from cogs.points.storage import (
-    get_acceleration_status,
     get_acceleration_tiers,
     get_daily_signin_summary,
     load_random_events,
     purchase_acceleration_card,
 )
+from cogs.shared.utils import get_account_wait_status, has_verification_role
 from config import STYLE
 from discord.ui import Select
 
@@ -436,6 +436,12 @@ class AccelerationTierButton(discord.ui.Button):
         self.tier = tier
 
     async def callback(self, interaction: discord.Interaction):
+        if has_verification_role(interaction.user):
+            return await interaction.response.send_message(
+                "你已经通过验证答题啦，不需要再购买加速卡。",
+                ephemeral=True,
+            )
+
         result = purchase_acceleration_card(interaction.user.id, interaction.guild_id, self.tier["id"])
         if not result.get("success"):
             reason = result.get("reason")
@@ -452,21 +458,26 @@ class AccelerationTierButton(discord.ui.Button):
             return await interaction.response.send_message(msg, ephemeral=True)
 
         status = result["status"]
+        wait_status = get_account_wait_status(interaction.user, interaction.guild_id)
         msg = (
             f"✅ 已购买 **{self.tier['label']}** 加速卡。\n"
             f"本次生效：**{result['effective_days']}** 天\n"
             f"累计加速：**{status['acceleration_days']} / {status['max_days']}** 天\n"
-            f"正式答题等待期：**{status['required_wait_days']}** 天\n"
+            f"账号已注册：**{wait_status['account_age_days']}** 天\n"
+            f"当前要求注册满：**{wait_status['required_wait_days']}** 天\n"
+            f"实际还需等待：**{wait_status['remaining_wait_days']}** 天\n"
             f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳"
         )
         await interaction.response.send_message(msg, ephemeral=True)
 
 
-def build_acceleration_embed(user_id: int, guild_id: int) -> discord.Embed:
-    status = get_acceleration_status(user_id, guild_id)
+def build_acceleration_embed(member: discord.Member, guild_id: int) -> discord.Embed:
+    status = get_account_wait_status(member, guild_id)
     lines = [
         f"累计加速：**{status['acceleration_days']} / {status['max_days']}** 天",
-        f"当前正式答题等待期：**{status['required_wait_days']}** 天",
+        f"账号已注册：**{status['account_age_days']}** 天",
+        f"当前要求注册满：**{status['required_wait_days']}** 天",
+        f"实际还需等待：**{status['remaining_wait_days']}** 天",
         "",
         "可购买档位：",
     ]
@@ -478,7 +489,7 @@ def build_acceleration_embed(user_id: int, guild_id: int) -> discord.Embed:
         description="\n".join(lines),
         color=STYLE["KIMI_YELLOW"],
     )
-    embed.set_footer(text="累计最多减少 25 天，正式答题最低等待 5 天。")
+    embed.set_footer(text="等待期会按你的 Discord 账号注册时间实时计算。")
     return embed
 
 
@@ -497,10 +508,10 @@ def build_shell_help_embed() -> discord.Embed:
             "**连续加成**：连续签到满 7/14/30/60/90 天后，提高签到收益。\n"
             "**发言加成**：有效发言不再单条给蛋壳，会提高签到加成。\n"
             f"**发帖奖励**：指定论坛频道每天前 3 帖，每帖 +{format_shells(forum_reward)} 蛋壳。\n"
-            f"**预备答题**：预答题通过后固定 +{format_shells(prequiz_reward)} 蛋壳，每人一次。\n"
+            f"**预备答题**：未验证成员通过后固定 +{format_shells(prequiz_reward)} 蛋壳，每人一次。\n"
             f"**服务器助力**：每次助力 +{format_shells(boost_reward)} 蛋壳。\n"
             "**蛋壳红包**：后续可把蛋壳发成红包让大家抢。\n\n"
-            "**蛋壳用途**：身份抽奖、加速卡、换装/商店相关兑换。"
+            "**蛋壳用途**：身份抽奖、换装/商店相关兑换；加速卡仅未验证成员可购买。"
         ),
         color=STYLE["KIMI_YELLOW"],
     )
@@ -651,7 +662,12 @@ class RoleClaimView(discord.ui.View):
     async def acceleration_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        embed = build_acceleration_embed(interaction.user.id, interaction.guild_id)
+        if has_verification_role(interaction.user):
+            return await interaction.response.send_message(
+                "你已经通过验证答题啦，不需要再购买加速卡。",
+                ephemeral=True,
+            )
+        embed = build_acceleration_embed(interaction.user, interaction.guild_id)
         await interaction.response.send_message(embed=embed, view=AccelerationShopView(interaction.user.id), ephemeral=True)
     
     @discord.ui.button(label="身份抽奖", style=discord.ButtonStyle.primary, emoji="🎲", custom_id="role_main_lottery", row=1)

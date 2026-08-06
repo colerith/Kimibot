@@ -341,8 +341,16 @@ valid_message_count_today >= 30 -> +20%
 
 ```text
 required_wait_days = max(5, 30 - purchased_acceleration_days)
-eligible = discord_account_age_days >= required_wait_days
+remaining_wait_days = max(0, required_wait_days - discord_account_age_days)
+eligible = remaining_wait_days == 0
 ```
+
+说明：
+
+- 30 天不是所有用户都从购买时重新开始等待的固定缓冲期。
+- 系统必须根据该用户 Discord 账号注册时间实时计算账号已注册天数。
+- 加速卡减少的是「要求注册满的天数」，最终还需等待多久取决于用户账号当前已经注册了多少天。
+- 示例：账号已注册 20 天，未购买加速卡时还需等待 10 天；购买减 5 天后，要求变为 25 天，还需等待 5 天。
 
 ### 10.4 用户展示
 
@@ -356,10 +364,12 @@ eligible = discord_account_age_days >= required_wait_days
 
 购买规则：
 
+- 加速卡和预答题仅对未拥有 `1417722389718110249`、`1417722528574738513` 任意身份组的用户开放。
+- 如果用户拥有上述任意一个身份组，说明已通过验证答题，不再允许购买加速卡或参与预答题。
 - 加速卡必须消耗蛋壳购买。
 - 购买前校验用户蛋壳余额是否充足。
 - 购买成功后立即写入蛋壳流水和加速卡记录。
-- 加速卡价格需要可配置，默认建议：减 1 天 `3.0 蛋壳`、减 5 天 `12.0 蛋壳`、减 10 天 `20.0 蛋壳`。
+- 加速卡价格需要可配置，默认建议：减 1 天 `8.0 蛋壳`、减 5 天 `35.0 蛋壳`、减 10 天 `60.0 蛋壳`。
 
 ## 11. 预答题面板
 
@@ -559,9 +569,9 @@ SHELLS = {
     "ACCOUNT_BASE_WAIT_DAYS": 30,
     "ACCOUNT_MIN_WAIT_DAYS": 5,
     "ACCELERATION_CARD_TIERS": [
-        {"id": "day_1", "label": "减1天", "days": 1, "cost": 3.0},
-        {"id": "day_5", "label": "减5天", "days": 5, "cost": 12.0},
-        {"id": "day_10", "label": "减10天", "days": 10, "cost": 20.0},
+        {"id": "day_1", "label": "减1天", "days": 1, "cost": 8.0},
+        {"id": "day_5", "label": "减5天", "days": 5, "cost": 35.0},
+        {"id": "day_10", "label": "减10天", "days": 10, "cost": 60.0},
     ],
     "ACCELERATION_CARD_MAX_DAYS": 25,
     "ROLE_LOTTERY_SINGLE_COST": 3.0,
@@ -579,6 +589,12 @@ SHELLS = {
 ```
 
 发送该命令后，机器人仅向管理员私密展示「社区面板管理台」。管理台通过按钮、选择框和弹窗完成所有配置，不再拆成多个分散的管理命令。
+
+原 `/百变小蛋` 下的身份组和面板相关命令统一迁移到 `/社区面板` 命令组，不再单独保留 `/百变小蛋` 命令组：
+
+- `/社区面板 管理身份组`
+- `/社区面板 换装面板`
+- `/社区面板 通知面板`
 
 管理台推荐按钮同样使用 4 个汉字：
 

@@ -3,11 +3,10 @@
 import discord
 import asyncio
 import random
-from datetime import timedelta
 from discord.ext import commands
 
 from config import IDS, STYLE
-from cogs.points.storage import get_acceleration_status
+from cogs.shared.utils import get_account_wait_status, has_verification_role
 from .data import QUIZ_QUESTIONS
 
 # --- 配置区 ---
@@ -24,13 +23,13 @@ class QuizStartView(discord.ui.View):
         """仅校验账号注册时长和可疑账号标记。"""
         reasons = []
 
-        account_age = discord.utils.utcnow() - interaction.user.created_at
-        accel = get_acceleration_status(interaction.user.id, interaction.guild_id)
-        required_days = int(accel.get("required_wait_days", MIN_ACCOUNT_AGE_DAYS))
-        if account_age < timedelta(days=required_days):
-            age_days = max(0, account_age.days)
+        wait_status = get_account_wait_status(interaction.user, interaction.guild_id)
+        if not wait_status["eligible"]:
             reasons.append(
-                f"账号注册时间不足 {required_days} 天（当前 {age_days} 天，已加速 {accel.get('acceleration_days', 0)} 天）"
+                f"账号还需等待 {wait_status['remaining_wait_days']} 天"
+                f"（账号已注册 {wait_status['account_age_days']} 天，"
+                f"当前要求 {wait_status['required_wait_days']} 天，"
+                f"已加速 {wait_status['acceleration_days']} 天）"
             )
 
         public_flags = getattr(interaction.user, "public_flags", None)
@@ -45,11 +44,7 @@ class QuizStartView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         user_id = interaction.user.id
 
-        newbie_role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
-        hatched_role = interaction.guild.get_role(IDS.get("HATCHED_ROLE_ID"))
-        has_newbie = newbie_role and newbie_role in interaction.user.roles
-        has_hatched = hatched_role and hatched_role in interaction.user.roles
-        if has_newbie or has_hatched:
+        if has_verification_role(interaction.user):
             return await interaction.followup.send("你已经是新兵蛋子或正式成员啦，不需要再答题咯！", ephemeral=True)
 
         risk_reasons = self._collect_risk_reasons(interaction)
