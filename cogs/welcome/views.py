@@ -7,6 +7,7 @@ from datetime import timedelta
 from discord.ext import commands
 
 from config import IDS, STYLE
+from cogs.points.storage import get_acceleration_status
 from .data import QUIZ_QUESTIONS
 
 # --- 配置区 ---
@@ -24,8 +25,13 @@ class QuizStartView(discord.ui.View):
         reasons = []
 
         account_age = discord.utils.utcnow() - interaction.user.created_at
-        if account_age < timedelta(days=MIN_ACCOUNT_AGE_DAYS):
-            reasons.append(f"账号注册时间不足 {MIN_ACCOUNT_AGE_DAYS} 天")
+        accel = get_acceleration_status(interaction.user.id, interaction.guild_id)
+        required_days = int(accel.get("required_wait_days", MIN_ACCOUNT_AGE_DAYS))
+        if account_age < timedelta(days=required_days):
+            age_days = max(0, account_age.days)
+            reasons.append(
+                f"账号注册时间不足 {required_days} 天（当前 {age_days} 天，已加速 {accel.get('acceleration_days', 0)} 天）"
+            )
 
         public_flags = getattr(interaction.user, "public_flags", None)
         is_suspected_spammer = bool(getattr(public_flags, "spammer", False)) if public_flags else False

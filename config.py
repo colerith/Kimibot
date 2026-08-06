@@ -21,7 +21,8 @@ IDS = {
     "PUBLIC_NOTICE_CHANNEL_ID":1417573350598770739 ,
     "LOG_CHANNEL_ID": 1468508677144055818,
     "QUIZ_CHANNEL_ID": 1467034060026286090,
-    "QUIZ_LOG_CHANNEL_ID": 1452485785939869808
+    "QUIZ_LOG_CHANNEL_ID": 1452485785939869808,
+    "BOOST_THANKS_CHANNEL_ID": 1417575247128821791
 }
 
 # --- 额度配置 ---
@@ -33,21 +34,47 @@ QUOTA = {
 
 # --- 身份组抽奖相关配置 ---
 LOTTERY = {  
-    "LOTTERY_COST": 50, 
-    "LOTTERY_TEN_COST": 900,
-    "LOTTERY_REFUND": 20,
+    "LOTTERY_COST": 3.0, 
+    "LOTTERY_TEN_COST": 25.0,
+    "LOTTERY_REFUND": 1.0,
     "user_cooldowns": {},
     "COOLDOWN_SECONDS": 30
 }
 
 POINTS = {
-    "POINTS_SIGN_REWARD": 30,
+    "POINTS_SIGN_REWARD": 1.0,
     "POINTS_DAILY_MSG_CAP": 100,
-    "POINTS_POST_REWARD": 10,
-    "POINTS_DAILY_POST_CAP": 50,
-    "POINTS_PER_MSG_MIN": 1,
-    "POINTS_PER_MSG_MAX": 3,
+    "POINTS_POST_REWARD": 5.0,
+    "POINTS_DAILY_POST_CAP": 15.0,
+    "POINTS_PER_MSG_MIN": 0,
+    "POINTS_PER_MSG_MAX": 0,
     "POINTS_MSG_COOLDOWN": 30,
+}
+
+SHELLS = {
+    "SIGN_BASE_REWARD": 1.0,
+    "SIGN_TOP_RANK_LIMIT": 10,
+    "SIGN_TOP_RANK_MIN": 0.1,
+    "SIGN_TOP_RANK_MAX": 1.9,
+    "RANDOM_EVENT_MIN": 0.1,
+    "RANDOM_EVENT_MAX": 1.9,
+    "FORUM_REWARD_CHANNEL_IDS": [1467159077422371017, 1417576703487770636],
+    "FORUM_REWARD_DAILY_POST_LIMIT": 3,
+    "FORUM_REWARD_AMOUNT": 5.0,
+    "BOOST_REWARD_AMOUNT": 10.0,
+    "PRE_QUIZ_CHANNEL_ID": 1417568378889175071,
+    "PRE_QUIZ_REWARD": 5.0,
+    "ACCOUNT_BASE_WAIT_DAYS": 30,
+    "ACCOUNT_MIN_WAIT_DAYS": 5,
+    "ACCELERATION_CARD_TIERS": [
+        {"id": "day_1", "label": "减1天", "days": 1, "cost": 3.0},
+        {"id": "day_5", "label": "减5天", "days": 5, "cost": 12.0},
+        {"id": "day_10", "label": "减10天", "days": 10, "cost": 20.0},
+    ],
+    "ACCELERATION_CARD_MAX_DAYS": 25,
+    "ROLE_LOTTERY_SINGLE_COST": 3.0,
+    "ROLE_LOTTERY_TEN_COST": 25.0,
+    "RED_PACKET_EXPIRE_HOURS": 24,
 }
 
 # --- 外观配置 ---
@@ -58,3 +85,4 @@ globals().update(QUOTA)
 globals().update(STYLE)
 globals().update(LOTTERY)
 globals().update(POINTS)
+globals().update(SHELLS)

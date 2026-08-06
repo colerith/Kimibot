@@ -3,17 +3,14 @@
 import discord
 from discord.ext import commands
 import time
-import random
 import re
 
 import config
-from .storage import add_message_points, add_post_points
+from .storage import format_shells, record_message_activity, reward_daily_forum_post
 
-POINTS_DAILY_MSG_CAP = getattr(config, "POINTS_DAILY_MSG_CAP", 100)
-POINTS_PER_MSG_MIN = getattr(config, "POINTS_PER_MSG_MIN", 1)
-POINTS_PER_MSG_MAX = getattr(config, "POINTS_PER_MSG_MAX", 3)
-POINTS_POST_REWARD = getattr(config, "POINTS_POST_REWARD", 10)
-POINTS_DAILY_POST_CAP = getattr(config, "POINTS_DAILY_POST_CAP", 50)
+FORUM_REWARD_CHANNEL_IDS = set(int(x) for x in getattr(config, "FORUM_REWARD_CHANNEL_IDS", []))
+FORUM_REWARD_AMOUNT = float(getattr(config, "FORUM_REWARD_AMOUNT", getattr(config, "POINTS_POST_REWARD", 5.0)))
+FORUM_REWARD_DAILY_POST_LIMIT = int(getattr(config, "FORUM_REWARD_DAILY_POST_LIMIT", 3))
 POINTS_MSG_COOLDOWN = getattr(
     config,
     "POINTS_MSG_COOLDOWN",
@@ -22,7 +19,7 @@ POINTS_MSG_COOLDOWN = getattr(
 
 def is_valid_comment(content: str) -> bool:
     """
-    严格的发言质量检测，用于判断是否应该给予积分。
+    严格的发言质量检测，用于判断是否应该计入发言活跃。
     (此函数已从 general/core.py 移入，可根据需要启用)
     1. 移除 emoji、链接、空白
     2. 长度必须 > 5
@@ -45,7 +42,7 @@ def is_valid_comment(content: str) -> bool:
 
 
 class PointListener(commands.Cog):
-    """一个专门负责监听用户发言并自动发放积分的Cog。"""
+    """监听社区活跃行为，记录发言活跃并发放指定帖子蛋壳。"""
 
     def __init__(self, bot):
         self.bot = bot
@@ -65,19 +62,13 @@ class PointListener(commands.Cog):
             return
 
         self.user_cooldowns[message.author.id] = now
-        points_to_add = random.randint(POINTS_PER_MSG_MIN, POINTS_PER_MSG_MAX)
-
-        gained = add_message_points(
+        count = record_message_activity(
             user_id=message.author.id,
             guild_id=message.guild.id,
-            amount=points_to_add,
-            daily_cap=POINTS_DAILY_MSG_CAP,
         )
-
-        if gained > 0:
-            print(
-                f"💰 [积分系统] {message.author.name} 发言有效，+{gained} 积分 (Guild {message.guild.id})"
-            )
+        print(
+            f"🥚 [蛋壳系统] {message.author.name} 今日有效发言 {count} 条 (Guild {message.guild.id})"
+        )
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):
@@ -97,13 +88,18 @@ class PointListener(commands.Cog):
         if not member or member.bot:
             return
 
-        gained = add_post_points(
+        if parent.id not in FORUM_REWARD_CHANNEL_IDS:
+            return
+
+        reward = reward_daily_forum_post(
             user_id=author_id,
             guild_id=thread.guild.id,
-            amount=POINTS_POST_REWARD,
-            daily_cap=POINTS_DAILY_POST_CAP,
+            channel_id=parent.id,
+            thread_id=thread.id,
+            amount=FORUM_REWARD_AMOUNT,
+            daily_limit=FORUM_REWARD_DAILY_POST_LIMIT,
         )
-        if gained > 0:
+        if reward.get("success"):
             print(
-                f"🧵 [积分系统] {member.name} 社区发帖 +{gained} 积分 (Guild {thread.guild.id})"
+                f"🧵 [蛋壳系统] {member.name} 第 {reward['rank']} 帖奖励 +{format_shells(reward['amount'])} 蛋壳 (Channel {parent.id})"
             )

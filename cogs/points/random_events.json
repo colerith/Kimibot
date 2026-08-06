@@ -1,0 +1,815 @@
+{
+  "version": 1,
+  "events": [
+    {
+      "id": "kimi_positive_001",
+      "type": "positive",
+      "title": "小蛋报喜",
+      "description": "奇米蛋在报到册旁边发现了一小把亮晶晶的蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.9,
+      "weight": 3
+    },
+    {
+      "id": "kimi_positive_002",
+      "type": "positive",
+      "title": "小蛋翻倍",
+      "description": "奇米蛋把今天的好运轻轻拍了拍，额外掉出一些蛋壳。",
+      "min_delta": 0.3,
+      "max_delta": 1.9,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_003",
+      "type": "positive",
+      "title": "小蛋点名",
+      "description": "你被奇米蛋认真记在小本本上，顺手奖励了一点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.2,
+      "weight": 3
+    },
+    {
+      "id": "kimi_positive_004",
+      "type": "positive",
+      "title": "小蛋早安",
+      "description": "奇米蛋今天第一个看见你，开心地递来一枚小蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 0.9,
+      "weight": 3
+    },
+    {
+      "id": "kimi_positive_005",
+      "type": "positive",
+      "title": "小蛋盖章",
+      "description": "你的报到格子被奇米蛋盖上亮闪闪的章，旁边多了一点蛋壳。",
+      "min_delta": 0.2,
+      "max_delta": 1.4,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_006",
+      "type": "positive",
+      "title": "小蛋扫尘",
+      "description": "奇米蛋清理报到台时扫出一小撮蛋壳，决定放进你的账户。",
+      "min_delta": 0.1,
+      "max_delta": 1.0,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_007",
+      "type": "positive",
+      "title": "小蛋添彩",
+      "description": "今天的报到页颜色特别漂亮，奇米蛋给你添了一点彩头。",
+      "min_delta": 0.2,
+      "max_delta": 1.6,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_008",
+      "type": "positive",
+      "title": "小蛋开奖",
+      "description": "奇米蛋打开小抽屉，发现里面正好剩着几片蛋壳。",
+      "min_delta": 0.4,
+      "max_delta": 1.9,
+      "weight": 1
+    },
+    {
+      "id": "kimi_positive_009",
+      "type": "positive",
+      "title": "小蛋鼓掌",
+      "description": "你今天准时出现，奇米蛋认真鼓掌，并奖励了一点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.1,
+      "weight": 3
+    },
+    {
+      "id": "kimi_positive_010",
+      "type": "positive",
+      "title": "小蛋补贴",
+      "description": "奇米蛋说今天报到很有精神，给你发放一笔小小补贴。",
+      "min_delta": 0.3,
+      "max_delta": 1.5,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_011",
+      "type": "positive",
+      "title": "小蛋捡漏",
+      "description": "报到台角落里卡着一片蛋壳，被奇米蛋捡起来送给你。",
+      "min_delta": 0.1,
+      "max_delta": 0.8,
+      "weight": 3
+    },
+    {
+      "id": "kimi_positive_012",
+      "type": "positive",
+      "title": "小蛋加餐",
+      "description": "奇米蛋今天心情很好，给报到的小伙伴都加了一点蛋壳餐。",
+      "min_delta": 0.2,
+      "max_delta": 1.3,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_013",
+      "type": "positive",
+      "title": "小蛋亮灯",
+      "description": "报到灯为你亮了一下，奇米蛋把灯下的蛋壳收进你的余额。",
+      "min_delta": 0.2,
+      "max_delta": 1.4,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_014",
+      "type": "positive",
+      "title": "小蛋开门",
+      "description": "你推开报到门时，门铃掉出了一点被藏好的蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.0,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_015",
+      "type": "positive",
+      "title": "小蛋贴纸",
+      "description": "奇米蛋给你的报到页贴了小贴纸，贴纸背后藏着蛋壳奖励。",
+      "min_delta": 0.3,
+      "max_delta": 1.7,
+      "weight": 1
+    },
+    {
+      "id": "kimi_positive_016",
+      "type": "positive",
+      "title": "小蛋夸夸",
+      "description": "奇米蛋认真夸了你一句，夸完还塞来一小份蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.2,
+      "weight": 3
+    },
+    {
+      "id": "kimi_positive_017",
+      "type": "positive",
+      "title": "小蛋清点",
+      "description": "奇米蛋清点库存时发现多出来一点，决定今天算你的好运。",
+      "min_delta": 0.2,
+      "max_delta": 1.5,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_018",
+      "type": "positive",
+      "title": "小蛋暖炉",
+      "description": "报到台旁的小暖炉烤出一片温热蛋壳，奇米蛋递给了你。",
+      "min_delta": 0.1,
+      "max_delta": 0.9,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_019",
+      "type": "positive",
+      "title": "小蛋开彩",
+      "description": "奇米蛋抽出今日幸运色，和你很配，于是加送蛋壳。",
+      "min_delta": 0.4,
+      "max_delta": 1.9,
+      "weight": 1
+    },
+    {
+      "id": "kimi_positive_020",
+      "type": "positive",
+      "title": "小蛋补签",
+      "description": "奇米蛋发现你最近很努力，偷偷给今天的报到加了点分量。",
+      "min_delta": 0.2,
+      "max_delta": 1.6,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_021",
+      "type": "positive",
+      "title": "小蛋护符",
+      "description": "你的报到页夹着一枚小护符，护符旁边躺着几片蛋壳。",
+      "min_delta": 0.3,
+      "max_delta": 1.8,
+      "weight": 1
+    },
+    {
+      "id": "kimi_positive_022",
+      "type": "positive",
+      "title": "小蛋泡泡",
+      "description": "奇米蛋吹出的泡泡啪地一声破开，落下一点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.0,
+      "weight": 3
+    },
+    {
+      "id": "kimi_positive_023",
+      "type": "positive",
+      "title": "小蛋星星",
+      "description": "今天的小蛋星星落在你的名字旁边，带来额外蛋壳。",
+      "min_delta": 0.2,
+      "max_delta": 1.5,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_024",
+      "type": "positive",
+      "title": "小蛋回礼",
+      "description": "你坚持报到的样子被奇米蛋记住了，今天收到一份小回礼。",
+      "min_delta": 0.3,
+      "max_delta": 1.7,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_025",
+      "type": "positive",
+      "title": "小蛋摇铃",
+      "description": "奇米蛋摇响报到铃，铃声里掉出了一点好运蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.3,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_026",
+      "type": "positive",
+      "title": "小蛋开箱",
+      "description": "今天的报到箱开出了小惊喜，里面有几片完整蛋壳。",
+      "min_delta": 0.4,
+      "max_delta": 1.9,
+      "weight": 1
+    },
+    {
+      "id": "kimi_positive_027",
+      "type": "positive",
+      "title": "小蛋排队",
+      "description": "奇米蛋说你排队很乖，给你发了一份秩序奖励。",
+      "min_delta": 0.1,
+      "max_delta": 1.0,
+      "weight": 3
+    },
+    {
+      "id": "kimi_positive_028",
+      "type": "positive",
+      "title": "小蛋祝福",
+      "description": "奇米蛋把今日祝福塞进蛋壳里，一起交到了你手上。",
+      "min_delta": 0.2,
+      "max_delta": 1.6,
+      "weight": 2
+    },
+    {
+      "id": "kimi_positive_029",
+      "type": "positive",
+      "title": "小蛋巡礼",
+      "description": "你完成了今天的小小巡礼，奇米蛋为你补上一点仪式奖励。",
+      "min_delta": 0.3,
+      "max_delta": 1.8,
+      "weight": 1
+    },
+    {
+      "id": "kimi_positive_030",
+      "type": "positive",
+      "title": "小蛋满格",
+      "description": "今天的报到能量满格，奇米蛋把溢出的好运折成蛋壳给你。",
+      "min_delta": 0.5,
+      "max_delta": 1.9,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_001",
+      "type": "negative",
+      "title": "小蛋手滑",
+      "description": "奇米蛋搬蛋壳时没抱稳，有一点蛋壳咕噜咕噜滚走了。",
+      "min_delta": 0.1,
+      "max_delta": 1.0,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_002",
+      "type": "negative",
+      "title": "小蛋记账",
+      "description": "奇米蛋发现昨天账本有一点点误差，今天悄悄扣回一点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.9,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_003",
+      "type": "negative",
+      "title": "小蛋打盹",
+      "description": "奇米蛋打了个小盹，醒来发现你的蛋壳少登记了一点。",
+      "min_delta": 0.1,
+      "max_delta": 0.8,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_004",
+      "type": "negative",
+      "title": "小蛋漏风",
+      "description": "报到台的小窗没关紧，一点蛋壳被风吹走了。",
+      "min_delta": 0.1,
+      "max_delta": 1.2,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_005",
+      "type": "negative",
+      "title": "小蛋清账",
+      "description": "奇米蛋开始清理旧账，发现有一小笔需要从今天扣回。",
+      "min_delta": 0.2,
+      "max_delta": 1.5,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_006",
+      "type": "negative",
+      "title": "小蛋摔跤",
+      "description": "奇米蛋抱着蛋壳跑太快，轻轻摔了一下，掉出几片。",
+      "min_delta": 0.1,
+      "max_delta": 1.1,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_007",
+      "type": "negative",
+      "title": "小蛋找零",
+      "description": "奇米蛋发现刚才找零找多了，只好从余额里取回一点。",
+      "min_delta": 0.1,
+      "max_delta": 1.3,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_008",
+      "type": "negative",
+      "title": "小蛋卡壳",
+      "description": "报到机器卡了一下，吐出来的蛋壳比预计少了一点。",
+      "min_delta": 0.1,
+      "max_delta": 0.9,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_009",
+      "type": "negative",
+      "title": "小蛋迷路",
+      "description": "奇米蛋送蛋壳时绕错了路，一小部分奖励没能及时送到。",
+      "min_delta": 0.2,
+      "max_delta": 1.4,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_010",
+      "type": "negative",
+      "title": "小蛋翻页",
+      "description": "报到册翻页太快，你名字旁边的一点蛋壳被夹走了。",
+      "min_delta": 0.1,
+      "max_delta": 1.0,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_011",
+      "type": "negative",
+      "title": "小蛋扣章",
+      "description": "奇米蛋盖章盖歪了，重盖时损耗了一点点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 0.7,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_012",
+      "type": "negative",
+      "title": "小蛋搬箱",
+      "description": "蛋壳箱底有个小缝，搬到你面前时漏掉了一些。",
+      "min_delta": 0.2,
+      "max_delta": 1.6,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_013",
+      "type": "negative",
+      "title": "小蛋误触",
+      "description": "奇米蛋不小心碰到记账键，系统回滚了一点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.2,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_014",
+      "type": "negative",
+      "title": "小蛋降温",
+      "description": "今天的小蛋炉温度不够，烤出来的蛋壳少了一点。",
+      "min_delta": 0.1,
+      "max_delta": 0.9,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_015",
+      "type": "negative",
+      "title": "小蛋叹气",
+      "description": "奇米蛋对着账本叹了一口气，轻轻扣掉一点维护费。",
+      "min_delta": 0.1,
+      "max_delta": 1.3,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_016",
+      "type": "negative",
+      "title": "小蛋漏记",
+      "description": "你的报到记录边角有点淡，奇米蛋只好少记了一点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 0.8,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_017",
+      "type": "negative",
+      "title": "小蛋巡查",
+      "description": "奇米蛋巡查时发现一片蛋壳编号重复，按规则扣回。",
+      "min_delta": 0.2,
+      "max_delta": 1.7,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_018",
+      "type": "negative",
+      "title": "小蛋熄灯",
+      "description": "报到灯忽然熄了一下，灯影里少掉了一点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 1.0,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_019",
+      "type": "negative",
+      "title": "小蛋折角",
+      "description": "你的报到页折了个小角，奇米蛋修补时花掉一点蛋壳。",
+      "min_delta": 0.1,
+      "max_delta": 0.9,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_020",
+      "type": "negative",
+      "title": "小蛋错拍",
+      "description": "奇米蛋拍照留档时手抖了，重拍费用从蛋壳里扣了一点。",
+      "min_delta": 0.2,
+      "max_delta": 1.4,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_021",
+      "type": "negative",
+      "title": "小蛋漏斗",
+      "description": "蛋壳漏斗今天有点不听话，几片蛋壳从旁边滑走了。",
+      "min_delta": 0.1,
+      "max_delta": 1.1,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_022",
+      "type": "negative",
+      "title": "小蛋复核",
+      "description": "奇米蛋复核今日账本，发现有一笔需要小幅修正。",
+      "min_delta": 0.1,
+      "max_delta": 1.5,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_023",
+      "type": "negative",
+      "title": "小蛋掉线",
+      "description": "报到系统短暂掉线，恢复时损失了一点蛋壳缓存。",
+      "min_delta": 0.2,
+      "max_delta": 1.8,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_024",
+      "type": "negative",
+      "title": "小蛋压纸",
+      "description": "奇米蛋用蛋壳压住报到纸，结果压碎了一小片。",
+      "min_delta": 0.1,
+      "max_delta": 0.7,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_025",
+      "type": "negative",
+      "title": "小蛋滑梯",
+      "description": "几片蛋壳顺着报到台边缘滑了下去，暂时找不回来了。",
+      "min_delta": 0.1,
+      "max_delta": 1.2,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_026",
+      "type": "negative",
+      "title": "小蛋整队",
+      "description": "奇米蛋整理队伍时发现你的小蛋壳站错格，扣回一点。",
+      "min_delta": 0.1,
+      "max_delta": 1.0,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_027",
+      "type": "negative",
+      "title": "小蛋取样",
+      "description": "奇米蛋为了检查蛋壳质量，取走了一点点样本。",
+      "min_delta": 0.2,
+      "max_delta": 1.3,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_028",
+      "type": "negative",
+      "title": "小蛋风干",
+      "description": "今天的蛋壳晾得太久，缩水了一点，余额也少了一点。",
+      "min_delta": 0.1,
+      "max_delta": 0.9,
+      "weight": 2
+    },
+    {
+      "id": "kimi_negative_029",
+      "type": "negative",
+      "title": "小蛋锁柜",
+      "description": "蛋壳柜锁得太紧，开柜时损耗了一点维护蛋壳。",
+      "min_delta": 0.2,
+      "max_delta": 1.6,
+      "weight": 1
+    },
+    {
+      "id": "kimi_negative_030",
+      "type": "negative",
+      "title": "小蛋清仓",
+      "description": "奇米蛋清仓盘点，发现你的旧蛋壳里有一点需要作废。",
+      "min_delta": 0.3,
+      "max_delta": 1.9,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_001",
+      "type": "neutral",
+      "title": "小蛋巡视",
+      "description": "奇米蛋绕着报到台走了一圈，确认今天一切正常。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_002",
+      "type": "neutral",
+      "title": "小蛋点头",
+      "description": "奇米蛋认真点了点头，把你的名字写得端端正正。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_003",
+      "type": "neutral",
+      "title": "小蛋伸懒",
+      "description": "奇米蛋伸了个懒腰，今天的报到气氛很平稳。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_004",
+      "type": "neutral",
+      "title": "小蛋翻书",
+      "description": "奇米蛋翻开报到册，刚好翻到你这一页。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_005",
+      "type": "neutral",
+      "title": "小蛋喝水",
+      "description": "奇米蛋喝了一口水，继续认真守着报到台。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_006",
+      "type": "neutral",
+      "title": "小蛋擦桌",
+      "description": "报到台被奇米蛋擦得很干净，今天没有额外变化。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_007",
+      "type": "neutral",
+      "title": "小蛋摆正",
+      "description": "奇米蛋把报到牌摆正，向你露出非常满意的表情。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_008",
+      "type": "neutral",
+      "title": "小蛋盖被",
+      "description": "蛋壳箱被奇米蛋盖好了小毯子，安安静静没有变化。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_009",
+      "type": "neutral",
+      "title": "小蛋听风",
+      "description": "奇米蛋听了一会儿风声，报到台今天风平浪静。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_010",
+      "type": "neutral",
+      "title": "小蛋数数",
+      "description": "奇米蛋数到你的名字时停了一下，确认数字刚刚好。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_011",
+      "type": "neutral",
+      "title": "小蛋眨眼",
+      "description": "奇米蛋眨了眨眼，像是在说今天也正常通过。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_012",
+      "type": "neutral",
+      "title": "小蛋看表",
+      "description": "奇米蛋看了一眼时间，确认你的报到记录已经写好。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_013",
+      "type": "neutral",
+      "title": "小蛋搬凳",
+      "description": "奇米蛋把小凳子搬到报到台旁边，坐好继续值班。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_014",
+      "type": "neutral",
+      "title": "小蛋收笔",
+      "description": "奇米蛋写完你的名字，把笔帽轻轻盖上。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_015",
+      "type": "neutral",
+      "title": "小蛋贴签",
+      "description": "奇米蛋给今天的报到页贴上日期签，没有额外奖励或扣除。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_016",
+      "type": "neutral",
+      "title": "小蛋开窗",
+      "description": "奇米蛋打开窗透透气，报到台保持清爽稳定。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_017",
+      "type": "neutral",
+      "title": "小蛋关灯",
+      "description": "奇米蛋检查了一下灯光，确认亮度正好。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_018",
+      "type": "neutral",
+      "title": "小蛋排本",
+      "description": "报到册排得整整齐齐，你的记录也安稳地躺在里面。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_019",
+      "type": "neutral",
+      "title": "小蛋试印",
+      "description": "奇米蛋试了一下印章，今天的印泥颜色很漂亮。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_020",
+      "type": "neutral",
+      "title": "小蛋清嗓",
+      "description": "奇米蛋清了清嗓子，准备迎接下一位报到成员。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_021",
+      "type": "neutral",
+      "title": "小蛋对齐",
+      "description": "奇米蛋把蛋壳罐排成一条直线，看起来非常舒适。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_022",
+      "type": "neutral",
+      "title": "小蛋听铃",
+      "description": "报到铃轻轻响了一声，奇米蛋确认没有异常。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_023",
+      "type": "neutral",
+      "title": "小蛋望天",
+      "description": "奇米蛋望了望今天的天空，觉得是个普通但不错的日子。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_024",
+      "type": "neutral",
+      "title": "小蛋拍照",
+      "description": "奇米蛋给报到台拍了一张照片，记录今天的平稳时刻。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_025",
+      "type": "neutral",
+      "title": "小蛋铺纸",
+      "description": "奇米蛋铺好新纸，准备继续记录今天的报到名单。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_026",
+      "type": "neutral",
+      "title": "小蛋握笔",
+      "description": "奇米蛋握着笔等了一会儿，确认今天无需额外处理。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_027",
+      "type": "neutral",
+      "title": "小蛋巡线",
+      "description": "奇米蛋沿着报到线走了一遍，一切都在正确位置。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_028",
+      "type": "neutral",
+      "title": "小蛋收纳",
+      "description": "奇米蛋把小工具收进抽屉，今天没有额外波动。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_029",
+      "type": "neutral",
+      "title": "小蛋安静",
+      "description": "奇米蛋今天格外安静，只是认真地完成了报到登记。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    },
+    {
+      "id": "kimi_neutral_030",
+      "type": "neutral",
+      "title": "小蛋晚安",
+      "description": "奇米蛋把今天的报到册合上，向你轻轻说了声晚安。",
+      "min_delta": 0.0,
+      "max_delta": 0.0,
+      "weight": 1
+    }
+  ]
+}

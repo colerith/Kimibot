@@ -6,7 +6,14 @@ from discord import SlashCommandGroup
 
 # 从同目录的模块导入
 from .storage import load_role_data, save_role_data
-from .views import RoleManagerView, RoleClaimView, deploy_role_panel, NotificationEntranceView
+from .views import (
+    CommunityPanelManageView,
+    RoleManagerView,
+    RoleClaimView,
+    build_community_manage_embed,
+    deploy_role_panel,
+    NotificationEntranceView,
+)
 # 从全局配置导入
 from config import IDS, STYLE
 from cogs.shared.utils import is_super_egg
@@ -25,7 +32,15 @@ class RolesCog(commands.Cog):
         print("[Roles] Cog loaded and persistent views registered.")
 
     # --- 命令组定义 ---
+    community_group = SlashCommandGroup("社区面板", "管理小蛋报到与社区蛋壳面板")
     role_group = SlashCommandGroup("百变小蛋", "管理自助领取的装饰身份组和通知")
+
+    @community_group.command(name="管理", description="打开社区面板管理台")
+    @is_super_egg()
+    async def manage_community_panel(self, ctx: discord.ApplicationContext):
+        embed = build_community_manage_embed(ctx.guild)
+        view = CommunityPanelManageView(ctx, self.bot)
+        await ctx.respond(embed=embed, view=view, ephemeral=True)
 
     @role_group.command(name="管理身份组", description="打开身份组管理控制台（添加/移除身份组）")
     @is_super_egg()

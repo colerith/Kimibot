@@ -26,7 +26,14 @@ from .storage import (
     LOTTERY_KIND_COLOR,
     LOTTERY_KIND_ICON,
 )
-from cogs.points.storage import get_user_points, modify_user_points, sign_in_user
+from cogs.points.storage import format_shells, get_user_points, get_user_summary, modify_user_points, sign_in_user
+from cogs.points.storage import (
+    get_acceleration_status,
+    get_acceleration_tiers,
+    get_daily_signin_summary,
+    load_random_events,
+    purchase_acceleration_card,
+)
 from config import STYLE
 from discord.ui import Select
 
@@ -57,17 +64,16 @@ def _rules_text() -> str:
     data = load_role_data()
     cfg = get_lottery_config(data)
 
-    single_cost = max(1, int(cfg.get("cost_single", int(getattr(config, "LOTTERY_COST", 50)))))
+    single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 3.0)))))
     ten_cost = max(
-        888,
-        int(getattr(config, "LOTTERY_TEN_COST", 888)),
         single_cost,
-        int(cfg.get("cost_ten", 888)),
+        float(getattr(config, "LOTTERY_TEN_COST", 25.0)),
+        float(cfg.get("cost_ten", 25.0)),
     )
 
-    msg_daily_cap = int(getattr(config, "POINTS_DAILY_MSG_CAP", 100))
-    post_reward = int(getattr(config, "POINTS_POST_REWARD", 10))
-    post_daily_cap = int(getattr(config, "POINTS_DAILY_POST_CAP", 50))
+    sign_reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
+    post_reward = float(getattr(config, "POINTS_POST_REWARD", 5.0))
+    post_daily_cap = float(getattr(config, "POINTS_DAILY_POST_CAP", 15.0))
 
     weights = cfg.get("weights", {})
     w_junk = int(weights.get(str(RARITY_JUNK), 40))
@@ -76,12 +82,13 @@ def _rules_text() -> str:
     w_legend = int(weights.get(str(RARITY_LEGENDARY), 5))
 
     return (
-        "📌 **当前积分/抽奖规则**\n"
-        f"- 🎲 单抽消耗：**{single_cost}** 积分\n"
-        f"- 🎯 十连消耗：**{ten_cost}** 积分\n"
+        "📌 **当前蛋壳/抽奖规则**\n"
+        f"- 🎲 单抽消耗：**{format_shells(single_cost)}** 蛋壳\n"
+        f"- 🎯 十连消耗：**{format_shells(ten_cost)}** 蛋壳\n"
         f"- 📈 抽奖概率(☆/★/★★/★★★)：**{w_junk}/{w_normal}/{w_rare}/{w_legend}**\n"
-        f"- 💬 社区发言：每日最多获得 **{msg_daily_cap}** 积分\n"
-        f"- 🧵 社区发帖：每帖 **{post_reward}** 积分，每日最多 **{post_daily_cap}** 积分"
+        f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
+        f"- 💬 有效发言：不再单条加分，会提升报到加成\n"
+        f"- 🧵 社区发帖：每帖 **{format_shells(post_reward)}** 蛋壳，每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
     )
 
 # --- 抽奖界面 ---
@@ -100,18 +107,18 @@ class RoleLotteryView(discord.ui.View):
         data = load_role_data()
         cfg = get_lottery_config(data)
 
-        fallback_single = int(getattr(config, "LOTTERY_COST", 50))
-        fallback_ten = int(getattr(config, "LOTTERY_TEN_COST", 888))
-        fallback_refund = int(getattr(config, "LOTTERY_REFUND", 20))
+        fallback_single = float(getattr(config, "LOTTERY_COST", 3.0))
+        fallback_ten = float(getattr(config, "LOTTERY_TEN_COST", 25.0))
+        fallback_refund = float(getattr(config, "LOTTERY_REFUND", 1.0))
 
-        cost_single = max(1, int(cfg.get("cost_single", fallback_single)))
-        cost_ten = max(888, fallback_ten, cost_single, int(cfg.get("cost_ten", fallback_ten)))
+        cost_single = max(0.1, float(cfg.get("cost_single", fallback_single)))
+        cost_ten = max(cost_single, fallback_ten, float(cfg.get("cost_ten", fallback_ten)))
         cost = cost_ten if draw_count == 10 else cost_single * draw_count
 
         current_points = get_user_points(user.id, guild_id)
         if current_points < cost:
             return await interaction.followup.send(
-                f"💸 **积分不足！**\n你需要 **{cost}** 积分才能执行本次抽奖，当前只有 **{current_points}**。",
+                f"💸 **蛋壳不足！**\n你需要 **{format_shells(cost)}** 蛋壳才能执行本次抽奖，当前只有 **{format_shells(current_points)}**。",
                 ephemeral=True,
             )
 
@@ -133,7 +140,7 @@ class RoleLotteryView(discord.ui.View):
         if not any(pools_by_kind_rarity[k][r] for k in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON) for r in (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)):
             return await interaction.followup.send("⚠️ 奖池里的身份组好像失效了，请联系管理员。", ephemeral=True)
 
-        modify_user_points(user.id, -cost, guild_id)
+        modify_user_points(user.id, -cost, guild_id, source="role_lottery", reason=f"draw_count={draw_count}")
 
         weights_cfg = cfg.get("weights", {})
         rarity_pool = [RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY]
@@ -167,7 +174,7 @@ class RoleLotteryView(discord.ui.View):
 
             won_role = random.choice(candidates)
             if won_role.id in user_collection_ids:
-                refund_amt = max(0, int(refund_cfg.get(str(rarity), fallback_refund)))
+                refund_amt = max(0.0, float(refund_cfg.get(str(rarity), fallback_refund)))
                 total_refund += refund_amt
                 results.append({"role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": True, "refund": refund_amt})
             else:
@@ -177,7 +184,7 @@ class RoleLotteryView(discord.ui.View):
                 results.append({"role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": False, "refund": 0})
 
         if total_refund > 0:
-            modify_user_points(user.id, total_refund, guild_id)
+            modify_user_points(user.id, total_refund, guild_id, source="role_lottery_refund", reason=f"draw_count={draw_count}")
 
         equipped_role = granted_roles[-1] if granted_roles else None
         equip_error = None
@@ -191,7 +198,7 @@ class RoleLotteryView(discord.ui.View):
                     keep_role_id=equipped_role.id,
                     exclusive_type=exclusive_type,
                 )
-                await user.add_roles(equipped_role, reason="积分抽奖获取")
+                await user.add_roles(equipped_role, reason="蛋壳抽奖获取")
             except Exception as e:
                 equip_error = str(e)
 
@@ -215,7 +222,7 @@ class RoleLotteryView(discord.ui.View):
             rarity_text = _rarity_label(rarity)
             kind_text = _lottery_kind_label(kind)
             if row["dupe"]:
-                lines.append(f"♻️ [{kind_text}] {rarity_text} · {role.mention} (重复 +{row['refund']})")
+                lines.append(f"♻️ [{kind_text}] {rarity_text} · {role.mention} (重复 +{format_shells(row['refund'])} 蛋壳)")
             else:
                 lines.append(f"✨ [{kind_text}] {rarity_text} · {role.mention} (新解锁)")
 
@@ -223,9 +230,9 @@ class RoleLotteryView(discord.ui.View):
         embed.add_field(
             name="结算",
             value=(
-                f"本次消耗: **{cost}**\n"
-                f"重复返还: **{total_refund}**\n"
-                f"当前余额: **{final_points}**\n"
+                f"本次消耗: **{format_shells(cost)}** 蛋壳\n"
+                f"重复返还: **{format_shells(total_refund)}** 蛋壳\n"
+                f"当前余额: **{format_shells(final_points)}** 蛋壳\n"
                 f"新解锁: **{new_count}** | 重复: **{dupe_count}** | 空抽: **{miss_count}**"
             ),
             inline=False,
@@ -245,10 +252,10 @@ class RoleLotteryView(discord.ui.View):
     async def draw_ten_callback(self, button, interaction: discord.Interaction):
         await self._run_draw(interaction, draw_count=10)
 
-    @discord.ui.button(label="📜 查看积分", style=discord.ButtonStyle.secondary, emoji="👛", custom_id="lottery_check_points")
+    @discord.ui.button(label="📜 查看蛋壳", style=discord.ButtonStyle.secondary, emoji="👛", custom_id="lottery_check_points")
     async def check_points(self, button, interaction: discord.Interaction):
         p = get_user_points(interaction.user.id, interaction.guild_id or 0)
-        await interaction.response.send_message(f"💰 你当前的社区活跃积分是：**{p}**", ephemeral=True)
+        await interaction.response.send_message(f"🥚 你当前的蛋壳余额是：**{format_shells(p)}**", ephemeral=True)
 
     @discord.ui.button(label="📊 奖池图鉴", style=discord.ButtonStyle.success, emoji="🌌", custom_id="lottery_collection_view")
     async def collection_callback(self, button, interaction: discord.Interaction):
@@ -403,6 +410,155 @@ class RoleSelectionView(discord.ui.View):
         # 允许此视图中的所有组件交互
         return True
 
+
+class AccelerationShopView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        for tier in get_acceleration_tiers():
+            self.add_item(AccelerationTierButton(tier))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("这不是你的加速购买面板。", ephemeral=True)
+            return False
+        return True
+
+
+class AccelerationTierButton(discord.ui.Button):
+    def __init__(self, tier: dict):
+        super().__init__(
+            label=tier["label"],
+            style=discord.ButtonStyle.primary,
+            emoji="⚡",
+            custom_id=f"accel_buy_{tier['id']}",
+        )
+        self.tier = tier
+
+    async def callback(self, interaction: discord.Interaction):
+        result = purchase_acceleration_card(interaction.user.id, interaction.guild_id, self.tier["id"])
+        if not result.get("success"):
+            reason = result.get("reason")
+            if reason == "insufficient_shells":
+                msg = (
+                    f"蛋壳不足，购买 **{self.tier['label']}** 需要 "
+                    f"**{format_shells(result.get('cost', self.tier['cost']))}** 蛋壳，"
+                    f"你当前只有 **{format_shells(result.get('balance', 0))}**。"
+                )
+            elif reason == "max_reached":
+                msg = "你的加速天数已经达到上限，最快等待期已经压到 5 天啦。"
+            else:
+                msg = "购买失败，请稍后再试。"
+            return await interaction.response.send_message(msg, ephemeral=True)
+
+        status = result["status"]
+        msg = (
+            f"✅ 已购买 **{self.tier['label']}** 加速卡。\n"
+            f"本次生效：**{result['effective_days']}** 天\n"
+            f"累计加速：**{status['acceleration_days']} / {status['max_days']}** 天\n"
+            f"正式答题等待期：**{status['required_wait_days']}** 天\n"
+            f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳"
+        )
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+def build_acceleration_embed(user_id: int, guild_id: int) -> discord.Embed:
+    status = get_acceleration_status(user_id, guild_id)
+    lines = [
+        f"累计加速：**{status['acceleration_days']} / {status['max_days']}** 天",
+        f"当前正式答题等待期：**{status['required_wait_days']}** 天",
+        "",
+        "可购买档位：",
+    ]
+    for tier in status["tiers"]:
+        lines.append(f"- {tier['label']}：{format_shells(tier['cost'])} 蛋壳")
+
+    embed = discord.Embed(
+        title="⚡ 加速购买",
+        description="\n".join(lines),
+        color=STYLE["KIMI_YELLOW"],
+    )
+    embed.set_footer(text="累计最多减少 25 天，正式答题最低等待 5 天。")
+    return embed
+
+
+def build_shell_help_embed() -> discord.Embed:
+    sign_reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
+    forum_reward = float(getattr(config, "FORUM_REWARD_AMOUNT", 5.0))
+    boost_reward = float(getattr(config, "BOOST_REWARD_AMOUNT", 10.0))
+    prequiz_reward = float(getattr(config, "PRE_QUIZ_REWARD", 5.0))
+    embed = discord.Embed(
+        title="🥚 蛋壳帮助",
+        description=(
+            "这里是当前可以获取和使用蛋壳的机制总览。\n\n"
+            f"**每日签到**：每天报到 1 次，基础 +{format_shells(sign_reward)} 蛋壳。\n"
+            "**随机事件**：签到时触发，可能增加或扣除 0.1-1.9 蛋壳。\n"
+            "**前十奖励**：每天前 10 名签到会额外获得 0.1-1.9 蛋壳。\n"
+            "**连续加成**：连续签到满 7/14/30/60/90 天后，提高签到收益。\n"
+            "**发言加成**：有效发言不再单条给蛋壳，会提高签到加成。\n"
+            f"**发帖奖励**：指定论坛频道每天前 3 帖，每帖 +{format_shells(forum_reward)} 蛋壳。\n"
+            f"**预备答题**：预答题通过后固定 +{format_shells(prequiz_reward)} 蛋壳，每人一次。\n"
+            f"**服务器助力**：每次助力 +{format_shells(boost_reward)} 蛋壳。\n"
+            "**蛋壳红包**：后续可把蛋壳发成红包让大家抢。\n\n"
+            "**蛋壳用途**：身份抽奖、加速卡、换装/商店相关兑换。"
+        ),
+        color=STYLE["KIMI_YELLOW"],
+    )
+    embed.set_footer(text="具体数值以当前配置和实际结算为准。")
+    return embed
+
+
+def build_role_panel_embed(guild: discord.Guild, user_avatar_url: str | None = None) -> discord.Embed:
+    summary = get_daily_signin_summary(guild.id)
+    top10 = summary.get("top10", [])
+    if top10:
+        top_lines = [f"`{index}.` <@{user_id}>" for index, user_id in enumerate(top10, start=1)]
+        top_text = "\n".join(top_lines)
+    else:
+        top_text = "今天还没有人报到，等一个第 1 名小蛋。"
+
+    embed = discord.Embed(
+        title="🥚 **小蛋报到**",
+        description="每天来奇米蛋这里报到，就可以领取 **1 蛋壳**。\n\n"
+                    "🐣 **每日签到**\n"
+                    "每个成员每天只能报到 1 次，连续报到和有效发言会提高报到加成。\n\n"
+                    f"📊 **今日报到**\n"
+                    f"今日已报到：**{summary['count']}** 人\n"
+                    f"日期：`{summary['date']}`\n\n"
+                    f"🏆 **今日前十**\n{top_text}\n\n"
+                    "🥚 **蛋壳用途**\n"
+                    "蛋壳可以用于身份抽奖、加速卡、换装相关兑换，以及后续的小蛋商店功能。\n\n"
+                    "🎲 **随机事件**\n"
+                    "报到时会触发小蛋事件，可能获得或扣掉 `0.1 - 1.9` 蛋壳。",
+        color=STYLE["KIMI_YELLOW"]
+    )
+
+    if user_avatar_url:
+        embed.set_thumbnail(url=user_avatar_url)
+
+    embed.set_footer(text="小蛋会记得你每天来过。")
+    return embed
+
+
+async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None = None):
+    data = load_role_data()
+    panel_info = data.get("panel_info", {})
+    channel_id = panel_info.get("channel_id")
+    message_id = panel_info.get("message_id")
+    if not channel_id or not message_id:
+        return False
+
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        return False
+
+    try:
+        message = await channel.fetch_message(int(message_id))
+        await message.edit(embed=build_role_panel_embed(guild, user_avatar_url), view=RoleClaimView())
+        return True
+    except (discord.NotFound, discord.Forbidden):
+        return False
+
 # --- 用户端视图: 公开主面板入口 ---
 class RoleClaimView(discord.ui.View):
     """
@@ -415,7 +571,25 @@ class RoleClaimView(discord.ui.View):
         # 允许所有用户与这个公共面板交互
         return True
 
-    @discord.ui.button(label="🎨 领取/更换", style=discord.ButtonStyle.success, custom_id="role_main_start")
+    @discord.ui.button(label="蛋壳余额", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_shells", row=0)
+    async def shells_callback(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+
+        summary = get_user_summary(interaction.user.id, interaction.guild_id)
+        text = (
+            f"🥚 **你的蛋壳余额：{format_shells(summary['shells'])}**\n"
+            f"连续报到：**{summary['streak_days']}** 天\n"
+            f"今日有效发言：**{summary['daily_msg_count']}** 条\n\n"
+            f"{_rules_text()}"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @discord.ui.button(label="使用帮助", style=discord.ButtonStyle.secondary, emoji="❔", custom_id="role_main_shell_help", row=0)
+    async def shell_help_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=build_shell_help_embed(), ephemeral=True)
+
+    @discord.ui.button(label="小蛋换装", style=discord.ButtonStyle.success, emoji="🎨", custom_id="role_main_start", row=1)
     async def start_decor_callback(self, button, interaction: discord.Interaction):
         data = load_role_data()
         claimable_ids = set(data.get("claimable_roles", []))
@@ -466,71 +640,99 @@ class RoleClaimView(discord.ui.View):
 
         # 4. 发送私密选择面板
         embed = discord.Embed(
-            title="👗 个人试衣间",
+            title="👗 小蛋换装",
             description=f"**当前穿戴状态:**\n{status_text}\n\n请在下方菜单中选择你喜欢的装饰进行穿戴或更换：",
             color=0xFFB6C1
         )
         # 传入合并后的列表
         await interaction.response.send_message(embed=embed, view=RoleSelectionView(selectable_roles), ephemeral=True)
+
+    @discord.ui.button(label="加速购买", style=discord.ButtonStyle.secondary, emoji="⚡", custom_id="role_main_acceleration", row=1)
+    async def acceleration_callback(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        embed = build_acceleration_embed(interaction.user.id, interaction.guild_id)
+        await interaction.response.send_message(embed=embed, view=AccelerationShopView(interaction.user.id), ephemeral=True)
     
-    @discord.ui.button(label="🎲 积分抽奖", style=discord.ButtonStyle.primary, custom_id="role_main_lottery")
+    @discord.ui.button(label="身份抽奖", style=discord.ButtonStyle.primary, emoji="🎲", custom_id="role_main_lottery", row=1)
     async def lottery_entry_callback(self, button, interaction: discord.Interaction):
         data = load_role_data()
         cfg = get_lottery_config(data)
-        single_cost = max(1, int(cfg.get("cost_single", int(getattr(config, "LOTTERY_COST", 50)))))
-        ten_cost = max(888, int(getattr(config, "LOTTERY_TEN_COST", 888)), single_cost, int(cfg.get("cost_ten", 888)))
-        sign_reward = int(getattr(config, "POINTS_SIGN_REWARD", 30))
-        msg_daily_cap = int(getattr(config, "POINTS_DAILY_MSG_CAP", 100))
-        post_reward = int(getattr(config, "POINTS_POST_REWARD", 10))
-        post_daily_cap = int(getattr(config, "POINTS_DAILY_POST_CAP", 50))
+        single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 3.0)))))
+        ten_cost = max(float(getattr(config, "LOTTERY_TEN_COST", 25.0)), single_cost, float(cfg.get("cost_ten", 25.0)))
+        sign_reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
+        post_reward = float(getattr(config, "POINTS_POST_REWARD", 5.0))
+        post_daily_cap = float(getattr(config, "POINTS_DAILY_POST_CAP", 15.0))
 
         refund_cfg = cfg.get("refund", {})
         refund_line = (
-            f"☆{int(refund_cfg.get(str(RARITY_JUNK), 0))} / "
-            f"★{int(refund_cfg.get(str(RARITY_NORMAL), 0))} / "
-            f"★★{int(refund_cfg.get(str(RARITY_RARE), 0))} / "
-            f"★★★{int(refund_cfg.get(str(RARITY_LEGENDARY), 0))}"
+            f"☆{format_shells(refund_cfg.get(str(RARITY_JUNK), 0))} / "
+            f"★{format_shells(refund_cfg.get(str(RARITY_NORMAL), 0))} / "
+            f"★★{format_shells(refund_cfg.get(str(RARITY_RARE), 0))} / "
+            f"★★★{format_shells(refund_cfg.get(str(RARITY_LEGENDARY), 0))}"
         )
 
         points = get_user_points(interaction.user.id, interaction.guild_id or 0)
         embed = discord.Embed(
-            title="🌌 **星之运势 · 身份组抽奖**",
+            title="🌌 **奇米蛋 · 身份抽奖**",
             description=f"这里藏着一些无法直接领取的 **稀有款式**！\n你会是那个被命运选中的孩子吗？\n\n"
-                        f"💳 **单抽消耗**: {single_cost} 积分\n"
-                        f"💳 **十连消耗**: {ten_cost} 积分\n"
-                        f"🔄 **重复补偿**: {refund_line}\n"
-                        f"💰 **你的积蓄**: **{points}**\n\n"
-                        f"📌 **积分获取**\n"
-                        f"- 📅 每日签到：+{sign_reward}\n"
-                        f"- 💬 社区发言：每日最多 +{msg_daily_cap}\n"
-                        f"- 🧵 社区发帖：每帖 +{post_reward}，每日最多 +{post_daily_cap}\n",
+                        f"💳 **单抽消耗**: {format_shells(single_cost)} 蛋壳\n"
+                        f"💳 **十连消耗**: {format_shells(ten_cost)} 蛋壳\n"
+                        f"🔄 **重复补偿**: {refund_line} 蛋壳\n"
+                        f"🥚 **你的蛋壳**: **{format_shells(points)}**\n\n"
+                        f"📌 **蛋壳获取**\n"
+                        f"- 📅 小蛋报到：+{format_shells(sign_reward)} 起\n"
+                        f"- 💬 有效发言：提升报到加成\n"
+                        f"- 🧵 社区发帖：每帖 +{format_shells(post_reward)}，每日最多 +{format_shells(post_daily_cap)}\n",
             color=discord.Color.purple()
         )
         await interaction.response.send_message(embed=embed, view=RoleLotteryView(), ephemeral=True)
 
-    @discord.ui.button(label="📅 每日签到", style=discord.ButtonStyle.secondary, custom_id="role_main_sign_in")
+    @discord.ui.button(label="每日签到", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="role_main_sign_in", row=0)
     async def main_sign_in_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
 
-        reward = int(getattr(config, "POINTS_SIGN_REWARD", 30))
-        success, points = sign_in_user(interaction.user.id, interaction.guild_id, reward=reward)
-        if success:
+        reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
+        result = sign_in_user(interaction.user.id, interaction.guild_id, reward=reward)
+        if result.get("success"):
+            await refresh_role_panel(
+                interaction.guild,
+                interaction.client.user.display_avatar.url if interaction.client.user else None,
+            )
+            event = result.get("event", {})
+            event_delta = float(result.get("event_delta", 0))
+            event_sign = "+" if event_delta > 0 else ""
+            bonus_lines = []
+            if result.get("bonus_amount", 0) > 0:
+                bonus_lines.append(f"连续/活跃加成：+{format_shells(result['bonus_amount'])} 蛋壳")
+            if result.get("rank_bonus", 0) > 0:
+                bonus_lines.append(f"前十报到奖励：+{format_shells(result['rank_bonus'])} 蛋壳")
+            bonus_text = "\n".join(bonus_lines) if bonus_lines else "今日暂无额外加成"
             text = (
-                f"✅ 今日签到成功，获得 **{reward}** 积分！\n"
-                f"💰 当前余额：**{points}**\n\n"
+                f"✅ **小蛋报到成功！**\n"
+                f"基础奖励：+{format_shells(result['base_reward'])} 蛋壳\n"
+                f"{bonus_text}\n"
+                f"随机事件：**{event.get('title', '小蛋事件')}** ({event_sign}{format_shells(abs(event_delta))})\n"
+                f"{event.get('description', '')}\n\n"
+                f"连续报到：**{result['streak_days']}** 天\n"
+                f"今日排名：第 **{result['rank']}** 位\n"
+                f"本次合计：**{'-' if result['total_delta'] < 0 else '+'}{format_shells(abs(result['total_delta']))}** 蛋壳\n"
+                f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳\n\n"
                 f"{_rules_text()}"
             )
         else:
+            summary = get_user_summary(interaction.user.id, interaction.guild_id)
             text = (
-                f"🕒 今日已签到过啦。\n"
-                f"💰 当前余额：**{points}**\n\n"
+                f"🕒 今日已经报到过啦。\n"
+                f"连续报到：**{summary['streak_days']}** 天\n"
+                f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳\n\n"
                 f"{_rules_text()}"
             )
 
         await interaction.response.send_message(text, ephemeral=True)
 
-    @discord.ui.button(label="🧹 一键移除", style=discord.ButtonStyle.danger, custom_id="role_main_remove_all")
+    @discord.ui.button(label="一键移除", style=discord.ButtonStyle.danger, emoji="🧹", custom_id="role_main_remove_all", row=1)
     async def remove_all_callback(self, button, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         # 调用我们的全局移除函数
@@ -1016,16 +1218,16 @@ class LotteryCostModal(discord.ui.Modal):
         self.parent_view = parent_view
 
         self.single_input = ui.InputText(
-            label="单抽消耗",
-            placeholder="例如 50",
-            value=str(config_data.get("cost_single", 50)),
+            label="单抽消耗（蛋壳）",
+            placeholder="例如 3.0",
+            value=str(config_data.get("cost_single", 3.0)),
             required=True,
             max_length=6,
         )
         self.ten_input = ui.InputText(
-            label="十连消耗",
-            placeholder="例如 888",
-            value=str(config_data.get("cost_ten", 888)),
+            label="十连消耗（蛋壳）",
+            placeholder="例如 25.0",
+            value=str(config_data.get("cost_ten", 25.0)),
             required=True,
             max_length=6,
         )
@@ -1034,8 +1236,8 @@ class LotteryCostModal(discord.ui.Modal):
 
     async def callback(self, interaction: discord.Interaction):
         try:
-            single = int((self.single_input.value or "").strip())
-            ten = int((self.ten_input.value or "").strip())
+            single = float((self.single_input.value or "").strip())
+            ten = float((self.ten_input.value or "").strip())
         except ValueError:
             return await interaction.response.send_message("❌ 输入格式错误，请填写数字。", ephemeral=True)
 
@@ -1057,8 +1259,8 @@ class LotteryCostModal(discord.ui.Modal):
 
         await interaction.followup.send(
             f"✅ 抽奖消耗已更新（已保存）\n"
-            f"- 单抽：{int(cfg.get('cost_single', single))}\n"
-            f"- 十连：{int(cfg.get('cost_ten', 888))}（十连最低 888）",
+            f"- 单抽：{format_shells(cfg.get('cost_single', single))} 蛋壳\n"
+            f"- 十连：{format_shells(cfg.get('cost_ten', ten))} 蛋壳",
             ephemeral=True,
         )
 
@@ -1079,9 +1281,9 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
             max_length=32,
         )
         self.refund_input = ui.InputText(
-            label="重复返还(☆,★,★★,★★★)",
-            placeholder="例如 8,20,40,100",
-            value=f"{int(r.get(str(RARITY_JUNK), 8))},{int(r.get(str(RARITY_NORMAL), 20))},{int(r.get(str(RARITY_RARE), 40))},{int(r.get(str(RARITY_LEGENDARY), 100))}",
+            label="重复返还蛋壳(☆,★,★★,★★★)",
+            placeholder="例如 0.5,1.0,2.0,5.0",
+            value=f"{format_shells(r.get(str(RARITY_JUNK), 0.5))},{format_shells(r.get(str(RARITY_NORMAL), 1.0))},{format_shells(r.get(str(RARITY_RARE), 2.0))},{format_shells(r.get(str(RARITY_LEGENDARY), 5.0))}",
             required=True,
             max_length=32,
         )
@@ -1089,19 +1291,19 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
         self.add_item(self.refund_input)
 
     @staticmethod
-    def _parse_quad(raw: str):
+    def _parse_quad(raw: str, *, as_float: bool = False):
         values = [x.strip() for x in (raw or "").split(",") if x.strip()]
         if len(values) != 4:
             raise ValueError("需要4个数值")
-        return [int(v) for v in values]
+        return [float(v) if as_float else int(v) for v in values]
 
     async def callback(self, interaction: discord.Interaction):
         try:
             w_junk, w_normal, w_rare, w_legend = self._parse_quad(self.weights_input.value)
-            r_junk, r_normal, r_rare, r_legend = self._parse_quad(self.refund_input.value)
+            r_junk, r_normal, r_rare, r_legend = self._parse_quad(self.refund_input.value, as_float=True)
         except ValueError:
             return await interaction.response.send_message(
-                "❌ 输入格式错误，请按 `a,b,c,d` 填写 4 个整数。",
+                "❌ 输入格式错误，请按 `a,b,c,d` 填写 4 个数值。",
                 ephemeral=True,
             )
 
@@ -1137,7 +1339,7 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
         await interaction.followup.send(
             "✅ 概率与重复返还已更新（已保存）\n"
             f"- 概率(☆/★/★★/★★★)：{int(weights.get(str(RARITY_JUNK), 40))}/{int(weights.get(str(RARITY_NORMAL), 40))}/{int(weights.get(str(RARITY_RARE), 15))}/{int(weights.get(str(RARITY_LEGENDARY), 5))}\n"
-            f"- 补偿(☆/★/★★/★★★)：{int(refund.get(str(RARITY_JUNK), 8))}/{int(refund.get(str(RARITY_NORMAL), 20))}/{int(refund.get(str(RARITY_RARE), 40))}/{int(refund.get(str(RARITY_LEGENDARY), 100))}",
+            f"- 补偿(☆/★/★★/★★★)：{format_shells(refund.get(str(RARITY_JUNK), 0.5))}/{format_shells(refund.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refund.get(str(RARITY_RARE), 2.0))}/{format_shells(refund.get(str(RARITY_LEGENDARY), 5.0))} 蛋壳",
             ephemeral=True,
         )
 
@@ -1273,9 +1475,9 @@ class RoleManagerView(discord.ui.View):
         embed.add_field(
             name="💳 抽奖参数",
             value=(
-                f"单抽: **{int(cfg.get('cost_single', 50))}** | 十连: **{max(888, int(cfg.get('cost_ten', 888)))}**\n"
+                f"单抽: **{format_shells(cfg.get('cost_single', 3.0))}** 蛋壳 | 十连: **{format_shells(cfg.get('cost_ten', 25.0))}** 蛋壳\n"
                 f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 40))}/{int(weights.get(str(RARITY_NORMAL), 40))}/{int(weights.get(str(RARITY_RARE), 15))}/{int(weights.get(str(RARITY_LEGENDARY), 5))}**\n"
-                f"补偿(☆/★/★★/★★★): **{int(refunds.get(str(RARITY_JUNK), 8))}/{int(refunds.get(str(RARITY_NORMAL), 20))}/{int(refunds.get(str(RARITY_RARE), 40))}/{int(refunds.get(str(RARITY_LEGENDARY), 100))}**"
+                f"补偿(☆/★/★★/★★★): **{format_shells(refunds.get(str(RARITY_JUNK), 0.5))}/{format_shells(refunds.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refunds.get(str(RARITY_RARE), 2.0))}/{format_shells(refunds.get(str(RARITY_LEGENDARY), 5.0))}** 蛋壳"
             ),
             inline=False,
         )
@@ -1295,44 +1497,92 @@ class RoleManagerView(discord.ui.View):
             await interaction.edit_original_response(embed=embed, view=self)
 
 
+class CommunityPanelManageView(discord.ui.View):
+    def __init__(self, ctx, bot):
+        super().__init__(timeout=600)
+        self.ctx = ctx
+        self.bot = bot
+        self.owner_id = ctx.author.id if getattr(ctx, "author", None) else None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.owner_id and interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ 这个管理台只允许发起命令的管理员操作。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="发送面板", style=discord.ButtonStyle.success, emoji="📌", custom_id="community_admin_send_panel")
+    async def send_panel_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        avatar_url = self.bot.user.display_avatar.url if self.bot.user else None
+        status = await deploy_role_panel(interaction.channel, interaction.guild, avatar_url)
+        if status == "updated":
+            await interaction.followup.send("✅ 已更新当前频道的小蛋报到面板。", ephemeral=True)
+        else:
+            await interaction.followup.send("✅ 已发送新的小蛋报到面板。", ephemeral=True)
+
+    @discord.ui.button(label="身份管理", style=discord.ButtonStyle.primary, emoji="🎨", custom_id="community_admin_roles")
+    async def role_manage_callback(self, button, interaction: discord.Interaction):
+        view = RoleManagerView(interaction)
+        embed = view.build_dashboard_embed()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="事件刷新", style=discord.ButtonStyle.secondary, emoji="🔄", custom_id="community_admin_events")
+    async def event_refresh_callback(self, button, interaction: discord.Interaction):
+        events = load_random_events()
+        await interaction.response.send_message(
+            f"✅ 随机事件已读取：**{len(events)}** 条。\n来源：`cogs/points/random_events.json`",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="答题面板", style=discord.ButtonStyle.success, emoji="📝", custom_id="community_admin_prequiz_panel")
+    async def prequiz_panel_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        from cogs.prequiz.views import deploy_prequiz_panel
+
+        status = await deploy_prequiz_panel(self.bot)
+        if status == "sent":
+            await interaction.followup.send("✅ 小蛋预答题面板已发送。", ephemeral=True)
+        elif status == "missing_channel_id":
+            await interaction.followup.send("❌ 未配置 PRE_QUIZ_CHANNEL_ID。", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ 找不到预答题频道。", ephemeral=True)
+
+    @discord.ui.button(label="题库刷新", style=discord.ButtonStyle.secondary, emoji="📚", custom_id="community_admin_prequiz_bank")
+    async def prequiz_bank_callback(self, button, interaction: discord.Interaction):
+        from cogs.prequiz.storage import load_question_bank
+
+        bank = load_question_bank()
+        await interaction.response.send_message(
+            f"✅ 预答题题库已读取：**{len(bank['multiple_choice'])}** 道客观题，**{len(bank['short_questions'])}** 道简答题。\n"
+            f"来源：`cogs/prequiz/question_bank.json`",
+            ephemeral=True,
+        )
+
+
+def build_community_manage_embed(guild: discord.Guild | None):
+    embed = discord.Embed(
+        title="⚙️ 社区面板管理台",
+        description=(
+            "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
+            "后续预答题、加速卡、红包等管理入口也统一接入这里。"
+        ),
+        color=0x2B2D31,
+    )
+    if guild:
+        embed.set_footer(text=guild.name, icon_url=guild.icon.url if guild.icon else None)
+    return embed
+
+
 # --- 面板部署辅助函数 ---
 async def deploy_role_panel(channel, guild, user_avatar_url):
     """
     统一的面板部署逻辑
     """
-    # 1. 准备数据和 Embed
-    data = load_role_data()
-    active_roles = []
-    claimable_ids = data.get("claimable_roles", [])
-
-    for rid in claimable_ids:
-        r = guild.get_role(rid)
-        if r: active_roles.append(r)
-
-    if active_roles:
-        role_lines = [f"> {role.mention}" for role in active_roles]
-        role_list_str = "\n".join(role_lines)
-    else:
-        role_list_str = "> *暂无上架装饰*"
-
-    embed = discord.Embed(
-        title="🎨 **百变小蛋 · 装饰身份组中心**",
-        description="欢迎来到装饰中心！在这里你可以自由装扮你的个人资料卡。\n\n"
-                    "✨ **功能介绍**：\n"
-                    "🔸 **开始装饰**：打开私密衣柜，查看并更换你的装饰。\n"
-                    "🔸 **一键移除**：一键卸下所有在此处领取的装饰，恢复素颜。\n"
-                    "🔸 **自动替换**：选择同系列新款式会自动替换旧的哦！\n"
-                    "🔸 **积分抽奖**：多种身份颜色任你选择，抽奖更刺激！\n\n",
-        color=STYLE["KIMI_YELLOW"]
-    )
-
-    if user_avatar_url:
-        embed.set_thumbnail(url=user_avatar_url)
-
-    embed.set_footer(text="点击下方按钮即可体验 👇")
+    embed = build_role_panel_embed(guild, user_avatar_url)
     view = RoleClaimView()
 
     # 2. 检查是否需要更新
+    data = load_role_data()
     panel_info = data.get("panel_info", {})
     last_channel_id = panel_info.get("channel_id")
     last_message_id = panel_info.get("message_id")
