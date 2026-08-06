@@ -1,19 +1,28 @@
 import discord
 
 
-def build_notice_embed(*, target_name: str, target_mention: str, reason: str, deleted_count: int) -> discord.Embed:
+def build_notice_embed(
+    *,
+    target_name: str,
+    target_mention: str,
+    reason: str,
+    deleted_count: int,
+    muted_text: str | None = None,
+) -> discord.Embed:
     deleted_text = (
         f"移除身份组并清理了 {deleted_count} 条广告痕迹。"
         if deleted_count > 0
         else "已移除身份组，未发现可清理历史广告消息。"
     )
+    muted_line = f"{muted_text}\n" if muted_text else ""
 
     embed = discord.Embed(
         title=f"{target_name} 已被广告拦截",
         description=(
             f"**目标**: {target_mention}\n"
             f"**原因**: {reason}\n"
-            f"{deleted_text}\n\n"
+            f"{deleted_text}\n"
+            f"{muted_line}\n"
             "请提高警惕，不要点击不明链接。"
         ),
         color=0xFF2233,
@@ -73,6 +82,8 @@ def build_context_feedback(result: dict | None, mention: str, added_count: int) 
             actions.append(f"清理 {result['deleted_count']} 条消息")
         if result.get("role_removed"):
             actions.append("移除身份组")
+        if result.get("mute_text"):
+            actions.append(result["mute_text"])
 
         if actions:
             punish = f"🔨 已制裁 {mention}: {'，'.join(actions)}。"

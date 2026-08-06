@@ -1,6 +1,7 @@
 import math
 import re
 import time
+import datetime
 from collections import defaultdict
 
 import discord
@@ -20,6 +21,8 @@ from ..shared.utils import is_super_egg
 
 PUBLIC_NOTICE_CHANNEL_ID = IDS.get("PUBLIC_NOTICE_CHANNEL_ID")
 LOG_CHANNEL_ID = IDS.get("LOG_CHANNEL_ID")
+AUTO_AD_PUNISH_CHANNEL_ID = IDS.get("AUTO_AD_PUNISH_CHANNEL_ID")
+AUTO_AD_PUNISH_MUTE_SECONDS = 3 * 24 * 60 * 60
 
 
 class ScamBlockerCog(commands.Cog, name="广告拦截"):
@@ -65,6 +68,7 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
         executor: discord.User | discord.Member | None = None,
         member: discord.Member | None = None,
         trigger_detail: str | None = None,
+        mute_seconds: int = 0,
     ) -> dict | None:
         if user_id in self._punishing:
             return None
@@ -72,8 +76,10 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
         self._punishing.add(user_id)
         try:
             result = await self._remove_role_and_messages(guild, user_id, reason, member)
+            if mute_seconds > 0:
+                await self._timeout_member(guild, user_id, reason, member, mute_seconds, result)
 
-            if result["role_removed"] or result["deleted_count"] > 0:
+            if result["role_removed"] or result["deleted_count"] > 0 or result.get("muted"):
                 punishment_db.add_strike(user_id)
                 await self._send_notifications(
                     guild=guild,
@@ -109,7 +115,14 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
                     target_member = None
 
         if target_member:
-            removable_roles = [r for r in target_member.roles if r != guild.default_role]
+            bot_member = guild.me
+            removable_roles = [
+                r
+                for r in target_member.roles
+                if r != guild.default_role
+                and not getattr(r, "managed", False)
+                and (not bot_member or r < bot_member.top_role)
+            ]
             if removable_roles:
                 try:
                     await target_member.remove_roles(*removable_roles, reason=reason)
@@ -142,6 +155,39 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
         await scam_db.delete_user_logs(user_id)
         return result
 
+    async def _timeout_member(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        reason: str,
+        member: discord.Member | None,
+        mute_seconds: int,
+        result: dict,
+    ):
+        target_member = member or guild.get_member(user_id)
+        if target_member is None:
+            try:
+                target_member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.HTTPException):
+                target_member = None
+
+        result["muted"] = False
+        result["mute_text"] = ""
+        if target_member is None:
+            result["mute_text"] = "禁言失败：用户不在服务器内"
+            return
+
+        try:
+            await target_member.timeout(
+                discord.utils.utcnow() + datetime.timedelta(seconds=mute_seconds),
+                reason=reason,
+            )
+            days = mute_seconds // 86400
+            result["muted"] = True
+            result["mute_text"] = f"已禁言 {days} 天"
+        except (discord.Forbidden, discord.HTTPException) as e:
+            result["mute_text"] = f"禁言失败：{e}"
+
     async def _send_notifications(
         self,
         guild: discord.Guild,
@@ -165,6 +211,8 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
         detail_text = None
         if trigger_detail:
             parts = [f"触发方式: {trigger_detail}"]
+            if result.get("mute_text"):
+                parts.append(f"处罚动作: {result['mute_text']}")
             ch_ids = result.get("channel_ids", set())
             if ch_ids:
                 ch_names = []
@@ -183,6 +231,7 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
                     target_mention=target_mention,
                     reason=reason,
                     deleted_count=result["deleted_count"],
+                    muted_text=result.get("mute_text") or None,
                 )
                 msg = await notice_ch.send(embed=notice_embed)
                 notice_url = msg.jump_url
@@ -218,6 +267,23 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
             user_id=message.author.id,
             channel_id=message.channel.id,
         )
+
+        if AUTO_AD_PUNISH_CHANNEL_ID and message.channel.id == int(AUTO_AD_PUNISH_CHANNEL_ID):
+            try:
+                await message.delete(reason="指定广告频道自动处罚")
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                pass
+
+            await self.punish_user(
+                guild=message.guild,
+                user_id=message.author.id,
+                reason="指定频道发言自动按广告处理",
+                executor=self.bot.user,
+                member=message.author if isinstance(message.author, discord.Member) else None,
+                trigger_detail=f"指定广告频道发言: <#{AUTO_AD_PUNISH_CHANNEL_ID}>",
+                mute_seconds=AUTO_AD_PUNISH_MUTE_SECONDS,
+            )
+            return
 
         if self.rules_cache and message.content:
             for regex in self.rules_cache:
