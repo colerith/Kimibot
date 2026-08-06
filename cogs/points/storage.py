@@ -17,6 +17,17 @@ TZ_CN = timezone(timedelta(hours=8))
 SHELL_PRECISION = 1
 LEGACY_POINTS_TO_SHELLS = 0.1
 
+
+def _empty_points_data() -> dict:
+    return {
+        "version": 3,
+        "users": {},
+        "daily_signins": {},
+        "daily_forum_rewards": {},
+        "transactions": [],
+        "acceleration_purchases": [],
+    }
+
 DEFAULT_RANDOM_EVENTS = {
     "version": 1,
     "events": [
@@ -114,7 +125,7 @@ def _normalize_record(record: dict[str, Any]) -> dict[str, Any]:
 def _normalize_points_data(raw_data: dict) -> dict:
     """兼容旧积分格式并统一为蛋壳结构。"""
     if not isinstance(raw_data, dict):
-        return {"version": 3, "users": {}, "daily_signins": {}, "daily_forum_rewards": {}, "transactions": []}
+        return _empty_points_data()
 
     if "users" in raw_data and isinstance(raw_data["users"], dict):
         users = {
@@ -127,6 +138,7 @@ def _normalize_points_data(raw_data: dict) -> dict:
             "daily_signins": raw_data.get("daily_signins", {}),
             "daily_forum_rewards": raw_data.get("daily_forum_rewards", {}),
             "transactions": raw_data.get("transactions", []),
+            "acceleration_purchases": raw_data.get("acceleration_purchases", []),
         }
 
     users = {}
@@ -137,7 +149,9 @@ def _normalize_points_data(raw_data: dict) -> dict:
             shells = 0.0
         users[str(uid)] = _normalize_record({"shells": shells})
 
-    return {"version": 3, "users": users, "daily_signins": {}, "daily_forum_rewards": {}, "transactions": []}
+    data = _empty_points_data()
+    data["users"] = users
+    return data
 
 
 def _ensure_user_record(data: dict, user_id: int, guild_id: int | None = None) -> tuple[dict, str]:
@@ -179,13 +193,13 @@ def _append_transaction(
 
 def load_points_data():
     if not os.path.exists(POINTS_DATA_FILE):
-        return {"version": 3, "users": {}, "daily_signins": {}, "daily_forum_rewards": {}, "transactions": []}
+        return _empty_points_data()
     try:
         with open(POINTS_DATA_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
             return _normalize_points_data(raw)
     except (json.JSONDecodeError, FileNotFoundError):
-        return {"version": 3, "users": {}, "daily_signins": {}, "daily_forum_rewards": {}, "transactions": []}
+        return _empty_points_data()
 
 
 def save_points_data(data):
@@ -320,13 +334,18 @@ def purchase_acceleration_card(user_id: int, guild_id: int, tier_id: str) -> dic
     record["acceleration_days"] = current_days + effective_days
     card_record = {
         "time": _now_iso(),
+        "guild_id": str(guild_id),
+        "user_id": str(user_id),
         "tier_id": tier["id"],
         "label": tier["label"],
         "configured_days": int(tier["days"]),
         "effective_days": effective_days,
         "cost": cost,
+        "balance": after,
     }
     record.setdefault("acceleration_cards", []).append(card_record)
+    data.setdefault("acceleration_purchases", []).append(card_record)
+    data["acceleration_purchases"] = data["acceleration_purchases"][-500:]
 
     _append_transaction(
         data,

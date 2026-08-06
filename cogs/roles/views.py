@@ -30,6 +30,7 @@ from cogs.points.storage import format_shells, get_user_points, get_user_summary
 from cogs.points.storage import (
     get_acceleration_tiers,
     get_daily_signin_summary,
+    load_points_data,
     load_random_events,
     purchase_acceleration_card,
 )
@@ -1602,18 +1603,189 @@ class CommunityPanelManageView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="加速配置", style=discord.ButtonStyle.secondary, emoji="⚡", custom_id="community_admin_acceleration")
+    async def acceleration_admin_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=build_acceleration_admin_embed(), ephemeral=True)
+
+    @discord.ui.button(label="红包统计", style=discord.ButtonStyle.secondary, emoji="🧧", custom_id="community_admin_red_packets")
+    async def red_packet_admin_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=build_red_packet_admin_embed(), ephemeral=True)
+
+    @discord.ui.button(label="数据总览", style=discord.ButtonStyle.primary, emoji="📊", custom_id="community_admin_data_overview")
+    async def data_overview_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=build_data_overview_embed(), ephemeral=True)
+
 
 def build_community_manage_embed(guild: discord.Guild | None):
     embed = discord.Embed(
         title="⚙️ 社区面板管理台",
         description=(
             "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
-            "后续预答题、加速卡、红包等管理入口也统一接入这里。"
+            "预答题、加速卡、红包与数据追踪入口已统一接入这里。"
         ),
         color=0x2B2D31,
     )
     if guild:
         embed.set_footer(text=guild.name, icon_url=guild.icon.url if guild.icon else None)
+    return embed
+
+
+def build_acceleration_admin_embed() -> discord.Embed:
+    data = load_points_data()
+    users = data.get("users", {})
+    accelerated_users = [
+        record for record in users.values()
+        if isinstance(record, dict) and int(record.get("acceleration_days", 0) or 0) > 0
+    ]
+    nested_cards = sum(
+        len(record.get("acceleration_cards", []))
+        for record in users.values()
+        if isinstance(record, dict) and isinstance(record.get("acceleration_cards", []), list)
+    )
+    top_cards = data.get("acceleration_purchases", [])
+    max_days = int(getattr(config, "ACCELERATION_CARD_MAX_DAYS", 25))
+    base_days = int(getattr(config, "ACCOUNT_BASE_WAIT_DAYS", 30))
+    min_days = int(getattr(config, "ACCOUNT_MIN_WAIT_DAYS", 5))
+
+    tier_lines = [
+        f"- {tier['label']}：减 **{tier['days']}** 天，售价 **{format_shells(tier['cost'])}** 蛋壳"
+        for tier in get_acceleration_tiers()
+    ]
+    embed = discord.Embed(
+        title="⚡ 加速配置",
+        description=(
+            f"基础等待：**{base_days}** 天\n"
+            f"最低等待：**{min_days}** 天\n"
+            f"最大加速：**{max_days}** 天\n\n"
+            + "\n".join(tier_lines)
+        ),
+        color=0xF5C542,
+    )
+    embed.add_field(name="追踪数据", value=(
+        f"已加速用户：**{len(accelerated_users)}**\n"
+        f"用户内购卡记录：**{nested_cards}**\n"
+        f"顶层购买流水：**{len(top_cards) if isinstance(top_cards, list) else 0}**"
+    ), inline=False)
+    embed.set_footer(text="加速购买入口在用户主面板；本面板用于配置核对与数据检查。")
+    return embed
+
+
+def build_red_packet_admin_embed() -> discord.Embed:
+    from cogs.red_packets.storage import DATA_FILE, format_shells as fmt_shells, load_data
+
+    data = load_data()
+    packets = data.get("packets", {})
+    if not isinstance(packets, dict):
+        packets = {}
+
+    status_counts = {"active": 0, "empty": 0, "expired": 0, "cancelled": 0}
+    total_amount = 0.0
+    remaining_amount = 0.0
+    claim_count = 0
+    admin_free_count = 0
+    for packet in packets.values():
+        if not isinstance(packet, dict):
+            continue
+        status = str(packet.get("status", "active"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        total_amount += float(packet.get("total_amount", 0) or 0)
+        remaining_amount += float(packet.get("remaining_amount", 0) or 0)
+        claims = packet.get("claims", {})
+        if isinstance(claims, dict):
+            claim_count += len(claims)
+        if packet.get("admin_free"):
+            admin_free_count += 1
+
+    embed = discord.Embed(
+        title="🧧 红包统计",
+        description=(
+            f"数据表：`{DATA_FILE}`\n"
+            f"红包总数：**{len(packets)}**\n"
+            f"领取记录：**{claim_count}**\n"
+            f"管理员福利红包：**{admin_free_count}**"
+        ),
+        color=0xF05A5A,
+    )
+    embed.add_field(
+        name="状态",
+        value=(
+            f"进行中：**{status_counts.get('active', 0)}**\n"
+            f"已抢完：**{status_counts.get('empty', 0)}**\n"
+            f"已过期：**{status_counts.get('expired', 0)}**\n"
+            f"已取消：**{status_counts.get('cancelled', 0)}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="金额",
+        value=(
+            f"累计发出：**{fmt_shells(total_amount)}** 蛋壳\n"
+            f"当前剩余：**{fmt_shells(remaining_amount)}** 蛋壳"
+        ),
+        inline=True,
+    )
+    embed.set_footer(text="红包由 /发红包 创建，24 小时后自动清理并退款。")
+    return embed
+
+
+def _schema_line(name: str, ok: bool, detail: str) -> str:
+    mark = "✅" if ok else "⚠️"
+    return f"{mark} **{name}**：{detail}"
+
+
+def build_data_overview_embed() -> discord.Embed:
+    from cogs.prequiz.storage import PREQUIZ_DATA_FILE, load_attempts
+    from cogs.red_packets.storage import DATA_FILE as RED_PACKET_DATA_FILE, load_data as load_red_packet_data
+
+    points = load_points_data()
+    users = points.get("users", {})
+    transactions = points.get("transactions", [])
+    accel_purchases = points.get("acceleration_purchases", [])
+
+    point_keys = {"users", "daily_signins", "daily_forum_rewards", "transactions", "acceleration_purchases"}
+    point_ok = point_keys.issubset(points.keys()) and isinstance(users, dict) and isinstance(transactions, list)
+    user_rows = len(users) if isinstance(users, dict) else 0
+    accel_users = sum(
+        1 for record in users.values()
+        if isinstance(record, dict) and int(record.get("acceleration_days", 0) or 0) > 0
+    ) if isinstance(users, dict) else 0
+
+    attempts = load_attempts()
+    attempt_rows = attempts.get("attempts", {})
+    prequiz_ok = isinstance(attempt_rows, dict)
+
+    red_data = load_red_packet_data()
+    packets = red_data.get("packets", {})
+    red_ok = isinstance(packets, dict)
+    claim_rows = sum(
+        len(packet.get("claims", {}))
+        for packet in packets.values()
+        if isinstance(packet, dict) and isinstance(packet.get("claims", {}), dict)
+    ) if isinstance(packets, dict) else 0
+
+    embed = discord.Embed(
+        title="📊 数据总览",
+        description="当前版本使用 JSON 文件作为数据表；下面是关键表与追踪字段检查。",
+        color=0x6AA9FF,
+    )
+    embed.add_field(
+        name="蛋壳/用户",
+        value="\n".join([
+            _schema_line("user_points", point_ok, f"`data/user_points.json`，用户 **{user_rows}**，流水 **{len(transactions) if isinstance(transactions, list) else 0}**"),
+            _schema_line("acceleration", isinstance(accel_purchases, list), f"已加速用户 **{accel_users}**，顶层购卡流水 **{len(accel_purchases) if isinstance(accel_purchases, list) else 0}**"),
+            _schema_line("daily_signins", isinstance(points.get("daily_signins", {}), dict), f"签到日表 **{len(points.get('daily_signins', {})) if isinstance(points.get('daily_signins', {}), dict) else 0}**"),
+        ]),
+        inline=False,
+    )
+    embed.add_field(
+        name="答题/红包",
+        value="\n".join([
+            _schema_line("prequiz_attempts", prequiz_ok, f"`{PREQUIZ_DATA_FILE}`，答题记录 **{len(attempt_rows) if isinstance(attempt_rows, dict) else 0}**"),
+            _schema_line("red_packets", red_ok, f"`{RED_PACKET_DATA_FILE}`，红包 **{len(packets) if isinstance(packets, dict) else 0}**，领取 **{claim_rows}**"),
+        ]),
+        inline=False,
+    )
+    embed.set_footer(text="如某项显示警告，通常表示 JSON 文件缺失或结构被手动改坏。")
     return embed
 
 
