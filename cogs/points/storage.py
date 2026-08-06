@@ -264,9 +264,9 @@ def get_acceleration_tiers() -> list[dict]:
         tiers.append({"id": tier_id, "label": label or f"减{days}天", "days": days, "cost": cost})
 
     return tiers or [
-        {"id": "day_1", "label": "减1天", "days": 1, "cost": 8.0},
-        {"id": "day_5", "label": "减5天", "days": 5, "cost": 35.0},
-        {"id": "day_10", "label": "减10天", "days": 10, "cost": 60.0},
+        {"id": "day_1", "label": "减1天", "days": 1, "cost": 2.0},
+        {"id": "day_5", "label": "减5天", "days": 5, "cost": 8.0},
+        {"id": "day_10", "label": "减10天", "days": 10, "cost": 15.0},
     ]
 
 

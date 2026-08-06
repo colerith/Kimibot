@@ -369,7 +369,7 @@ eligible = remaining_wait_days == 0
 - 加速卡必须消耗蛋壳购买。
 - 购买前校验用户蛋壳余额是否充足。
 - 购买成功后立即写入蛋壳流水和加速卡记录。
-- 加速卡价格需要可配置，默认建议：减 1 天 `8.0 蛋壳`、减 5 天 `35.0 蛋壳`、减 10 天 `60.0 蛋壳`。
+- 加速卡价格需要可配置，默认建议：减 1 天 `2.0 蛋壳`、减 5 天 `8.0 蛋壳`、减 10 天 `15.0 蛋壳`。
 
 ## 11. 预答题面板
 
@@ -569,9 +569,9 @@ SHELLS = {
     "ACCOUNT_BASE_WAIT_DAYS": 30,
     "ACCOUNT_MIN_WAIT_DAYS": 5,
     "ACCELERATION_CARD_TIERS": [
-        {"id": "day_1", "label": "减1天", "days": 1, "cost": 8.0},
-        {"id": "day_5", "label": "减5天", "days": 5, "cost": 35.0},
-        {"id": "day_10", "label": "减10天", "days": 10, "cost": 60.0},
+        {"id": "day_1", "label": "减1天", "days": 1, "cost": 2.0},
+        {"id": "day_5", "label": "减5天", "days": 5, "cost": 8.0},
+        {"id": "day_10", "label": "减10天", "days": 10, "cost": 15.0},
     ],
     "ACCELERATION_CARD_MAX_DAYS": 25,
     "ROLE_LOTTERY_SINGLE_COST": 3.0,
