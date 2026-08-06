@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import math
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -8,10 +9,21 @@ from typing import Any
 QUESTION_BANK_FILE = Path(__file__).with_name("question_bank.json")
 PREQUIZ_DATA_FILE = "data/prequiz_attempts.json"
 TZ_CN = timezone(timedelta(hours=8))
+RETRY_COOLDOWN_SECONDS = 5 * 60
 
 
 def _now_iso() -> str:
     return datetime.now(TZ_CN).isoformat(timespec="seconds")
+
+
+def _parse_iso(value: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=TZ_CN)
+    return dt.astimezone(TZ_CN)
 
 
 def _load_json_file(path: str | Path, default: Any):
@@ -104,6 +116,31 @@ def get_attempt(user_id: int, guild_id: int | None) -> dict | None:
     return attempt if isinstance(attempt, dict) else None
 
 
+def get_prequiz_access(user_id: int, guild_id: int | None) -> dict:
+    attempt = get_attempt(user_id, guild_id)
+    if not attempt:
+        return {"allowed": True, "reason": "new"}
+
+    if attempt.get("passed") or attempt.get("reward_granted"):
+        return {"allowed": False, "reason": "passed", "attempt": attempt}
+
+    last_at = _parse_iso(str(attempt.get("last_attempt_at") or attempt.get("created_at") or ""))
+    if not last_at:
+        return {"allowed": True, "reason": "cooldown_unknown", "attempt": attempt}
+
+    elapsed = (datetime.now(TZ_CN) - last_at).total_seconds()
+    remaining = max(0, RETRY_COOLDOWN_SECONDS - elapsed)
+    if remaining > 0:
+        return {
+            "allowed": False,
+            "reason": "cooldown",
+            "remaining_seconds": int(math.ceil(remaining)),
+            "attempt": attempt,
+        }
+
+    return {"allowed": True, "reason": "retry", "attempt": attempt}
+
+
 def save_attempt(
     *,
     user_id: int,
@@ -117,7 +154,30 @@ def save_attempt(
 ):
     data = load_attempts()
     key = f"{guild_id}:{user_id}"
-    data.setdefault("attempts", {})[key] = {
+    existing = data.setdefault("attempts", {}).get(key, {})
+    if not isinstance(existing, dict):
+        existing = {}
+    history = existing.get("history", [])
+    if not isinstance(history, list):
+        history = []
+
+    now = _now_iso()
+    attempt_no = int(existing.get("attempt_count", 0) or 0) + 1
+    attempt_row = {
+        "attempt_no": attempt_no,
+        "passed": bool(passed),
+        "score": int(score),
+        "mc_details": mc_details,
+        "short_question_id": short_question.get("id", ""),
+        "short_answer": short_answer,
+        "short_expected": short_question.get("answer", ""),
+        "reward_granted": bool(reward_granted),
+        "created_at": now,
+    }
+    history.append(attempt_row)
+    history = history[-20:]
+
+    data["attempts"][key] = {
         "user_id": str(user_id),
         "guild_id": str(guild_id),
         "passed": bool(passed),
@@ -127,6 +187,10 @@ def save_attempt(
         "short_answer": short_answer,
         "short_expected": short_question.get("answer", ""),
         "reward_granted": bool(reward_granted),
-        "created_at": _now_iso(),
+        "created_at": existing.get("created_at") or now,
+        "last_attempt_at": now,
+        "attempt_count": attempt_no,
+        "retry_after_seconds": 0 if passed else RETRY_COOLDOWN_SECONDS,
+        "history": history,
     }
     save_attempts(data)

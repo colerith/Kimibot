@@ -5,15 +5,27 @@ from config import STYLE
 from cogs.points.storage import format_shells, modify_user_points
 from cogs.shared.utils import has_verification_role
 
-from .storage import draw_prequiz_questions, get_attempt, load_question_bank, save_attempt
+from .storage import draw_prequiz_questions, get_prequiz_access, load_question_bank, save_attempt
+
+
+def _format_cooldown(seconds: int) -> str:
+    minutes = seconds // 60
+    remain = seconds % 60
+    if minutes and remain:
+        return f"{minutes}分{remain}秒"
+    if minutes:
+        return f"{minutes}分钟"
+    return f"{remain}秒"
 
 
 class PreQuizShortAnswerModal(discord.ui.Modal):
     def __init__(self, parent_view: "PreQuizQuestionView"):
         super().__init__(title="预答题简答")
         self.parent_view = parent_view
+        short_question = parent_view.questions.get("short_question", {})
+        question_text = str(short_question.get("question", "请填写简答题答案")).strip()
         self.answer_input = discord.ui.InputText(
-            label="简答题答案",
+            label=question_text[:45],
             placeholder="必须和固定答案完全一致",
             required=True,
             max_length=100,
@@ -54,6 +66,7 @@ class PreQuizAnswerSelect(discord.ui.Select):
                 self.parent_view.questions,
                 next_index,
                 self.parent_view.answers,
+                test_mode=self.parent_view.test_mode,
             )
             await interaction.response.edit_message(embed=view.build_embed(), view=view)
         else:
@@ -61,25 +74,45 @@ class PreQuizAnswerSelect(discord.ui.Select):
 
 
 class PreQuizQuestionView(discord.ui.View):
-    def __init__(self, user_id: int, questions: dict, index: int = 0, answers: dict[int, str] | None = None):
+    def __init__(
+        self,
+        user_id: int,
+        questions: dict,
+        index: int = 0,
+        answers: dict[int, str] | None = None,
+        *,
+        test_mode: bool = False,
+    ):
         super().__init__(timeout=600)
         self.user_id = user_id
         self.questions = questions
         self.index = index
         self.answers = answers or {}
+        self.test_mode = test_mode
         self.add_item(PreQuizAnswerSelect(self, index, questions["multiple_choice"][index]))
 
     async def finalize(self, interaction: discord.Interaction, short_answer: str):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        if has_verification_role(interaction.user):
+        if has_verification_role(interaction.user) and not self.test_mode:
             return await interaction.response.send_message(
                 "你已经通过验证答题啦，不需要再参加预答题。",
                 ephemeral=True,
             )
 
-        if get_attempt(interaction.user.id, interaction.guild_id):
-            return await interaction.response.send_message("你已经完成过预答题了，每个用户只能答一次。", ephemeral=True)
+        if not self.test_mode:
+            access = get_prequiz_access(interaction.user.id, interaction.guild_id)
+            if not access["allowed"]:
+                if access["reason"] == "passed":
+                    return await interaction.response.send_message(
+                        "你已经全对通过预答题并领取过奖励啦，每个用户只能领取一次。",
+                        ephemeral=True,
+                    )
+                if access["reason"] == "cooldown":
+                    return await interaction.response.send_message(
+                        f"上次没有全对，需要等待 **{_format_cooldown(access['remaining_seconds'])}** 后再试。",
+                        ephemeral=True,
+                    )
 
         mc_details = []
         correct_count = 0
@@ -104,7 +137,7 @@ class PreQuizQuestionView(discord.ui.View):
         reward = float(getattr(config, "PRE_QUIZ_REWARD", 5.0)) if passed else 0.0
         reward_granted = False
         balance = None
-        if passed:
+        if passed and not self.test_mode:
             balance = modify_user_points(
                 interaction.user.id,
                 reward,
@@ -114,30 +147,35 @@ class PreQuizQuestionView(discord.ui.View):
             )
             reward_granted = True
 
-        save_attempt(
-            user_id=interaction.user.id,
-            guild_id=interaction.guild_id,
-            passed=passed,
-            score=score,
-            mc_details=mc_details,
-            short_question=short_question,
-            short_answer=short_answer,
-            reward_granted=reward_granted,
-        )
+        if not self.test_mode:
+            save_attempt(
+                user_id=interaction.user.id,
+                guild_id=interaction.guild_id,
+                passed=passed,
+                score=score,
+                mc_details=mc_details,
+                short_question=short_question,
+                short_answer=short_answer,
+                reward_granted=reward_granted,
+            )
 
         embed = discord.Embed(
-            title="✅ 预答题通过" if passed else "❌ 预答题未通过",
+            title=("🧪 预答题测试通过" if passed else "🧪 预答题测试未通过") if self.test_mode else ("✅ 预答题通过" if passed else "❌ 预答题未通过"),
             color=0x00AA66 if passed else 0xCC3333,
         )
         desc = [
             f"客观题：**{correct_count}/5**",
             f"简答题：**{'正确' if short_correct else '错误'}**",
         ]
-        if passed:
+        if passed and not self.test_mode:
             desc.append(f"奖励：+**{format_shells(reward)}** 蛋壳")
             desc.append(f"当前余额：**{format_shells(balance)}** 蛋壳")
+        elif self.test_mode:
+            desc.append("测试模式：不记录次数，不发放蛋壳。")
+            desc.append(f"简答题题干：{short_question['question']}")
+            desc.append(f"固定答案：`{short_question['answer']}`")
         else:
-            desc.append("预答题每个用户只能提交一次。")
+            desc.append("没有全对，5 分钟后可以重新答题。")
         embed.description = "\n".join(desc)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -156,7 +194,9 @@ class PreQuizQuestionView(discord.ui.View):
             description="\n".join(lines)[:4000],
             color=STYLE["KIMI_YELLOW"],
         )
-        embed.set_footer(text="每个用户只能提交一次。")
+        embed.set_footer(text="必须全部答对才可领取奖励；未全对需等待 5 分钟后重试。")
+        if self.test_mode:
+            embed.set_footer(text="管理员测试模式：不会记录答题次数或发放奖励。")
         return embed
 
 
@@ -173,13 +213,21 @@ class PreQuizPanelView(discord.ui.View):
                 "你已经通过验证答题啦，不需要再参加预答题。",
                 ephemeral=True,
             )
-        existing = get_attempt(interaction.user.id, interaction.guild_id)
-        if existing:
-            status = "通过" if existing.get("passed") else "未通过"
-            return await interaction.response.send_message(
-                f"你已经完成过预答题了，结果：**{status}**。",
-                ephemeral=True,
-            )
+        access = get_prequiz_access(interaction.user.id, interaction.guild_id)
+        if not access["allowed"]:
+            if access["reason"] == "passed":
+                return await interaction.response.send_message(
+                    "你已经全对通过预答题并领取过奖励啦，每个用户只能领取一次。",
+                    ephemeral=True,
+                )
+            if access["reason"] == "cooldown":
+                remaining_text = _format_cooldown(access["remaining_seconds"])
+                attempt = access.get("attempt", {})
+                correct = int(attempt.get("score", 0) or 0) // 20
+                return await interaction.response.send_message(
+                    f"上次没有全对（客观题 **{correct}/5**），需要等待 **{remaining_text}** 后再试。",
+                    ephemeral=True,
+                )
 
         questions = draw_prequiz_questions()
         if not questions:
@@ -197,7 +245,7 @@ def build_prequiz_panel_embed() -> discord.Embed:
             "提前完成一次小蛋预答题，通过后固定获得 **5 蛋壳**。\n\n"
             "题型：随机 5 道客观题 + 1 道简答题。\n"
             "简答题必须与固定答案完全一致。\n"
-            "每个用户只能提交一次。"
+            "必须全部答对才可领取奖励；没有全对时，5 分钟后可以重新答题。"
         ),
         color=STYLE["KIMI_YELLOW"],
     )

@@ -1603,6 +1603,18 @@ class CommunityPanelManageView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="测试答题", style=discord.ButtonStyle.secondary, emoji="🧪", custom_id="community_admin_prequiz_test")
+    async def prequiz_test_callback(self, button, interaction: discord.Interaction):
+        from cogs.prequiz.storage import draw_prequiz_questions
+        from cogs.prequiz.views import PreQuizQuestionView
+
+        questions = draw_prequiz_questions()
+        if not questions:
+            return await interaction.response.send_message("❌ 题库数量不足，无法开始测试答题。", ephemeral=True)
+
+        view = PreQuizQuestionView(interaction.user.id, questions, test_mode=True)
+        await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
+
     @discord.ui.button(label="加速配置", style=discord.ButtonStyle.secondary, emoji="⚡", custom_id="community_admin_acceleration")
     async def acceleration_admin_callback(self, button, interaction: discord.Interaction):
         await interaction.response.send_message(embed=build_acceleration_admin_embed(), ephemeral=True)
