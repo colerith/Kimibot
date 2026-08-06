@@ -510,7 +510,7 @@ def build_shell_help_embed() -> discord.Embed:
             f"**发帖奖励**：指定论坛频道每天前 3 帖，每帖 +{format_shells(forum_reward)} 蛋壳。\n"
             f"**预备答题**：未验证成员通过后固定 +{format_shells(prequiz_reward)} 蛋壳，每人一次。\n"
             f"**服务器助力**：每次助力 +{format_shells(boost_reward)} 蛋壳。\n"
-            "**蛋壳红包**：后续可把蛋壳发成红包让大家抢。\n\n"
+            "**蛋壳红包**：使用 `/发红包` 把蛋壳发给大家抢，普通成员扣除红包总额，管理员福利红包不扣除。\n\n"
             "**蛋壳用途**：身份抽奖、换装/商店相关兑换；加速卡仅未验证成员可购买。"
         ),
         color=STYLE["KIMI_YELLOW"],
