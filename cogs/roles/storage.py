@@ -128,17 +128,17 @@ def _normalize_role_data(data: dict) -> dict:
         "cost_single": _migrate_lottery_cost(
             cfg.get("cost_single", DEFAULT_LOTTERY_CONFIG["cost_single"]),
             DEFAULT_LOTTERY_CONFIG["cost_single"],
-            old_defaults=(3.0, 50.0),
+            old_defaults=(3.0, 50.0, 100.0),
         ),
         "cost_five": _migrate_lottery_cost(
             cfg.get("cost_five", DEFAULT_LOTTERY_CONFIG["cost_five"]),
             DEFAULT_LOTTERY_CONFIG["cost_five"],
-            old_defaults=(),
+            old_defaults=(100.0,),
         ),
         "cost_ten": _migrate_lottery_cost(
             cfg.get("cost_ten", DEFAULT_LOTTERY_CONFIG["cost_ten"]),
             DEFAULT_LOTTERY_CONFIG["cost_ten"],
-            old_defaults=(25.0, 888.0, 900.0),
+            old_defaults=(25.0, 100.0, 888.0, 900.0),
         ),
         "weights": _normalize_lottery_weights(weights),
         "refund": {
