@@ -9,16 +9,16 @@ BOOST_THANKS_DATA_FILE = "data/boost_thanks.json"
 TZ_CN = timezone(timedelta(hours=8))
 
 DIGIT_EMOJIS = {
-    "1": "<:kimi1:1093887092507021332>",
-    "2": "<:kimi2:1093887089730396230>",
-    "3": "<:kimi3:1093887094931324929>",
-    "4": "<:kimi4:1093887099171774494>",
-    "5": "<:kimi5:1093887101302484993>",
-    "6": "<:kimi6:1093887103856820345>",
-    "7": "<:kimi7:1093887107736535081>",
-    "8": "<:kimi8:1093887112073465946>",
-    "9": "<:kimi9:1093887114220929124>",
-    "0": "<:kimi0:1093887083568955422>",
+    "1": "<:num_1:1093887092507021332>",
+    "2": "<:num_2:1093887089730396230>",
+    "3": "<:num_3:1093887094931324929>",
+    "4": "<:num_4:1093887099171774494>",
+    "5": "<:num_5:1093887101302484993>",
+    "6": "<:num_6:1093887103856820345>",
+    "7": "<:num_7:1093887107736535081>",
+    "8": "<:num_8:1093887112073465946>",
+    "9": "<:num_9:1093887114220929124>",
+    "0": "<:num_0:1093887083568955422>",
 }
 
 DEFAULT_MESSAGES = [
@@ -83,3 +83,12 @@ def mark_processed(message_id: int, payload: dict) -> bool:
     }
     _save_json(BOOST_THANKS_DATA_FILE, data)
     return True
+
+
+def update_processed_message(message_id: int, payload: dict) -> None:
+    data = load_boost_thanks_data()
+    key = str(message_id)
+    if key not in data["processed"]:
+        return
+    data["processed"][key].update(payload)
+    _save_json(BOOST_THANKS_DATA_FILE, data)

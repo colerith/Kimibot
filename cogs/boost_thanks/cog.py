@@ -1,12 +1,14 @@
 import re
 
 import discord
+from discord import Option
 from discord.ext import commands
 
 import config
 from cogs.points.storage import format_shells, modify_user_points
+from cogs.shared.utils import is_super_egg
 
-from .storage import format_digit_emojis, mark_processed, pick_thanks_message
+from .storage import format_digit_emojis, mark_processed, pick_thanks_message, update_processed_message
 
 BOOST_MESSAGE_TYPE_NAMES = {
     "premium_guild_subscription",
@@ -29,6 +31,8 @@ CHINESE_DIGITS = {
     "九": 9,
     "十": 10,
 }
+
+BOOST_THANKS_TITLE = "🥚 小蛋收到助力啦"
 
 
 def _message_type_name(message: discord.Message) -> str:
@@ -55,7 +59,7 @@ def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.
     boost_digits = format_digit_emojis(boost_count)
 
     embed = discord.Embed(
-        title="🥚 小蛋收到助力啦",
+        title=BOOST_THANKS_TITLE,
         description=(
             f"{member.mention}\n\n"
             f"{thanks_text}\n\n"
@@ -70,13 +74,67 @@ def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.
     return embed
 
 
+def _extract_boost_count_from_embed(embed: discord.Embed) -> int | None:
+    description = embed.description or ""
+    line_match = re.search(r"本次助力[：:]\s*(.+)", description)
+    if not line_match:
+        return None
+
+    raw = line_match.group(1).strip()
+    custom_ids = re.findall(r"<a?:[^:>]+:(\d+)>", raw)
+    if custom_ids:
+        from .storage import DIGIT_EMOJIS
+
+        id_to_digit = {
+            re.search(r":(\d+)>$", emoji).group(1): digit
+            for digit, emoji in DIGIT_EMOJIS.items()
+            if re.search(r":(\d+)>$", emoji)
+        }
+        digits = "".join(id_to_digit.get(emoji_id, "") for emoji_id in custom_ids)
+        if digits:
+            return int(digits)
+
+    named_digits = re.findall(r":(?:kimi|num_?)(\d):", raw)
+    if named_digits:
+        return int("".join(named_digits))
+
+    number_match = re.search(r"(\d+)", raw)
+    if number_match:
+        return int(number_match.group(1))
+
+    return None
+
+
+def _refresh_boost_embed_digits(embed: discord.Embed, boost_count: int) -> discord.Embed:
+    description = embed.description or ""
+    refreshed_description = re.sub(
+        r"本次助力[：:].*",
+        f"本次助力：{format_digit_emojis(boost_count)}",
+        description,
+        count=1,
+    )
+    refreshed = discord.Embed.from_dict(embed.to_dict())
+    refreshed.description = refreshed_description
+    return refreshed
+
+
 class BoostThanksCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._auto_refreshed = False
 
     @commands.Cog.listener()
     async def on_ready(self):
         print("[BoostThanks] Cog loaded.")
+        if self._auto_refreshed:
+            return
+        self._auto_refreshed = True
+        for guild in self.bot.guilds:
+            channel = await self._get_configured_target_channel(guild)
+            if channel:
+                updated, scanned, skipped = await self._refresh_channel_boost_embeds(channel, limit=None)
+                if updated:
+                    print(f"[BoostThanks] auto-refreshed {updated}/{scanned} boost thanks embeds in {guild.id}, skipped={skipped}.")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -116,9 +174,19 @@ class BoostThanksCog(commands.Cog):
         )
 
         target_channel = self._get_target_channel(message)
-        await target_channel.send(
+        sent = await target_channel.send(
             embed=embed,
             allowed_mentions=discord.AllowedMentions.none(),
+        )
+        update_processed_message(
+            message.id,
+            {
+                "thanks_channel_id": str(target_channel.id),
+                "thanks_message_id": str(sent.id),
+                "thanks_text": thanks_text,
+                "reward": reward,
+                "balance": balance,
+            },
         )
 
     def _get_target_channel(self, message: discord.Message):
@@ -128,3 +196,64 @@ class BoostThanksCog(commands.Cog):
             if channel:
                 return channel
         return message.channel
+
+    async def _get_configured_target_channel(self, guild: discord.Guild):
+        channel_id = getattr(config, "BOOST_THANKS_CHANNEL_ID", None)
+        if not channel_id:
+            return None
+        channel = guild.get_channel(int(channel_id))
+        if channel:
+            return channel
+        try:
+            return await guild.fetch_channel(int(channel_id))
+        except discord.HTTPException:
+            return None
+
+    async def _refresh_channel_boost_embeds(self, channel, *, limit: int | None) -> tuple[int, int, int]:
+        scanned = 0
+        updated = 0
+        skipped = 0
+        async for message in channel.history(limit=limit):
+            scanned += 1
+            if message.author.id != self.bot.user.id or not message.embeds:
+                continue
+            embed = message.embeds[0]
+            if embed.title != BOOST_THANKS_TITLE:
+                continue
+            boost_count = _extract_boost_count_from_embed(embed)
+            if boost_count is None:
+                skipped += 1
+                continue
+
+            refreshed = _refresh_boost_embed_digits(embed, boost_count)
+            if refreshed.description == embed.description:
+                continue
+            try:
+                await message.edit(embed=refreshed, allowed_mentions=discord.AllowedMentions.none())
+                updated += 1
+            except discord.HTTPException:
+                skipped += 1
+        return updated, scanned, skipped
+
+    @discord.slash_command(name="刷新助力鸣谢", description="强制刷新助力鸣谢面板的数字表情显示")
+    @is_super_egg()
+    async def refresh_boost_thanks(
+        self,
+        ctx: discord.ApplicationContext,
+        扫描数量: Option(int, "扫描最近多少条消息，0 表示尽量扫描全部", required=False, default=1000),  # pyright: ignore[reportInvalidTypeForm]
+    ):
+        await ctx.defer(ephemeral=True)
+        if not ctx.guild:
+            return await ctx.followup.send("❌ 该命令只能在服务器内使用。", ephemeral=True)
+
+        channel = await self._get_configured_target_channel(ctx.guild) or ctx.channel
+        if channel is None:
+            return await ctx.followup.send("❌ 找不到助力鸣谢频道。", ephemeral=True)
+
+        limit = None if int(扫描数量 or 0) <= 0 else max(1, int(扫描数量))
+        updated, scanned, skipped = await self._refresh_channel_boost_embeds(channel, limit=limit)
+
+        await ctx.followup.send(
+            f"✅ 已刷新助力鸣谢面板。\n扫描：**{scanned}** 条\n更新：**{updated}** 条\n跳过：**{skipped}** 条",
+            ephemeral=True,
+        )
