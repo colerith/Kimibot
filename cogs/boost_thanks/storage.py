@@ -8,7 +8,7 @@ THANKS_MESSAGES_FILE = Path(__file__).with_name("thanks_messages.json")
 BOOST_THANKS_DATA_FILE = "data/boost_thanks.json"
 TZ_CN = timezone(timedelta(hours=8))
 
-DIGIT_EMOJIS = {
+DIGIT_EMOJI_IDS = {
     "1": "<:number_1:1093887092507021332>",
     "2": "<:number_2:1093887089730396230>",
     "3": "<:number_3:1093887094931324929>",
