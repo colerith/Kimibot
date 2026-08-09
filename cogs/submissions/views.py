@@ -31,8 +31,8 @@ REPO_NSFW_CHANNEL_ID = 1417576370451513495
 BUG_CHANNEL_ID = 1417577014096957554
 RECOMMENDATION_CHANNEL_ID = 1536024803587137536
 
-DOMAIN_OPTIONS = {"酒馆好物", "书籍安利", "影视安利", "游戏安利", "便利生活", "其他类型"}
-TYPE_OPTIONS = {"sfw", "nsfw"}
+DOMAIN_OPTIONS = ["酒馆好物", "书籍安利", "影视安利", "游戏安利", "便利生活", "其他类型"]
+TYPE_OPTIONS = ["sfw", "nsfw"]
 
 
 def _submission_config() -> dict:
@@ -94,15 +94,16 @@ def build_panel_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🥚 奇米蛋投稿箱",
         description=(
-            "想 repo、想捉虫、想安利，都可以投进这里。\n"
-            "奇米蛋会给认真投稿的小饱饱发一点亮晶晶的蛋壳。"
+            "📮 想 repo、想捉虫、想安利，都可以投进这里。\n"
+            "🥚 奇米蛋会给认真投稿的小饱饱发一点亮晶晶的蛋壳。\n"
+            "📎 填完表后可以开启收图，最多收纳 9 张图片。"
         ),
         color=PANEL_COLOR,
     )
-    embed.add_field(name="我要repo", value="提交想 repo 的标题、类型与内容。", inline=False)
-    embed.add_field(name="我要捉虫", value="提交问题对象与详细描述。", inline=False)
-    embed.add_field(name="我要安利", value="分享好物、书籍、影视、游戏或生活经验。", inline=False)
-    embed.add_field(name="管理投稿", value="修改或删除自己发过的投稿。", inline=False)
+    embed.add_field(name="📦 我要repo", value="提交想 repo 的标题、类型与内容。", inline=False)
+    embed.add_field(name="🐞 我要捉虫", value="提交问题对象与详细描述。", inline=False)
+    embed.add_field(name="🌟 我要安利", value="分享好物、书籍、影视、游戏或生活经验。", inline=False)
+    embed.add_field(name="🗂️ 管理投稿", value="修改或删除自己发过的投稿。", inline=False)
     embed.set_footer(text="填完投稿表后可开启附件收集，最多 9 张图。")
     return embed
 
@@ -156,16 +157,6 @@ def build_submission_embed(record: dict) -> discord.Embed:
 
     total_reward = float(record.get("base_reward", 0) or 0) + float(record.get("extra_reward", 0) or 0)
     embed.set_footer(text=f"投稿ID: {record.get('id')} · 已奖励 {format_shells(total_reward)} 蛋壳")
-    return embed
-
-
-def build_deleted_embed(record: dict) -> discord.Embed:
-    embed = discord.Embed(
-        title=f"🥚 {_kind_label(record.get('kind', ''))}投稿已删除",
-        description="该投稿已由投稿者删除，奇米蛋把展示内容收回小抽屉了。",
-        color=0x8E8E93,
-    )
-    embed.set_footer(text=f"投稿ID: {record.get('id')}")
     return embed
 
 
@@ -255,38 +246,42 @@ async def deploy_submission_panel(channel, bot) -> str:
 
 
 class SubmissionModal(discord.ui.Modal):
-    def __init__(self, kind: str, record: dict | None = None):
+    def __init__(
+        self,
+        kind: str,
+        record: dict | None = None,
+        *,
+        content_type: str | None = None,
+        domain: str | None = None,
+    ):
         self.kind = kind
         self.record = record
+        self.content_type = (content_type or _field(record or {}, "content_type", "sfw")).lower()
+        self.domain = domain or _field(record or {}, "domain", "其他类型")
         is_edit = record is not None
         title = "修改投稿" if is_edit else "提交投稿"
         super().__init__(title=f"{title} · {_kind_label(kind)}")
 
         if kind == KIND_REPO:
-            self.add_item(ui.InputText(label="repo 标题", value=_field(record or {}, "title"), max_length=120, required=True))
-            self.add_item(ui.InputText(label="类型：sfw 或 nsfw", value=_field(record or {}, "content_type", "sfw"), max_length=4, required=True))
-            self.add_item(ui.InputText(label="repo 内容", value=_field(record or {}, "content"), style=discord.InputTextStyle.paragraph, max_length=2000, required=True))
+            self.add_item(ui.TextInput(label="repo 标题", default=_field(record or {}, "title"), max_length=120, required=True))
+            self.add_item(ui.TextInput(label="repo 内容", default=_field(record or {}, "content"), style=discord.TextStyle.paragraph, max_length=2000, required=True))
         elif kind == KIND_BUG:
-            self.add_item(ui.InputText(label="捉虫对象", value=_field(record or {}, "target"), max_length=120, required=True))
-            self.add_item(ui.InputText(label="捉虫内容", value=_field(record or {}, "content"), style=discord.InputTextStyle.paragraph, max_length=2000, required=True))
+            self.add_item(ui.TextInput(label="捉虫对象", default=_field(record or {}, "target"), max_length=120, required=True))
+            self.add_item(ui.TextInput(label="捉虫内容", default=_field(record or {}, "content"), style=discord.TextStyle.paragraph, max_length=2000, required=True))
         else:
-            self.add_item(ui.InputText(label="安利对象", value=_field(record or {}, "target"), max_length=120, required=True))
-            self.add_item(ui.InputText(label="类型：sfw 或 nsfw", value=_field(record or {}, "content_type", "sfw"), max_length=4, required=True))
-            self.add_item(ui.InputText(label="领域", value=_field(record or {}, "domain", "其他类型"), max_length=20, required=True))
-            self.add_item(ui.InputText(label="安利内容", value=_field(record or {}, "content"), style=discord.InputTextStyle.paragraph, max_length=2000, required=True))
+            self.add_item(ui.TextInput(label="安利对象", default=_field(record or {}, "target"), max_length=120, required=True))
+            self.add_item(ui.TextInput(label="安利内容", default=_field(record or {}, "content"), style=discord.TextStyle.paragraph, max_length=2000, required=True))
 
     async def callback(self, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("这个投稿箱只能在服务器里使用。", ephemeral=True)
 
         if self.kind == KIND_REPO:
-            content_type = self.children[1].value.strip().lower()
-            if content_type not in TYPE_OPTIONS:
-                return await interaction.response.send_message("类型只能填写 sfw 或 nsfw。", ephemeral=True)
+            content_type = self.content_type if self.content_type in TYPE_OPTIONS else "sfw"
             fields = {
                 "title": self.children[0].value.strip(),
                 "content_type": content_type,
-                "content": self.children[2].value.strip(),
+                "content": self.children[1].value.strip(),
             }
         elif self.kind == KIND_BUG:
             fields = {
@@ -294,17 +289,13 @@ class SubmissionModal(discord.ui.Modal):
                 "content": self.children[1].value.strip(),
             }
         else:
-            content_type = self.children[1].value.strip().lower()
-            if content_type not in TYPE_OPTIONS:
-                return await interaction.response.send_message("类型只能填写 sfw 或 nsfw。", ephemeral=True)
-            domain = self.children[2].value.strip()
-            if domain not in DOMAIN_OPTIONS:
-                return await interaction.response.send_message("领域请填写：酒馆好物/书籍安利/影视安利/游戏安利/便利生活/其他类型。", ephemeral=True)
+            content_type = self.content_type if self.content_type in TYPE_OPTIONS else "sfw"
+            domain = self.domain if self.domain in DOMAIN_OPTIONS else "其他类型"
             fields = {
                 "target": self.children[0].value.strip(),
                 "content_type": content_type,
                 "domain": domain,
-                "content": self.children[3].value.strip(),
+                "content": self.children[1].value.strip(),
             }
 
         if self.record and str(self.record.get("author_id")) != str(interaction.user.id):
@@ -339,7 +330,7 @@ class OwnerReplyModal(discord.ui.Modal):
     def __init__(self, record: dict):
         self.record = record
         super().__init__(title=f"回复 {_kind_label(record.get('kind', ''))}投稿")
-        self.add_item(ui.InputText(label="回复内容", style=discord.InputTextStyle.paragraph, max_length=1500, required=True))
+        self.add_item(ui.TextInput(label="回复内容", style=discord.TextStyle.paragraph, max_length=1500, required=True))
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -370,7 +361,7 @@ class CommentModal(discord.ui.Modal):
     def __init__(self, record: dict):
         self.record = record
         super().__init__(title="盖楼回复")
-        self.add_item(ui.InputText(label="评论内容", style=discord.InputTextStyle.paragraph, max_length=500, required=True))
+        self.add_item(ui.TextInput(label="评论内容", style=discord.TextStyle.paragraph, max_length=500, required=True))
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -381,23 +372,128 @@ class CommentModal(discord.ui.Modal):
         await interaction.followup.send("✅ 评论已经盖到楼里啦。", ephemeral=True)
 
 
+class SubmissionTypeSelect(discord.ui.Select):
+    def __init__(self, kind: str, record: dict | None = None):
+        self.kind = kind
+        self.record = record
+        current = _field(record or {}, "content_type", "sfw").lower()
+        options = [
+            discord.SelectOption(
+                label="SFW",
+                value="sfw",
+                emoji="🌤️",
+                description="普通内容，正常展示。",
+                default=current == "sfw",
+            ),
+            discord.SelectOption(
+                label="NSFW",
+                value="nsfw",
+                emoji="🌙",
+                description="敏感内容，图文会使用剧透效果。",
+                default=current == "nsfw",
+            ),
+        ]
+        super().__init__(placeholder="选择投稿类型", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        content_type = self.values[0]
+        if self.kind == KIND_REPO:
+            return await interaction.response.send_modal(
+                SubmissionModal(KIND_REPO, self.record, content_type=content_type)
+            )
+
+        await interaction.response.edit_message(
+            content="继续选择安利领域。",
+            embed=None,
+            view=RecommendationDomainSelectView(interaction.user.id, content_type, self.record),
+        )
+
+
+class SubmissionTypeSelectView(discord.ui.View):
+    def __init__(self, owner_id: int, kind: str, record: dict | None = None):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.add_item(SubmissionTypeSelect(kind, record))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("这个选择面板只属于发起它的人。", ephemeral=True)
+            return False
+        return True
+
+
+class RecommendationDomainSelect(discord.ui.Select):
+    def __init__(self, content_type: str, record: dict | None = None):
+        self.content_type = content_type
+        self.record = record
+        current = _field(record or {}, "domain", "其他类型")
+        options = [
+            discord.SelectOption(
+                label=domain,
+                value=domain,
+                emoji=emoji,
+                default=current == domain,
+            )
+            for domain, emoji in [
+                ("酒馆好物", "🍻"),
+                ("书籍安利", "📚"),
+                ("影视安利", "🎬"),
+                ("游戏安利", "🎮"),
+                ("便利生活", "🧰"),
+                ("其他类型", "✨"),
+            ]
+        ]
+        super().__init__(placeholder="选择安利领域", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(
+            SubmissionModal(
+                KIND_RECOMMENDATION,
+                self.record,
+                content_type=self.content_type,
+                domain=self.values[0],
+            )
+        )
+
+
+class RecommendationDomainSelectView(discord.ui.View):
+    def __init__(self, owner_id: int, content_type: str, record: dict | None = None):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.add_item(RecommendationDomainSelect(content_type, record))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("这个选择面板只属于发起它的人。", ephemeral=True)
+            return False
+        return True
+
+
 class SubmissionPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="我要repo", style=discord.ButtonStyle.primary, custom_id="submission_panel_repo")
+    @discord.ui.button(label="我要repo", emoji="📦", style=discord.ButtonStyle.primary, custom_id="submission_panel_repo")
     async def repo(self, button, interaction: discord.Interaction):
-        await interaction.response.send_modal(SubmissionModal(KIND_REPO))
+        await interaction.response.send_message(
+            "先选择 repo 类型。",
+            view=SubmissionTypeSelectView(interaction.user.id, KIND_REPO),
+            ephemeral=True,
+        )
 
-    @discord.ui.button(label="我要捉虫", style=discord.ButtonStyle.danger, custom_id="submission_panel_bug")
+    @discord.ui.button(label="我要捉虫", emoji="🐞", style=discord.ButtonStyle.danger, custom_id="submission_panel_bug")
     async def bug(self, button, interaction: discord.Interaction):
         await interaction.response.send_modal(SubmissionModal(KIND_BUG))
 
-    @discord.ui.button(label="我要安利", style=discord.ButtonStyle.success, custom_id="submission_panel_recommend")
+    @discord.ui.button(label="我要安利", emoji="🌟", style=discord.ButtonStyle.success, custom_id="submission_panel_recommend")
     async def recommend(self, button, interaction: discord.Interaction):
-        await interaction.response.send_modal(SubmissionModal(KIND_RECOMMENDATION))
+        await interaction.response.send_message(
+            "先选择安利类型。",
+            view=SubmissionTypeSelectView(interaction.user.id, KIND_RECOMMENDATION),
+            ephemeral=True,
+        )
 
-    @discord.ui.button(label="管理投稿", style=discord.ButtonStyle.secondary, custom_id="submission_panel_manage")
+    @discord.ui.button(label="管理投稿", emoji="🗂️", style=discord.ButtonStyle.secondary, custom_id="submission_panel_manage")
     async def manage(self, button, interaction: discord.Interaction):
         rows = list_user_submissions(interaction.user.id, interaction.guild_id)
         if not rows:
@@ -558,7 +654,7 @@ class OwnerReplyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="服主回复", style=discord.ButtonStyle.primary, custom_id="submission_owner_reply")
+    @discord.ui.button(label="电波回信", emoji="💌", style=discord.ButtonStyle.primary, custom_id="submission_owner_reply")
     async def reply(self, button, interaction: discord.Interaction):
         if not _is_admin(interaction.user):
             return await interaction.response.send_message("只有服主或小蛋管理组可以回复这条投稿。", ephemeral=True)
@@ -666,7 +762,14 @@ class SubmissionEditView(discord.ui.View):
         record = await self._record_for_user(interaction)
         if not record:
             return await interaction.response.send_message("投稿不存在，或这不是你的投稿。", ephemeral=True)
-        await interaction.response.send_modal(SubmissionModal(record.get("kind", KIND_REPO), record))
+        kind = record.get("kind", KIND_REPO)
+        if kind in {KIND_REPO, KIND_RECOMMENDATION}:
+            return await interaction.response.send_message(
+                "先选择新的类型。",
+                view=SubmissionTypeSelectView(interaction.user.id, kind, record),
+                ephemeral=True,
+            )
+        await interaction.response.send_modal(SubmissionModal(kind, record))
 
     @discord.ui.button(label="删除投稿", style=discord.ButtonStyle.danger)
     async def delete(self, button, interaction: discord.Interaction):
@@ -711,11 +814,11 @@ class SubmissionDeleteConfirmView(discord.ui.View):
         try:
             channel = interaction.client.get_channel(int(record.get("channel_id") or 0)) or await interaction.client.fetch_channel(int(record.get("channel_id") or 0))
             message = await channel.fetch_message(int(record.get("message_id") or 0))
-            await message.edit(embed=build_deleted_embed(record), view=None)
+            await message.delete(reason=f"投稿者删除投稿 submission_id={self.record_id}")
         except Exception:
             pass
 
-        await interaction.response.send_message(f"✅ 投稿已删除，扣回 **{format_shells(penalty)}** 蛋壳。", ephemeral=True)
+        await interaction.response.send_message(f"✅ 投稿已删除，发布消息已移除，扣回 **{format_shells(penalty)}** 蛋壳。", ephemeral=True)
 
     @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
     async def cancel(self, button, interaction: discord.Interaction):
