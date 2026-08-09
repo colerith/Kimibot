@@ -39,6 +39,40 @@ from config import STYLE
 from discord.ui import Select
 
 
+EMBED_FIELD_VALUE_LIMIT = 1024
+
+
+def _preview_lines(lines: list[str], limit: int = EMBED_FIELD_VALUE_LIMIT) -> str:
+    if not lines:
+        return "*空*"
+
+    result = []
+    used = 0
+    omitted = 0
+    for index, line in enumerate(lines):
+        separator_len = 1 if result else 0
+        remaining = len(lines) - index - 1
+        suffix = f"\n...另有 {remaining} 项" if remaining else ""
+        if used + separator_len + len(line) + len(suffix) > limit:
+            omitted = len(lines) - index
+            break
+        result.append(line)
+        used += separator_len + len(line)
+
+    if omitted:
+        suffix = f"...另有 {omitted} 项"
+        while result and used + 1 + len(suffix) > limit:
+            used -= len(result.pop()) + (1 if result else 0)
+            omitted += 1
+            suffix = f"...另有 {omitted} 项"
+        if result:
+            result.append(suffix)
+        else:
+            result = [suffix[:limit]]
+
+    return "\n".join(result)[:limit] or "*空*"
+
+
 def _rarity_label(rarity: int) -> str:
     return {
         RARITY_NORMAL: "★ 普通",
@@ -1470,7 +1504,7 @@ class RoleManagerView(discord.ui.View):
             for rid in ids:
                 r = self.guild.get_role(rid)
                 names.append(r.mention if r else f"`{rid} (失效)`")
-            return ", ".join(names) if names else "*空*"
+            return _preview_lines(names)
 
         embed.add_field(name="🎰 抽奖模式", value=fmt_roles("lottery_roles"), inline=False)
         embed.add_field(name="🎨 自选模式", value=fmt_roles("claimable_roles"), inline=False)

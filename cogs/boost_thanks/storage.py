@@ -8,17 +8,22 @@ THANKS_MESSAGES_FILE = Path(__file__).with_name("thanks_messages.json")
 BOOST_THANKS_DATA_FILE = "data/boost_thanks.json"
 TZ_CN = timezone(timedelta(hours=8))
 
+DIGIT_EMOJI_IDS = {
+    "1": 1093887092507021332,
+    "2": 1093887089730396230,
+    "3": 1093887094931324929,
+    "4": 1093887099171774494,
+    "5": 1093887101302484993,
+    "6": 1093887103856820345,
+    "7": 1093887107736535081,
+    "8": 1093887112073465946,
+    "9": 1093887114220929124,
+    "0": 1093887083568955422,
+}
+
 DIGIT_EMOJIS = {
-    "1": "<:number_1:1093887092507021332>",
-    "2": "<:number_2:1093887089730396230>",
-    "3": "<:number_3:1093887094931324929>",
-    "4": "<:number_4:1093887099171774494>",
-    "5": "<:number_5:1093887101302484993>",
-    "6": "<:number_6:1093887103856820345>",
-    "7": "<:number_7:1093887107736535081>",
-    "8": "<:number_8:1093887112073465946>",
-    "9": "<:number_9:1093887114220929124>",
-    "0": "<:number_0:1093887083568955422>",
+    digit: f"<:kimi_digit_{digit}:{emoji_id}>"
+    for digit, emoji_id in DIGIT_EMOJI_IDS.items()
 }
 
 DEFAULT_MESSAGES = [
@@ -74,9 +79,18 @@ def pick_thanks_message() -> str:
     return random.choice(load_thanks_messages())
 
 
-def format_digit_emojis(number: int) -> str:
+def resolve_digit_emoji(digit: str, bot=None) -> str:
+    emoji_id = DIGIT_EMOJI_IDS[str(digit)]
+    if bot is not None:
+        emoji = bot.get_emoji(int(emoji_id))
+        if emoji is not None:
+            return str(emoji)
+    return DIGIT_EMOJIS[str(digit)]
+
+
+def format_digit_emojis(number: int, bot=None) -> str:
     value = max(0, int(number))
-    return "".join(DIGIT_EMOJIS[digit] for digit in str(value))
+    return "".join(resolve_digit_emoji(digit, bot=bot) for digit in str(value))
 
 
 def load_boost_thanks_data() -> dict:

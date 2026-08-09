@@ -8,7 +8,7 @@ import config
 from cogs.points.storage import format_shells, modify_user_points
 from cogs.shared.utils import is_super_egg
 
-from .storage import format_digit_emojis, mark_processed, pick_thanks_message, update_processed_message
+from .storage import DIGIT_EMOJI_IDS, format_digit_emojis, mark_processed, pick_thanks_message, update_processed_message
 
 BOOST_MESSAGE_TYPE_NAMES = {
     "premium_guild_subscription",
@@ -53,10 +53,10 @@ def _extract_boost_count(message: discord.Message) -> int:
     return 1
 
 
-def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.Guild, thanks_text: str) -> discord.Embed:
+def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.Guild, thanks_text: str, bot=None) -> discord.Embed:
     tier = int(getattr(guild, "premium_tier", 0) or 0)
     total_boosts = int(getattr(guild, "premium_subscription_count", 0) or 0)
-    boost_digits = format_digit_emojis(boost_count)
+    boost_digits = format_digit_emojis(boost_count, bot=bot)
 
     embed = discord.Embed(
         title=BOOST_THANKS_TITLE,
@@ -83,12 +83,9 @@ def _extract_boost_count_from_embed(embed: discord.Embed) -> int | None:
     raw = line_match.group(1).strip()
     custom_ids = re.findall(r"<a?:[^:>]+:(\d+)>", raw)
     if custom_ids:
-        from .storage import DIGIT_EMOJIS
-
         id_to_digit = {
-            re.search(r":(\d+)>$", emoji).group(1): digit
-            for digit, emoji in DIGIT_EMOJIS.items()
-            if re.search(r":(\d+)>$", emoji)
+            str(emoji_id): digit
+            for digit, emoji_id in DIGIT_EMOJI_IDS.items()
         }
         digits = "".join(id_to_digit.get(emoji_id, "") for emoji_id in custom_ids)
         if digits:
@@ -105,11 +102,11 @@ def _extract_boost_count_from_embed(embed: discord.Embed) -> int | None:
     return None
 
 
-def _refresh_boost_embed_digits(embed: discord.Embed, boost_count: int) -> discord.Embed:
+def _refresh_boost_embed_digits(embed: discord.Embed, boost_count: int, bot=None) -> discord.Embed:
     description = embed.description or ""
     refreshed_description = re.sub(
         r"本次助力[：:].*",
-        f"本次助力：{format_digit_emojis(boost_count)}",
+        f"本次助力：{format_digit_emojis(boost_count, bot=bot)}",
         description,
         count=1,
     )
@@ -166,7 +163,7 @@ class BoostThanksCog(commands.Cog):
         )
 
         thanks_text = pick_thanks_message()
-        embed = _build_boost_embed(message.author, boost_count, message.guild, thanks_text)
+        embed = _build_boost_embed(message.author, boost_count, message.guild, thanks_text, bot=self.bot)
         embed.add_field(
             name="蛋壳感谢",
             value=f"+**{format_shells(reward)}** 蛋壳\n当前余额：**{format_shells(balance)}** 蛋壳",
@@ -225,7 +222,7 @@ class BoostThanksCog(commands.Cog):
                 skipped += 1
                 continue
 
-            refreshed = _refresh_boost_embed_digits(embed, boost_count)
+            refreshed = _refresh_boost_embed_digits(embed, boost_count, bot=self.bot)
             if refreshed.description == embed.description:
                 continue
             try:
@@ -257,3 +254,28 @@ class BoostThanksCog(commands.Cog):
             f"✅ 已刷新助力鸣谢面板。\n扫描：**{scanned}** 条\n更新：**{updated}** 条\n跳过：**{skipped}** 条",
             ephemeral=True,
         )
+
+    @discord.slash_command(name="检查助力表情", description="检查 bot 是否能定位助力数字表情 ID")
+    @is_super_egg()
+    async def check_boost_digit_emojis(self, ctx: discord.ApplicationContext):
+        await ctx.defer(ephemeral=True)
+        lines = []
+        missing = []
+        for digit in "1234567890":
+            emoji_id = DIGIT_EMOJI_IDS[digit]
+            emoji = self.bot.get_emoji(int(emoji_id))
+            if emoji is None:
+                missing.append(digit)
+                lines.append(f"⚠️ `{digit}` `{emoji_id}`：bot emoji cache 找不到")
+            else:
+                guild_name = getattr(getattr(emoji, "guild", None), "name", "未知服务器")
+                lines.append(f"✅ `{digit}` `{emoji_id}`：{emoji} · `{emoji.name}` · {guild_name}")
+
+        tip = ""
+        if missing:
+            tip = (
+                "\n\n如果这里显示找不到，说明 bot 没有加入这些表情所在的服务器，"
+                "或启动时没有加载到该服务器的 emoji。仅开放“使用外部表情”权限还不够。"
+            )
+
+        await ctx.followup.send("\n".join(lines)[:1800] + tip, ephemeral=True)
