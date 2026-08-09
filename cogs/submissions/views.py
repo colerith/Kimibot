@@ -16,6 +16,7 @@ from .storage import (
     find_by_message_id,
     get_panel_info,
     get_submission,
+    list_submissions,
     list_user_submissions,
     mark_deleted,
     random_reward,
@@ -34,6 +35,7 @@ RECOMMENDATION_CHANNEL_ID = 1536024803587137536
 
 DOMAIN_OPTIONS = ["酒馆好物", "书籍安利", "影视安利", "游戏安利", "便利生活", "其他类型"]
 TYPE_OPTIONS = ["sfw", "nsfw"]
+COMMENTS_PER_PAGE = 10
 
 
 def _paragraph_style():
@@ -115,6 +117,23 @@ def _image_urls_text(urls: list[str], spoiler: bool) -> str:
     return _spoiler(text, spoiler)
 
 
+def _clamp_comment_page(record: dict, comments: list[dict]) -> int:
+    max_page = max(0, (len(comments) - 1) // COMMENTS_PER_PAGE)
+    try:
+        page = int(record.get("comment_page", 0) or 0)
+    except (TypeError, ValueError):
+        page = 0
+    return min(max(page, 0), max_page)
+
+
+def _quote_comment(content: str, limit: int = 900) -> str:
+    content = str(content or "").strip()
+    if len(content) > limit:
+        content = content[: limit - 3] + "..."
+    lines = content.splitlines() or ["*空*"]
+    return "\n".join(f"> {line}" if line else ">" for line in lines)[:1024]
+
+
 def build_panel_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🥚 奇米蛋投稿箱",
@@ -174,11 +193,22 @@ def build_submission_embed(record: dict) -> discord.Embed:
         embed.add_field(name="觉得有用", value=f"{useful_count} 人", inline=True)
         comments = record.get("comments", []) if isinstance(record.get("comments", []), list) else []
         if comments:
-            lines = [
-                f"**{row.get('user_name', '匿名')}：** {str(row.get('content', ''))[:80]}"
-                for row in comments[-5:]
-            ]
-            embed.add_field(name="盖楼回复", value="\n".join(lines)[:1024], inline=False)
+            page = _clamp_comment_page(record, comments)
+            start = page * COMMENTS_PER_PAGE
+            end = start + COMMENTS_PER_PAGE
+            total_pages = max(1, (len(comments) - 1) // COMMENTS_PER_PAGE + 1)
+            for index, row in enumerate(comments[start:end], start=start + 1):
+                user_name = str(row.get("user_name", "匿名"))[:80]
+                embed.add_field(
+                    name=f"#{index} {user_name}",
+                    value=_quote_comment(str(row.get("content", ""))),
+                    inline=False,
+                )
+            embed.add_field(
+                name="盖楼页码",
+                value=f"第 **{page + 1}/{total_pages}** 页，每页 {COMMENTS_PER_PAGE} 条，共 {len(comments)} 条回复。",
+                inline=False,
+            )
 
     total_reward = float(record.get("base_reward", 0) or 0) + float(record.get("extra_reward", 0) or 0)
     embed.set_footer(text=f"投稿ID: {record.get('id')} · 已奖励 {format_shells(total_reward)} 蛋壳")
@@ -252,6 +282,29 @@ async def publish_or_update_submission(client, record: dict, attachments=None, *
             pass
     save_submission(record)
     return record, "sent"
+
+
+async def refresh_all_recommendation_panels(client) -> dict:
+    refreshed = 0
+    skipped = 0
+    for record in list_submissions(KIND_RECOMMENDATION):
+        channel_id = int(record.get("channel_id") or 0)
+        message_id = int(record.get("message_id") or 0)
+        if not channel_id or not message_id:
+            skipped += 1
+            continue
+        try:
+            channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+            await message.edit(
+                embed=build_submission_embed(record),
+                view=RecommendationActionView(record),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            refreshed += 1
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            skipped += 1
+    return {"refreshed": refreshed, "skipped": skipped}
 
 
 async def deploy_submission_panel(channel, bot) -> str:
@@ -393,6 +446,9 @@ class CommentModal(discord.ui.Modal):
         record = add_comment(self.record["id"], interaction.user.id, interaction.user.display_name, self.children[0].value.strip())
         if not record:
             return await interaction.followup.send("投稿不存在或已经删除。", ephemeral=True)
+        comments = record.get("comments", []) if isinstance(record.get("comments", []), list) else []
+        record["comment_page"] = max(0, (len(comments) - 1) // COMMENTS_PER_PAGE)
+        save_submission(record)
         await publish_or_update_submission(interaction.client, record)
         await interaction.followup.send("✅ 评论已经盖到楼里啦。", ephemeral=True)
 
@@ -721,10 +777,16 @@ class RecommendationActionView(discord.ui.View):
         super().__init__(timeout=None)
         if record:
             useful_count = len(record.get("useful_user_ids", []) if isinstance(record.get("useful_user_ids", []), list) else [])
+            comments = record.get("comments", []) if isinstance(record.get("comments", []), list) else []
+            page = _clamp_comment_page(record, comments)
+            max_page = max(0, (len(comments) - 1) // COMMENTS_PER_PAGE)
             for child in self.children:
                 if getattr(child, "custom_id", "") == "submission_useful":
                     child.label = f"觉得有用 {useful_count}"
-                    break
+                elif getattr(child, "custom_id", "") == "submission_comments_prev":
+                    child.disabled = page <= 0
+                elif getattr(child, "custom_id", "") == "submission_comments_next":
+                    child.disabled = page >= max_page
 
     @discord.ui.button(label="觉得有用", style=discord.ButtonStyle.success, custom_id="submission_useful")
     async def useful(self, button, interaction: discord.Interaction):
@@ -759,6 +821,34 @@ class RecommendationActionView(discord.ui.View):
         if not record:
             return await interaction.response.send_message("没有找到投稿记录。", ephemeral=True)
         await interaction.response.send_modal(CommentModal(record))
+
+    async def _turn_comment_page(self, interaction: discord.Interaction, delta: int):
+        await interaction.response.defer(ephemeral=True)
+        record = find_by_message_id(interaction.message.id)
+        if not record:
+            return await interaction.followup.send("没有找到投稿记录。", ephemeral=True)
+        comments = record.get("comments", []) if isinstance(record.get("comments", []), list) else []
+        if not comments:
+            return await interaction.followup.send("这条安利还没有盖楼回复。", ephemeral=True)
+
+        page = _clamp_comment_page(record, comments)
+        max_page = max(0, (len(comments) - 1) // COMMENTS_PER_PAGE)
+        record["comment_page"] = min(max(page + delta, 0), max_page)
+        save_submission(record)
+        await interaction.message.edit(
+            embed=build_submission_embed(record),
+            view=RecommendationActionView(record),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await interaction.followup.send(f"✅ 已切到第 {record['comment_page'] + 1} 页。", ephemeral=True)
+
+    @discord.ui.button(label="上一页", emoji="◀️", style=discord.ButtonStyle.secondary, row=1, custom_id="submission_comments_prev")
+    async def comments_prev(self, button, interaction: discord.Interaction):
+        await self._turn_comment_page(interaction, -1)
+
+    @discord.ui.button(label="下一页", emoji="▶️", style=discord.ButtonStyle.secondary, row=1, custom_id="submission_comments_next")
+    async def comments_next(self, button, interaction: discord.Interaction):
+        await self._turn_comment_page(interaction, 1)
 
 
 class SubmissionManageSelect(discord.ui.Select):

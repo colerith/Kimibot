@@ -180,6 +180,19 @@ def list_user_submissions(user_id: int, guild_id: int | None = None, include_del
     return sorted(rows, key=lambda row: row.get("created_at", ""), reverse=True)
 
 
+def list_submissions(kind: str | None = None, include_deleted: bool = False) -> list[dict]:
+    rows = []
+    for record in load_data().get("submissions", {}).values():
+        if not isinstance(record, dict):
+            continue
+        if kind and record.get("kind") != kind:
+            continue
+        if not include_deleted and record.get("status") == STATUS_DELETED:
+            continue
+        rows.append(record)
+    return sorted(rows, key=lambda row: row.get("created_at", ""), reverse=True)
+
+
 def update_submission_fields(submission_id: str, fields: dict) -> dict | None:
     record = get_submission(submission_id)
     if not record or record.get("status") == STATUS_DELETED:
