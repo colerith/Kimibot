@@ -80,6 +80,30 @@ SHELLS = {
     "RED_PACKET_EXPIRE_HOURS": 24,
 }
 
+SUBMISSIONS = {
+    "CHANNEL_IDS": {
+        "repo_sfw": 1441437806617563156,
+        "repo_nsfw": 1417576370451513495,
+        "bug": 1417577014096957554,
+        "recommendation": 1536024803587137536,
+    },
+    "REWARD_RANGES": {
+        "base_repo": (0.5, 2.0),
+        "base_bug": (0.8, 2.5),
+        "base_recommendation": (1.0, 3.0),
+        "reply_repo": (0.3, 1.5),
+        "reply_bug": (0.5, 2.0),
+    },
+    "DELETE_PENALTY_RATE": 0.5,
+}
+
+SUBMISSION_USEFUL_TIERS = [
+    {"count": 3, "reward": 1.0},
+    {"count": 10, "reward": 3.0},
+    {"count": 30, "reward": 8.0},
+    {"count": 50, "reward": 15.0},
+]
+
 # --- 外观配置 ---
 STYLE = {"KIMI_YELLOW": 0xFFD700, "KIMI_FOOTER_TEXT": "请遵守社区规则，一起做个乖饱饱嘛~！"}
 
@@ -89,3 +113,4 @@ globals().update(STYLE)
 globals().update(LOTTERY)
 globals().update(POINTS)
 globals().update(SHELLS)
+globals().update(SUBMISSIONS)

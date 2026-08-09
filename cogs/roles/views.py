@@ -1626,6 +1626,17 @@ class CommunityPanelManageView(discord.ui.View):
         else:
             await interaction.followup.send("❌ 找不到预答题频道。", ephemeral=True)
 
+    @discord.ui.button(label="投稿面板", style=discord.ButtonStyle.success, emoji="🥚", custom_id="community_admin_submission_panel")
+    async def submission_panel_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        from cogs.submissions.views import deploy_submission_panel
+
+        status = await deploy_submission_panel(interaction.channel, self.bot)
+        if status == "updated":
+            await interaction.followup.send("✅ 已更新当前频道的奇米蛋投稿面板。", ephemeral=True)
+        else:
+            await interaction.followup.send("✅ 已发送新的奇米蛋投稿面板。", ephemeral=True)
+
     @discord.ui.button(label="题库刷新", style=discord.ButtonStyle.secondary, emoji="📚", custom_id="community_admin_prequiz_bank")
     async def prequiz_bank_callback(self, button, interaction: discord.Interaction):
         from cogs.prequiz.storage import load_question_bank
@@ -1667,7 +1678,7 @@ def build_community_manage_embed(guild: discord.Guild | None):
         title="⚙️ 社区面板管理台",
         description=(
             "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
-            "预答题、加速卡、红包与数据追踪入口已统一接入这里。"
+            "预答题、投稿、加速卡、红包与数据追踪入口已统一接入这里。"
         ),
         color=0x2B2D31,
     )
