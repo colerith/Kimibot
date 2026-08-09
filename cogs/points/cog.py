@@ -6,7 +6,12 @@ import time
 import re
 
 import config
-from .storage import format_shells, record_message_activity, reward_daily_forum_post
+from .storage import (
+    format_shells,
+    record_message_activity,
+    reward_daily_forum_post,
+    reward_daily_kimi_praise,
+)
 
 FORUM_REWARD_CHANNEL_IDS = set(int(x) for x in getattr(config, "FORUM_REWARD_CHANNEL_IDS", []))
 FORUM_REWARD_AMOUNT = float(getattr(config, "FORUM_REWARD_AMOUNT", getattr(config, "POINTS_POST_REWARD", 5.0)))
@@ -16,6 +21,19 @@ POINTS_MSG_COOLDOWN = getattr(
     "POINTS_MSG_COOLDOWN",
     getattr(config, "COOLDOWN_SECONDS", 30),
 )
+PRAISE_KIMI_CHANNEL_ID = int(getattr(config, "PRAISE_KIMI_CHANNEL_ID", 1450480250210484357))
+PRAISE_KIMI_TRIGGER = str(getattr(config, "PRAISE_KIMI_TRIGGER", "赞美奇米蛋！")).strip()
+PRAISE_REWARD_EMOJIS = {
+    1: "1️⃣",
+    2: "2️⃣",
+    3: "3️⃣",
+    4: "4️⃣",
+    5: "5️⃣",
+    6: "6️⃣",
+    7: "7️⃣",
+    8: "8️⃣",
+    9: "9️⃣",
+}
 
 def is_valid_comment(content: str) -> bool:
     """
@@ -51,6 +69,28 @@ class PointListener(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
+            return
+
+        if (
+            message.channel.id == PRAISE_KIMI_CHANNEL_ID
+            and message.content.strip() == PRAISE_KIMI_TRIGGER
+        ):
+            reward = reward_daily_kimi_praise(
+                user_id=message.author.id,
+                guild_id=message.guild.id,
+                message_id=message.id,
+            )
+            if reward.get("success"):
+                amount = int(float(reward.get("amount", 0) or 0))
+                emoji = PRAISE_REWARD_EMOJIS.get(amount)
+                if emoji:
+                    try:
+                        await message.add_reaction(emoji)
+                    except discord.HTTPException:
+                        pass
+                print(
+                    f"🥚 [蛋壳系统] {message.author.name} 赞美奇米蛋奖励 +{format_shells(amount)} 蛋壳 (Message {message.id})"
+                )
             return
 
         now = time.time()

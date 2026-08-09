@@ -24,6 +24,7 @@ def _empty_points_data() -> dict:
         "users": {},
         "daily_signins": {},
         "daily_forum_rewards": {},
+        "daily_praise_rewards": {},
         "transactions": [],
         "acceleration_purchases": [],
     }
@@ -137,6 +138,7 @@ def _normalize_points_data(raw_data: dict) -> dict:
             "users": users,
             "daily_signins": raw_data.get("daily_signins", {}),
             "daily_forum_rewards": raw_data.get("daily_forum_rewards", {}),
+            "daily_praise_rewards": raw_data.get("daily_praise_rewards", {}),
             "transactions": raw_data.get("transactions", []),
             "acceleration_purchases": raw_data.get("acceleration_purchases", []),
         }
@@ -674,3 +676,54 @@ def reward_daily_forum_post(
     )
     save_points_data(data)
     return {"success": True, "reason": "rewarded", "rank": row["rank"], "amount": actual_delta}
+
+
+def _get_praise_weights() -> list[int]:
+    raw = getattr(config, "PRAISE_KIMI_REWARD_WEIGHTS", [90, 70, 52, 36, 24, 15, 9, 4, 1])
+    if not isinstance(raw, (list, tuple)) or len(raw) != 9:
+        return [90, 70, 52, 36, 24, 15, 9, 4, 1]
+    weights = []
+    for value in raw:
+        try:
+            weights.append(max(0, int(value)))
+        except (TypeError, ValueError):
+            weights.append(0)
+    if sum(weights) <= 0:
+        return [90, 70, 52, 36, 24, 15, 9, 4, 1]
+    return weights
+
+
+def reward_daily_kimi_praise(user_id: int, guild_id: int, message_id: int) -> dict:
+    """每日一次赞美奇米蛋奖励，奖励 1-9 蛋壳且高额更稀有。"""
+    data = load_points_data()
+    today = _today()
+    reward_key = f"{guild_id}:{today}"
+    rows = data.setdefault("daily_praise_rewards", {}).setdefault(reward_key, {})
+    uid = str(user_id)
+    if uid in rows:
+        return {"success": False, "reason": "already_claimed", "amount": 0.0}
+
+    amount = random.choices(list(range(1, 10)), weights=_get_praise_weights(), k=1)[0]
+    record, _ = _ensure_user_record(data, user_id, guild_id)
+    before = _round_shells(record.get("shells", 0))
+    after = _round_shells(before + amount)
+    actual_delta = _round_delta(after - before)
+
+    rows[uid] = {
+        "time": _now_iso(),
+        "message_id": str(message_id),
+        "amount": actual_delta,
+    }
+    record["shells"] = after
+    record["points"] = after
+    _append_transaction(
+        data,
+        record,
+        user_id=user_id,
+        guild_id=guild_id,
+        amount=actual_delta,
+        source="kimi_praise",
+        reason=f"message_id={message_id}",
+    )
+    save_points_data(data)
+    return {"success": True, "reason": "rewarded", "amount": actual_delta, "balance": after}
