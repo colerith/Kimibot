@@ -7,6 +7,7 @@ from typing import Dict, List
 ROLES_DATA_FILE = "data/general_roles.json"
 COLLECTIONS_DATA_FILE = "data/user_collections.json"
 LOTTERY_STATS_DATA_FILE = "data/role_lottery_stats.json"
+REDEEM_OWNERSHIP_DATA_FILE = "data/role_redeem_ownership.json"
 
 RARITY_NORMAL = 1
 RARITY_RARE = 2
@@ -428,6 +429,39 @@ def get_user_collection(user_id: int) -> list:
     uid_str = str(user_id)
     data = load_collections_data()
     return data.get(uid_str, [])
+
+
+def load_redeem_ownership_data():
+    if not os.path.exists(REDEEM_OWNERSHIP_DATA_FILE):
+        return {}
+    try:
+        with open(REDEEM_OWNERSHIP_DATA_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(uid): _uniq_ids(role_ids) for uid, role_ids in raw.items()}
+
+
+def save_redeem_ownership_data(data):
+    os.makedirs(os.path.dirname(REDEEM_OWNERSHIP_DATA_FILE), exist_ok=True)
+    normalized = {str(uid): _uniq_ids(role_ids) for uid, role_ids in (data or {}).items()}
+    with open(REDEEM_OWNERSHIP_DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(normalized, f, indent=4, ensure_ascii=False)
+
+
+def add_redeem_ownership(user_id: int, role_id: int):
+    uid_str = str(user_id)
+    data = load_redeem_ownership_data()
+    roles = data.setdefault(uid_str, [])
+    if role_id not in roles:
+        roles.append(role_id)
+        save_redeem_ownership_data(data)
+
+
+def get_user_redeem_ownership(user_id: int) -> list[int]:
+    return load_redeem_ownership_data().get(str(user_id), [])
 
 
 def _make_lottery_user_key(user_id: int, guild_id: int | None = None) -> str:

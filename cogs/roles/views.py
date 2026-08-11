@@ -19,6 +19,8 @@ from .storage import (
     get_lottery_role_kind,
     get_redeem_role_config,
     get_lottery_stats,
+    add_redeem_ownership,
+    get_user_redeem_ownership,
     record_lottery_draw,
     set_lottery_role_rarity,
     set_lottery_role_kind,
@@ -637,7 +639,7 @@ class RoleClaimSelect(discord.ui.Select):
     """
     具体的身份组选择下拉框 (放在私密面板中)
     """
-    def __init__(self, guild_roles):
+    def __init__(self, guild_roles, *, page: int = 0, total_pages: int = 1):
         options = []
         # 按名称排序
         sorted_roles = sorted(guild_roles, key=lambda r: r.name)
@@ -656,10 +658,10 @@ class RoleClaimSelect(discord.ui.Select):
             ))
 
         super().__init__(
-            placeholder="👇点击选择你要更换的装饰...",
+            placeholder=f"👇点击选择你要更换的装饰... ({page + 1}/{total_pages})",
             min_values=1,
             max_values=1,
-            options=options[:25], # discord限制25个
+            options=options,
             custom_id="role_claim_select_inner"
         )
 
@@ -681,6 +683,7 @@ class RoleClaimSelect(discord.ui.Select):
         data = load_role_data()
         claimable_ids = data.get("claimable_roles", [])
         lottery_ids = data.get("lottery_roles", [])
+        redeem_ids = data.get("redeem_roles", [])
 
         exclusive_type = None
         if target_role.id in claimable_ids:
@@ -688,6 +691,8 @@ class RoleClaimSelect(discord.ui.Select):
         elif target_role.id in lottery_ids:
             lot_kind = get_lottery_role_kind(target_role.id, data)
             exclusive_type = "lottery_color" if lot_kind == LOTTERY_KIND_COLOR else "lottery_icon"
+        elif target_role.id in redeem_ids:
+            exclusive_type = "redeem"
 
         # 2. 根据类型执行互斥移除并添加
         if target_role not in interaction.user.roles:
@@ -717,12 +722,75 @@ class RoleSelectionView(discord.ui.View):
     """
     点开【开始装饰】后看到的私密视图
     """
-    def __init__(self, guild_roles):
-        super().__init__(timeout=None) # 改为None：持久化监听，即使bot重启也能交互
-        if guild_roles:
-            self.add_item(RoleClaimSelect(guild_roles[:25]))
-        else:
+    def __init__(self, guild_roles, *, page: int = 0):
+        super().__init__(timeout=300)
+        unique_roles = {}
+        for role in guild_roles or []:
+            unique_roles[role.id] = role
+        self.guild_roles = sorted(unique_roles.values(), key=lambda r: r.name.lower())
+        self.page_size = 25
+        self.total_pages = max(1, math.ceil(len(self.guild_roles) / self.page_size)) if self.guild_roles else 1
+        self.page = max(0, min(page, self.total_pages - 1))
+        self._build()
+
+    def _build(self):
+        self.clear_items()
+        if not self.guild_roles:
             self.add_item(discord.ui.Button(label="暂无可用装饰", disabled=True))
+            return
+
+        start = self.page * self.page_size
+        end = start + self.page_size
+        page_roles = self.guild_roles[start:end]
+        self.add_item(RoleClaimSelect(page_roles, page=self.page, total_pages=self.total_pages))
+
+        prev_btn = discord.ui.Button(
+            label="上一页",
+            emoji="⬅️",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+            disabled=self.total_pages <= 1,
+        )
+        next_btn = discord.ui.Button(
+            label="下一页",
+            emoji="➡️",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+            disabled=self.total_pages <= 1,
+        )
+        clear_btn = discord.ui.Button(
+            label="清空佩戴",
+            emoji="🧹",
+            style=discord.ButtonStyle.danger,
+            row=1,
+        )
+        prev_btn.callback = self.prev_page_callback
+        next_btn.callback = self.next_page_callback
+        clear_btn.callback = self.clear_worn_callback
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+        self.add_item(clear_btn)
+
+    async def prev_page_callback(self, interaction: discord.Interaction):
+        self.page = (self.page - 1) % self.total_pages
+        self._build()
+        await interaction.response.edit_message(view=self)
+
+    async def next_page_callback(self, interaction: discord.Interaction):
+        self.page = (self.page + 1) % self.total_pages
+        self._build()
+        await interaction.response.edit_message(view=self)
+
+    async def clear_worn_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        removed = await remove_all_decorations(interaction.user, interaction.guild)
+        if removed:
+            await interaction.followup.send(
+                f"🧹 已清空佩戴中的 {len(removed)} 个装饰身份组，拥有记录都还在~",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send("你身上现在没有佩戴装饰身份组~", ephemeral=True)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # 允许此视图中的所有组件交互
@@ -838,6 +906,7 @@ class RedeemRoleSelect(discord.ui.Select):
                 ephemeral=True,
             )
 
+        add_redeem_ownership(interaction.user.id, role.id)
         new_balance = get_user_points(interaction.user.id, interaction.guild_id)
         await interaction.followup.send(
             f"✅ 兑换成功！你获得了 {role.mention}。\n"
@@ -1047,9 +1116,16 @@ class RoleClaimView(discord.ui.View):
         data = load_role_data()
         claimable_ids = set(data.get("claimable_roles", []))
         lottery_ids = set(data.get("lottery_roles", []))
+        redeem_ids = set(data.get("redeem_roles", []))
 
         # 从藏品数据库获取稀有身份组
         user_lottery_collection_ids = set(get_user_collection(interaction.user.id))
+        user_redeem_owned_ids = set(get_user_redeem_ownership(interaction.user.id))
+        current_role_ids = {role.id for role in interaction.user.roles}
+        current_redeem_ids = redeem_ids & current_role_ids
+        for rid in current_redeem_ids:
+            add_redeem_ownership(interaction.user.id, rid)
+        user_redeem_owned_ids |= current_redeem_ids
 
         selectable_roles = []
 
@@ -1065,11 +1141,18 @@ class RoleClaimView(discord.ui.View):
             if role: # 确保身份组仍然存在于服务器
                 selectable_roles.append(role)
 
+        # 3. 添加用户已购买/已拥有的【蛋壳兑换身份组】
+        for rid in user_redeem_owned_ids & redeem_ids:
+            role = interaction.guild.get_role(rid)
+            if role:
+                selectable_roles.append(role)
+
         if not selectable_roles:
             return await interaction.response.send_message("⚠️ 现在好像还没有任何可用的装饰品呢！", ephemeral=True)
 
-        # 3. 构建当前状态文本，分别显示
+        # 4. 构建当前状态文本，分别显示
         user_current_claimable = [r.name for r in interaction.user.roles if r.id in claimable_ids]
+        user_current_redeem = [r.name for r in interaction.user.roles if r.id in redeem_ids]
         lottery_color_ids = {
             rid for rid in lottery_ids
             if get_lottery_role_kind(rid, data) == LOTTERY_KIND_COLOR
@@ -1084,6 +1167,8 @@ class RoleClaimView(discord.ui.View):
         status_parts = []
         if user_current_claimable:
             status_parts.append(f"🎨 **普通装饰**: {', '.join(user_current_claimable)}")
+        if user_current_redeem:
+            status_parts.append(f"🥚 **蛋壳兑换**: {', '.join(user_current_redeem)}")
         if user_current_lottery_color:
             status_parts.append(f"🎰 **稀有颜色**: {', '.join(user_current_lottery_color)}")
         if user_current_lottery_icon:
@@ -1091,7 +1176,7 @@ class RoleClaimView(discord.ui.View):
 
         status_text = "\n".join(status_parts) if status_parts else "你目前还没有佩戴任何装饰哦。"
 
-        # 4. 发送私密选择面板
+        # 5. 发送私密选择面板
         embed = discord.Embed(
             title="👗 小蛋换装",
             description=f"**当前穿戴状态:**\n{status_text}\n\n请在下方菜单中选择你喜欢的装饰进行穿戴或更换：",
@@ -2537,7 +2622,7 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
     """
     移除用户身上指定类型的互斥身份组。
     - keep_role_id: 如果提供了这个ID，则在移除时保留这个身份组（适用于换装时保留新装饰）
-    - exclusive_type: "claimable", "lottery", "lottery_color", "lottery_icon" 或 None
+    - exclusive_type: "claimable", "redeem", "lottery", "lottery_color", "lottery_icon" 或 None
     """
     data = load_role_data()
     target_ids = set()
@@ -2545,6 +2630,8 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
     # 根据传入的类型，确定要清理的身份组池
     if exclusive_type == "claimable":
         target_ids = set(data.get("claimable_roles", []))
+    elif exclusive_type == "redeem":
+        target_ids = set(data.get("redeem_roles", []))
     elif exclusive_type == "lottery":
         target_ids = set(data.get("lottery_roles", []))
     elif exclusive_type == "lottery_color":
@@ -2559,7 +2646,7 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
         }
     # 如果没有指定类型 (例如“一键移除”按钮)，则清理所有装饰
     else:
-        target_ids = set(data.get("claimable_roles", []) + data.get("lottery_roles", []))
+        target_ids = set(data.get("claimable_roles", []) + data.get("lottery_roles", []) + data.get("redeem_roles", []))
 
     to_remove = []
     for role in user.roles:
