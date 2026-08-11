@@ -5,7 +5,7 @@ import io
 import discord
 from discord.ext import commands
 
-from .views import OwnerReplyView, RecommendationActionView, SubmissionPanelView, refresh_all_recommendation_panels
+from .views import OwnerReplyView, RecommendationActionView, SubmissionPanelView, refresh_all_submission_panels
 
 
 class CachedSubmissionAttachment:
@@ -27,7 +27,7 @@ class SubmissionsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.attachment_sessions = {}
-        self.recommendation_panels_refreshed = False
+        self.submission_panels_refreshed = False
 
     def _session_key(self, user_id: int, channel_id: int):
         return (user_id, channel_id)
@@ -112,20 +112,20 @@ class SubmissionsCog(commands.Cog):
         self.bot.add_view(OwnerReplyView())
         self.bot.add_view(RecommendationActionView())
         print("[Submissions] Cog loaded and persistent views registered.")
-        self.bot.loop.create_task(self._refresh_recommendation_panels_on_ready())
+        self.bot.loop.create_task(self._refresh_submission_panels_on_ready())
 
-    async def _refresh_recommendation_panels_on_ready(self):
-        if self.recommendation_panels_refreshed:
+    async def _refresh_submission_panels_on_ready(self):
+        if self.submission_panels_refreshed:
             return
-        self.recommendation_panels_refreshed = True
+        self.submission_panels_refreshed = True
         await self.bot.wait_until_ready()
         try:
-            result = await refresh_all_recommendation_panels(self.bot)
+            result = await refresh_all_submission_panels(self.bot)
             print(
-                f"[Submissions] refreshed {result['refreshed']} recommendation panels, skipped={result['skipped']}."
+                f"[Submissions] refreshed {result['refreshed']} submission panels, skipped={result['skipped']}."
             )
         except Exception as e:
-            print(f"[Submissions] recommendation-panel-refresh-failed: {e}")
+            print(f"[Submissions] submission-panel-refresh-failed: {e}")
 
     def cog_unload(self):
         for session in self.attachment_sessions.values():

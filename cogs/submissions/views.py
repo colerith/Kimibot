@@ -36,6 +36,7 @@ RECOMMENDATION_CHANNEL_ID = 1536024803587137536
 DOMAIN_OPTIONS = ["酒馆好物", "书籍安利", "影视安利", "游戏安利", "便利生活", "其他类型"]
 TYPE_OPTIONS = ["sfw", "nsfw"]
 COMMENTS_PER_PAGE = 10
+CONTENT_COLLAPSE_LIMIT = 350
 
 
 def _paragraph_style():
@@ -134,6 +135,24 @@ def _quote_comment(content: str, limit: int = 900) -> str:
     return "\n".join(f"> {line}" if line else ">" for line in lines)[:1024]
 
 
+def _content_is_collapsed(record: dict) -> bool:
+    fields = record.get("fields", {})
+    if not isinstance(fields, dict):
+        return False
+    return len(str(fields.get("content", "") or "")) > CONTENT_COLLAPSE_LIMIT
+
+
+def _content_preview(content: str, is_nsfw: bool) -> str:
+    content = str(content or "没有填写内容")
+    if len(content) <= CONTENT_COLLAPSE_LIMIT:
+        return _spoiler(content, is_nsfw)
+    preview = content[:CONTENT_COLLAPSE_LIMIT].rstrip() + "..."
+    return _spoiler(
+        f"{preview}\n\n*内容较长，已折叠。点击「展开全文」仅自己可见查看完整内容。*",
+        is_nsfw,
+    )
+
+
 def build_panel_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🥚 奇米蛋投稿箱",
@@ -169,7 +188,7 @@ def build_submission_embed(record: dict) -> discord.Embed:
     if kind == KIND_RECOMMENDATION:
         embed.add_field(name="领域", value=str(fields.get("domain", "其他类型")), inline=True)
     content = str(fields.get("content", "") or "没有填写内容")
-    embed.add_field(name="内容", value=_spoiler(content[:1024], is_nsfw), inline=False)
+    embed.add_field(name="内容", value=_content_preview(content, is_nsfw)[:1024], inline=False)
     image_urls = record.get("attachments", [])
     if isinstance(image_urls, list) and image_urls:
         if is_nsfw:
@@ -218,7 +237,7 @@ def build_submission_embed(record: dict) -> discord.Embed:
 def _view_for_record(record: dict) -> discord.ui.View:
     if record.get("kind") == KIND_RECOMMENDATION:
         return RecommendationActionView(record)
-    return OwnerReplyView()
+    return OwnerReplyView(record)
 
 
 async def _notify_user(client, record: dict, message: str) -> None:
@@ -284,10 +303,10 @@ async def publish_or_update_submission(client, record: dict, attachments=None, *
     return record, "sent"
 
 
-async def refresh_all_recommendation_panels(client) -> dict:
+async def refresh_all_submission_panels(client) -> dict:
     refreshed = 0
     skipped = 0
-    for record in list_submissions(KIND_RECOMMENDATION):
+    for record in list_submissions():
         channel_id = int(record.get("channel_id") or 0)
         message_id = int(record.get("message_id") or 0)
         if not channel_id or not message_id:
@@ -298,7 +317,7 @@ async def refresh_all_recommendation_panels(client) -> dict:
             message = await channel.fetch_message(message_id)
             await message.edit(
                 embed=build_submission_embed(record),
-                view=RecommendationActionView(record),
+                view=_view_for_record(record),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             refreshed += 1
@@ -758,9 +777,41 @@ class SubmissionDraftView(discord.ui.View):
         )
 
 
+def _build_full_content_embed(record: dict) -> discord.Embed:
+    fields = record.get("fields", {})
+    if not isinstance(fields, dict):
+        fields = {}
+    content_type = str(fields.get("content_type", "sfw")).lower()
+    title = fields.get("title") or fields.get("target") or "未命名投稿"
+    content = str(fields.get("content", "") or "没有填写内容")
+    embed = discord.Embed(
+        title=f"展开全文 · {_kind_label(record.get('kind', ''))} · {title}",
+        description=_spoiler(content[:3900], content_type == "nsfw"),
+        color=PANEL_COLOR,
+    )
+    embed.add_field(name="投稿ID", value=str(record.get("id", "")), inline=True)
+    if record.get("kind") != KIND_BUG:
+        embed.add_field(name="类型", value=content_type, inline=True)
+    if record.get("kind") == KIND_RECOMMENDATION:
+        embed.add_field(name="领域", value=str(fields.get("domain", "其他类型")), inline=True)
+    embed.set_footer(text="仅你可见的完整投稿内容。")
+    return embed
+
+
 class OwnerReplyView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, record: dict | None = None):
         super().__init__(timeout=None)
+        if record and not _content_is_collapsed(record):
+            for child in self.children:
+                if getattr(child, "custom_id", "") == "submission_expand_content_owner":
+                    child.disabled = True
+
+    @discord.ui.button(label="展开全文", emoji="📖", style=discord.ButtonStyle.secondary, custom_id="submission_expand_content_owner")
+    async def expand_content(self, button, interaction: discord.Interaction):
+        record = find_by_message_id(interaction.message.id)
+        if not record:
+            return await interaction.response.send_message("没有找到投稿记录。", ephemeral=True)
+        await interaction.response.send_message(embed=_build_full_content_embed(record), ephemeral=True)
 
     @discord.ui.button(label="电波回信", emoji="💌", style=discord.ButtonStyle.primary, custom_id="submission_owner_reply")
     async def reply(self, button, interaction: discord.Interaction):
@@ -787,6 +838,15 @@ class RecommendationActionView(discord.ui.View):
                     child.disabled = page <= 0
                 elif getattr(child, "custom_id", "") == "submission_comments_next":
                     child.disabled = page >= max_page
+                elif getattr(child, "custom_id", "") == "submission_expand_content_recommendation":
+                    child.disabled = not _content_is_collapsed(record)
+
+    @discord.ui.button(label="展开全文", emoji="📖", style=discord.ButtonStyle.secondary, custom_id="submission_expand_content_recommendation")
+    async def expand_content(self, button, interaction: discord.Interaction):
+        record = find_by_message_id(interaction.message.id)
+        if not record:
+            return await interaction.response.send_message("没有找到投稿记录。", ephemeral=True)
+        await interaction.response.send_message(embed=_build_full_content_embed(record), ephemeral=True)
 
     @discord.ui.button(label="觉得有用", style=discord.ButtonStyle.success, custom_id="submission_useful")
     async def useful(self, button, interaction: discord.Interaction):
