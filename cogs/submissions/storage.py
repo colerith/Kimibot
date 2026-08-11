@@ -12,6 +12,7 @@ TZ_CN = timezone(timedelta(hours=8))
 KIND_REPO = "repo"
 KIND_BUG = "bug"
 KIND_RECOMMENDATION = "recommendation"
+DAILY_KIND_LIMIT = 5
 
 STATUS_OPEN = "open"
 STATUS_REPLIED = "replied"
@@ -21,6 +22,10 @@ STATUS_DELETED = "deleted"
 
 def _now_iso() -> str:
     return datetime.now(TZ_CN).isoformat(timespec="seconds")
+
+
+def _today() -> str:
+    return datetime.now(TZ_CN).date().isoformat()
 
 
 def _empty_data() -> dict:
@@ -191,6 +196,49 @@ def list_submissions(kind: str | None = None, include_deleted: bool = False) -> 
             continue
         rows.append(record)
     return sorted(rows, key=lambda row: row.get("created_at", ""), reverse=True)
+
+
+def count_daily_submissions(
+    *,
+    guild_id: int,
+    author_id: int,
+    kind: str,
+    day: str | None = None,
+) -> int:
+    gid = str(guild_id)
+    uid = str(author_id)
+    target_day = day or _today()
+    count = 0
+    for record in load_data().get("submissions", {}).values():
+        if not isinstance(record, dict):
+            continue
+        if record.get("guild_id") != gid:
+            continue
+        if record.get("author_id") != uid:
+            continue
+        if record.get("kind") != kind:
+            continue
+        if str(record.get("created_at", "")).startswith(target_day):
+            count += 1
+    return count
+
+
+def can_create_submission(
+    *,
+    guild_id: int,
+    author_id: int,
+    kind: str,
+    limit: int = DAILY_KIND_LIMIT,
+) -> dict:
+    used = count_daily_submissions(guild_id=guild_id, author_id=author_id, kind=kind)
+    max_count = max(0, int(limit))
+    return {
+        "allowed": used < max_count,
+        "used": used,
+        "limit": max_count,
+        "remaining": max(0, max_count - used),
+        "day": _today(),
+    }
 
 
 def update_submission_fields(submission_id: str, fields: dict) -> dict | None:

@@ -12,6 +12,7 @@ from .storage import (
     STATUS_DELETED,
     add_comment,
     add_owner_reply,
+    can_create_submission,
     create_submission,
     find_by_message_id,
     get_panel_info,
@@ -159,7 +160,8 @@ def build_panel_embed() -> discord.Embed:
         description=(
             "📮 想 repo、想捉虫、想安利，都可以投进这里。\n"
             "🥚 奇米蛋会给认真投稿的小饱饱发一点亮晶晶的蛋壳。\n"
-            "📎 填完表后可以开启收图，最多收纳 9 张图片。"
+            "📎 填完表后可以开启收图，最多收纳 9 张图片。\n"
+            "🧺 每类投稿每天最多 5 次，防止小蛋箱被塞爆~"
         ),
         color=PANEL_COLOR,
     )
@@ -167,7 +169,7 @@ def build_panel_embed() -> discord.Embed:
     embed.add_field(name="🐞 我要捉虫", value="提交问题对象与详细描述。", inline=False)
     embed.add_field(name="🌟 我要安利", value="分享好物、书籍、影视、游戏或生活经验。", inline=False)
     embed.add_field(name="🗂️ 管理投稿", value="修改或删除自己发过的投稿。", inline=False)
-    embed.set_footer(text="填完投稿表后可开启附件收集，最多 9 张图。")
+    embed.set_footer(text="每日投稿次数按北京时间刷新。")
     return embed
 
 
@@ -711,6 +713,20 @@ class SubmissionDraftView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         if not interaction.guild_id:
             return await interaction.followup.send("这个投稿箱只能在服务器里使用。", ephemeral=True)
+
+        if not self.record_id:
+            limit_status = can_create_submission(
+                guild_id=interaction.guild_id,
+                author_id=interaction.user.id,
+                kind=self.kind,
+            )
+            if not limit_status["allowed"]:
+                return await interaction.followup.send(
+                    f"今天的 **{_kind_label(self.kind)}** 投稿已经达到上限啦。\n"
+                    f"每类投稿每日最多 **{limit_status['limit']}** 次，你今天已经提交 **{limit_status['used']}** 次。\n"
+                    "明天北京时间刷新后再来投递~",
+                    ephemeral=True,
+                )
 
         cog = self._get_submission_cog(interaction)
         result = None
