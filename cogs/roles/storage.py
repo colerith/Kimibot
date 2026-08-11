@@ -6,6 +6,7 @@ from typing import Dict, List
 
 ROLES_DATA_FILE = "data/general_roles.json"
 COLLECTIONS_DATA_FILE = "data/user_collections.json"
+LOTTERY_STATS_DATA_FILE = "data/role_lottery_stats.json"
 
 RARITY_NORMAL = 1
 RARITY_RARE = 2
@@ -427,3 +428,138 @@ def get_user_collection(user_id: int) -> list:
     uid_str = str(user_id)
     data = load_collections_data()
     return data.get(uid_str, [])
+
+
+def _make_lottery_user_key(user_id: int, guild_id: int | None = None) -> str:
+    if guild_id is None:
+        return str(user_id)
+    return f"{guild_id}:{user_id}"
+
+
+def _empty_lottery_stats() -> dict:
+    return {
+        "total_draws": 0,
+        "role_hits": 0,
+        "shell_hits": 0,
+        "empty_hits": 0,
+        "new_roles": 0,
+        "duplicate_roles": 0,
+        "spent_shells": 0.0,
+        "refund_shells": 0.0,
+        "reward_shells": 0.0,
+        "rarity_hits": {
+            str(RARITY_JUNK): 0,
+            str(RARITY_NORMAL): 0,
+            str(RARITY_RARE): 0,
+            str(RARITY_LEGENDARY): 0,
+        },
+        "kind_hits": {
+            LOTTERY_KIND_COLOR: 0,
+            LOTTERY_KIND_ICON: 0,
+        },
+        "last_draw_at": "",
+    }
+
+
+def _normalize_lottery_stats(raw: dict | None = None) -> dict:
+    if not isinstance(raw, dict):
+        raw = {}
+    base = _empty_lottery_stats()
+    for key in ("total_draws", "role_hits", "shell_hits", "empty_hits", "new_roles", "duplicate_roles"):
+        try:
+            base[key] = max(0, int(raw.get(key, base[key])))
+        except (TypeError, ValueError):
+            pass
+    for key in ("spent_shells", "refund_shells", "reward_shells"):
+        base[key] = _normalize_shell_amount(raw.get(key, base[key]), base[key])
+
+    rarity_raw = raw.get("rarity_hits", {}) if isinstance(raw.get("rarity_hits", {}), dict) else {}
+    for rarity in SUPPORTED_RARITIES:
+        key = str(rarity)
+        try:
+            base["rarity_hits"][key] = max(0, int(rarity_raw.get(key, base["rarity_hits"][key])))
+        except (TypeError, ValueError):
+            pass
+
+    kind_raw = raw.get("kind_hits", {}) if isinstance(raw.get("kind_hits", {}), dict) else {}
+    for kind in SUPPORTED_LOTTERY_KINDS:
+        try:
+            base["kind_hits"][kind] = max(0, int(kind_raw.get(kind, base["kind_hits"][kind])))
+        except (TypeError, ValueError):
+            pass
+
+    base["last_draw_at"] = str(raw.get("last_draw_at", "") or "")
+    return base
+
+
+def load_lottery_stats_data() -> dict:
+    if not os.path.exists(LOTTERY_STATS_DATA_FILE):
+        return {}
+    try:
+        with open(LOTTERY_STATS_DATA_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): _normalize_lottery_stats(v) for k, v in raw.items()}
+
+
+def save_lottery_stats_data(data: dict):
+    os.makedirs(os.path.dirname(LOTTERY_STATS_DATA_FILE), exist_ok=True)
+    normalized = {str(k): _normalize_lottery_stats(v) for k, v in (data or {}).items()}
+    with open(LOTTERY_STATS_DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(normalized, f, indent=4, ensure_ascii=False)
+
+
+def get_lottery_stats(user_id: int, guild_id: int | None = None) -> dict:
+    data = load_lottery_stats_data()
+    return _normalize_lottery_stats(data.get(_make_lottery_user_key(user_id, guild_id), {}))
+
+
+def record_lottery_draw(
+    user_id: int,
+    guild_id: int | None,
+    *,
+    results: list[dict],
+    spent_shells: float,
+    refund_shells: float,
+    reward_shells: float,
+    drawn_at: str,
+) -> dict:
+    data = load_lottery_stats_data()
+    key = _make_lottery_user_key(user_id, guild_id)
+    stats = _normalize_lottery_stats(data.get(key, {}))
+
+    stats["total_draws"] += len(results or [])
+    stats["spent_shells"] = _normalize_shell_amount(stats["spent_shells"] + float(spent_shells or 0), 0.0)
+    stats["refund_shells"] = _normalize_shell_amount(stats["refund_shells"] + float(refund_shells or 0), 0.0)
+    stats["reward_shells"] = _normalize_shell_amount(stats["reward_shells"] + float(reward_shells or 0), 0.0)
+
+    for row in results or []:
+        row_type = row.get("type")
+        if row_type == LOTTERY_OUTCOME_EMPTY or row_type == "empty":
+            stats["empty_hits"] += 1
+            continue
+        if row_type == LOTTERY_OUTCOME_SHELLS or row_type == "shells":
+            stats["shell_hits"] += 1
+            continue
+        if row_type == LOTTERY_OUTCOME_ROLE or row_type == "role":
+            stats["role_hits"] += 1
+            if row.get("dupe"):
+                stats["duplicate_roles"] += 1
+            else:
+                stats["new_roles"] += 1
+
+            rarity = str(row.get("rarity", ""))
+            if rarity in stats["rarity_hits"]:
+                stats["rarity_hits"][rarity] += 1
+
+            kind = str(row.get("kind", ""))
+            if kind in stats["kind_hits"]:
+                stats["kind_hits"][kind] += 1
+
+    stats["last_draw_at"] = str(drawn_at or "")
+    data[key] = stats
+    save_lottery_stats_data(data)
+    return stats

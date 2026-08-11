@@ -18,6 +18,8 @@ from .storage import (
     get_lottery_role_rarity,
     get_lottery_role_kind,
     get_redeem_role_config,
+    get_lottery_stats,
+    record_lottery_draw,
     set_lottery_role_rarity,
     set_lottery_role_kind,
     set_redeem_role_config,
@@ -147,6 +149,116 @@ def _redeem_price_line(meta: dict) -> str:
     return f"原价 **{original}** 蛋壳"
 
 
+def _percent(numerator: int | float, denominator: int | float) -> str:
+    if not denominator:
+        return "0%"
+    value = float(numerator) / float(denominator) * 100
+    return f"{value:.1f}%"
+
+
+def _lottery_luck_lines(stats: dict) -> tuple[str, str]:
+    total = int(stats.get("total_draws", 0))
+    if total <= 0:
+        return "未开抽的小蛋", "奇米蛋还没看到你的命运轨迹，先抽一发再来盖章。"
+
+    role_rate = int(stats.get("role_hits", 0)) / total
+    legendary_rate = int(stats.get("rarity_hits", {}).get(str(RARITY_LEGENDARY), 0)) / total
+    empty_rate = int(stats.get("empty_hits", 0)) / total
+
+    if role_rate >= 0.38 or legendary_rate >= 0.04:
+        title = random.choice(["欧皇蛋", "发光小蛋", "命运偏心户"])
+        line = random.choice([
+            "奇米蛋怀疑你把好运藏进袖口里了，出货声音有点响。",
+            "这份出货率亮得离谱，小蛋看完默默把抽奖机擦亮了。",
+            "你靠近奖池的时候，稀有身份组好像会自己探头。",
+        ])
+    elif role_rate >= 0.24:
+        title = random.choice(["稳健蛋", "小顺风蛋", "手感在线"])
+        line = random.choice([
+            "不是每一抽都炸场，但整体手感很会过日子。",
+            "奇米蛋点点头：这份出货率属于能安心继续抽的类型。",
+            "你的运气像刚煮好的蛋，温温热热，挺靠谱。",
+        ])
+    elif empty_rate >= 0.62:
+        title = random.choice(["小非蛋", "空抽观察员", "命运冷处理"])
+        line = random.choice([
+            "奇米蛋递来一杯热水：今天先别和命运硬碰硬。",
+            "奖池对你有点装不熟，但小蛋相信下一次会有动静。",
+            "空抽率有点会演，奇米蛋已经在旁边帮你盯着了。",
+        ])
+    else:
+        title = random.choice(["普通奇米蛋", "蓄力中", "半欧半非"])
+        line = random.choice([
+            "你的运气正在蓄力，像小蛋抱着蛋壳慢慢滚上坡。",
+            "目前属于标准社区体质：有惊喜，也有沉默。",
+            "奇米蛋判断：不是非，只是好运还在排队进场。",
+        ])
+    return title, line
+
+
+def build_lottery_stats_embed(member: discord.Member, guild_id: int) -> discord.Embed:
+    stats = get_lottery_stats(member.id, guild_id)
+    total = int(stats.get("total_draws", 0))
+    title, luck_line = _lottery_luck_lines(stats)
+    rarity_hits = stats.get("rarity_hits", {})
+    kind_hits = stats.get("kind_hits", {})
+    spent = float(stats.get("spent_shells", 0.0))
+    refund = float(stats.get("refund_shells", 0.0))
+    reward = float(stats.get("reward_shells", 0.0))
+    net_cost = max(0.0, spent - refund - reward)
+
+    embed = discord.Embed(
+        title="📊 我的抽奖战报",
+        description=f"**{title}**\n{luck_line}",
+        color=discord.Color.gold(),
+    )
+    embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+    embed.add_field(
+        name="总览",
+        value=(
+            f"总抽数：**{total}**\n"
+            f"身份出货：**{stats.get('role_hits', 0)}**（{_percent(stats.get('role_hits', 0), total)}）\n"
+            f"抽到蛋壳：**{stats.get('shell_hits', 0)}**（{_percent(stats.get('shell_hits', 0), total)}）\n"
+            f"抽空：**{stats.get('empty_hits', 0)}**（{_percent(stats.get('empty_hits', 0), total)}）"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="身份收集",
+        value=(
+            f"新解锁：**{stats.get('new_roles', 0)}**\n"
+            f"重复出货：**{stats.get('duplicate_roles', 0)}**\n"
+            f"颜色/图标：**{kind_hits.get(LOTTERY_KIND_COLOR, 0)} / {kind_hits.get(LOTTERY_KIND_ICON, 0)}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="稀有度",
+        value=(
+            f"☆：**{rarity_hits.get(str(RARITY_JUNK), 0)}**\n"
+            f"★：**{rarity_hits.get(str(RARITY_NORMAL), 0)}**\n"
+            f"★★：**{rarity_hits.get(str(RARITY_RARE), 0)}**\n"
+            f"★★★：**{rarity_hits.get(str(RARITY_LEGENDARY), 0)}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="蛋壳账本",
+        value=(
+            f"累计消耗：**{format_shells(spent)}**\n"
+            f"重复返还：**{format_shells(refund)}**\n"
+            f"蛋壳奖励：**{format_shells(reward)}**\n"
+            f"净消耗：**{format_shells(net_cost)}**"
+        ),
+        inline=False,
+    )
+    if stats.get("last_draw_at"):
+        embed.set_footer(text=f"最近抽奖：{stats['last_draw_at']}")
+    else:
+        embed.set_footer(text="小蛋还没记录到你的抽奖。")
+    return embed
+
+
 def _rules_text() -> str:
     data = load_role_data()
     cfg = get_lottery_config(data)
@@ -175,11 +287,9 @@ def _rules_text() -> str:
         f"- 🎲 单抽消耗：**{format_shells(single_cost)}** 蛋壳\n"
         f"- 🍀 五抽消耗：**{format_shells(five_cost)}** 蛋壳\n"
         f"- 🎯 十连消耗：**{format_shells(ten_cost)}** 蛋壳\n"
-        f"- 🎁 结果权重(抽空/蛋壳/身份)：**{w_empty}/{w_shells}/{w_role}**\n"
         f"- 🥚 蛋壳结果：随机 **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
-        f"- 📈 抽奖概率(☆/★/★★/★★★)：**{w_junk}/{w_normal}/{w_rare}/{w_legend}**\n"
         f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
-        f"- 💬 有效发言：不再单条加分，会提升报到加成\n"
+        f"- 💬 有效发言：会提升蛋壳获取加成\n"
         f"- 🧵 社区发帖：每帖 **{format_shells(post_reward)}** 蛋壳，每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
     )
 
@@ -311,6 +421,15 @@ class RoleLotteryView(discord.ui.View):
             modify_user_points(user.id, total_refund, guild_id, source="role_lottery_refund", reason=f"draw_count={draw_count}")
         if total_shell_reward > 0:
             modify_user_points(user.id, total_shell_reward, guild_id, source="role_lottery_shell_reward", reason=f"draw_count={draw_count}")
+        record_lottery_draw(
+            user.id,
+            guild_id,
+            results=results,
+            spent_shells=cost,
+            refund_shells=total_refund,
+            reward_shells=total_shell_reward,
+            drawn_at=datetime.now(BEIJING_TZ).isoformat(timespec="seconds"),
+        )
 
         equipped_role = granted_roles[-1] if granted_roles else None
         equip_error = None
@@ -397,6 +516,13 @@ class RoleLotteryView(discord.ui.View):
     async def check_points(self, button, interaction: discord.Interaction):
         p = get_user_points(interaction.user.id, interaction.guild_id or 0)
         await interaction.response.send_message(f"🥚 你当前的蛋壳余额是：**{format_shells(p)}**", ephemeral=True)
+
+    @discord.ui.button(label="我的战报", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="lottery_my_stats", row=1)
+    async def lottery_stats_callback(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        embed = build_lottery_stats_embed(interaction.user, interaction.guild_id)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="📊 奖池图鉴", style=discord.ButtonStyle.success, emoji="🌌", custom_id="lottery_collection_view")
     async def collection_callback(self, button, interaction: discord.Interaction):
