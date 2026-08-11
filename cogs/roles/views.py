@@ -1145,11 +1145,10 @@ class RoleClaimView(discord.ui.View):
         points = get_user_points(interaction.user.id, interaction.guild_id or 0)
         embed = discord.Embed(
             title="🌌 **奇米蛋 · 身份抽奖**",
-            description=f"这里藏着一些无法直接领取的 **稀有款式**！\n你会是那个被命运选中的孩子吗？\n\n"
+            description=f"这里藏着一些无法直接领取的 **稀有款式**！\n你会是那个被命运选中的蛋子吗？\n\n"
                         f"💳 **单抽消耗**: {format_shells(single_cost)} 蛋壳\n"
                         f"💳 **五抽消耗**: {format_shells(five_cost)} 蛋壳\n"
                         f"💳 **十连消耗**: {format_shells(ten_cost)} 蛋壳\n"
-                        f"🎁 **结果权重**: {outcome_line}\n"
                         f"🥚 **蛋壳结果**: 随机 {shell_reward_line} 蛋壳\n"
                         f"🔄 **重复补偿**: {refund_line} 蛋壳\n"
                         f"🥚 **你的蛋壳**: **{format_shells(points)}**\n\n"
