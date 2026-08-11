@@ -259,6 +259,46 @@ def build_lottery_stats_embed(member: discord.Member, guild_id: int) -> discord.
     return embed
 
 
+LOTTERY_WIN_MESSAGES = [
+    "奇米蛋啪嗒啪嗒跑过来：出货啦，今天的小蛋有在认真发光！",
+    "奖池轻轻一响，奇米蛋把这份好运用双手捧给你。",
+    "哇，是新款式！奇米蛋已经在旁边偷偷转圈庆祝了。",
+    "这一下有东西！奇米蛋宣布你今天的手气热乎乎。",
+    "新身份组到手，奇米蛋在小本本上给你画了一颗亮亮星。",
+    "命运敲了敲壳，里面真的滚出好东西啦。",
+    "奇米蛋眨眨眼：这份出货率，有点会讨人开心。",
+    "好运没有迟到，它只是带着身份组慢慢走过来了。",
+]
+
+LOTTERY_SHELL_MESSAGES = [
+    "虽然没有新衣服，但蛋壳叮当响，奇米蛋觉得也很实在。",
+    "小蛋从奖池里摸出一把蛋壳：先攒着，下一次更有底气。",
+    "今天奖池给了蛋壳回礼，奇米蛋帮你收进口袋里。",
+    "没有身份组探头，但蛋壳有乖乖出现，也算小小顺风。",
+    "奇米蛋把蛋壳排成一排：这是一份还会继续发芽的好运。",
+    "奖池没有开花，不过掉了蛋壳，奇米蛋说这叫铺垫。",
+]
+
+LOTTERY_EMPTY_MESSAGES = [
+    "这次奖池有点害羞，奇米蛋拍拍你的手：下一抽再摸摸看。",
+    "空空的一响，奇米蛋立刻端来热茶：别急，好运在路上。",
+    "今天命运先装作没听见，奇米蛋已经替你记下一笔了。",
+    "没有出货也没关系，小蛋帮你把这次当成蓄力。",
+    "奖池安静得像在睡觉，奇米蛋轻轻戳了戳它：下次醒醒。",
+    "这次风没有把礼物吹来，但奇米蛋还在你这边。",
+    "空抽不是结束，是奇米蛋给下一次好运留的开场白。",
+    "奖池今天有点嘴硬，奇米蛋决定继续盯着它。",
+]
+
+
+def _lottery_result_message(results: list[dict]) -> str:
+    if any(row.get("type") == "role" and not row.get("dupe") for row in results):
+        return random.choice(LOTTERY_WIN_MESSAGES)
+    if any(row.get("type") == "shells" for row in results):
+        return random.choice(LOTTERY_SHELL_MESSAGES)
+    return random.choice(LOTTERY_EMPTY_MESSAGES)
+
+
 def _rules_text() -> str:
     data = load_role_data()
     cfg = get_lottery_config(data)
@@ -493,6 +533,7 @@ class RoleLotteryView(discord.ui.View):
             ),
             inline=False,
         )
+        embed.add_field(name="奇米蛋小声说", value=_lottery_result_message(results), inline=False)
         if equipped_role:
             embed.add_field(name="当前穿戴", value=f"已自动换装为 {equipped_role.mention}", inline=False)
         if equip_error:
