@@ -6,6 +6,7 @@ import asyncio
 import random
 import math
 import config
+from datetime import datetime, timezone, timedelta
 
 from .storage import (
     load_role_data,
@@ -16,8 +17,10 @@ from .storage import (
     get_lottery_config,
     get_lottery_role_rarity,
     get_lottery_role_kind,
+    get_redeem_role_config,
     set_lottery_role_rarity,
     set_lottery_role_kind,
+    set_redeem_role_config,
     update_lottery_config,
     RARITY_NORMAL,
     RARITY_RARE,
@@ -25,6 +28,9 @@ from .storage import (
     RARITY_JUNK,
     LOTTERY_KIND_COLOR,
     LOTTERY_KIND_ICON,
+    LOTTERY_OUTCOME_ROLE,
+    LOTTERY_OUTCOME_SHELLS,
+    LOTTERY_OUTCOME_EMPTY,
 )
 from cogs.points.storage import format_shells, get_user_points, get_user_summary, modify_user_points, sign_in_user
 from cogs.points.storage import (
@@ -95,6 +101,52 @@ def _lottery_kind_label(kind: str) -> str:
     return "颜色" if kind == LOTTERY_KIND_COLOR else "图标"
 
 
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _parse_beijing_time(raw: str) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=BEIJING_TZ)
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=BEIJING_TZ)
+    return dt.astimezone(BEIJING_TZ)
+
+
+def _effective_redeem_price(meta: dict, now: datetime | None = None) -> tuple[float, bool]:
+    now = now or datetime.now(BEIJING_TZ)
+    price = max(0.0, float(meta.get("price", 10.0)))
+    discount_price = max(0.0, float(meta.get("discount_price", 0.0)))
+    start = _parse_beijing_time(meta.get("discount_start", ""))
+    end = _parse_beijing_time(meta.get("discount_end", ""))
+    if discount_price > 0 and start and end and start <= now <= end:
+        return min(price, discount_price), True
+    return price, False
+
+
+def _redeem_price_line(meta: dict) -> str:
+    price, active = _effective_redeem_price(meta)
+    original = format_shells(meta.get("price", 10.0))
+    discount = format_shells(meta.get("discount_price", 0.0))
+    start = str(meta.get("discount_start", "") or "").strip()
+    end = str(meta.get("discount_end", "") or "").strip()
+    if active:
+        return f"优惠中 **{format_shells(price)}** 蛋壳（原价 {original}）"
+    if float(meta.get("discount_price", 0.0) or 0) > 0 and start and end:
+        return f"原价 **{original}** 蛋壳，限时价 {discount}（{start} 至 {end}）"
+    return f"原价 **{original}** 蛋壳"
+
+
 def _rules_text() -> str:
     data = load_role_data()
     cfg = get_lottery_config(data)
@@ -108,16 +160,23 @@ def _rules_text() -> str:
     post_daily_cap = float(getattr(config, "POINTS_DAILY_POST_CAP", 15.0))
 
     weights = cfg.get("weights", {})
+    outcome_weights = cfg.get("outcome_weights", {})
+    shell_reward = cfg.get("shell_reward", {})
     w_junk = int(weights.get(str(RARITY_JUNK), 55))
     w_normal = int(weights.get(str(RARITY_NORMAL), 37))
     w_rare = int(weights.get(str(RARITY_RARE), 6))
     w_legend = int(weights.get(str(RARITY_LEGENDARY), 2))
+    w_role = int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 20))
+    w_shells = int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 30))
+    w_empty = int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 50))
 
     return (
         "📌 **当前蛋壳/抽奖规则**\n"
         f"- 🎲 单抽消耗：**{format_shells(single_cost)}** 蛋壳\n"
         f"- 🍀 五抽消耗：**{format_shells(five_cost)}** 蛋壳\n"
         f"- 🎯 十连消耗：**{format_shells(ten_cost)}** 蛋壳\n"
+        f"- 🎁 结果权重(抽空/蛋壳/身份)：**{w_empty}/{w_shells}/{w_role}**\n"
+        f"- 🥚 蛋壳结果：随机 **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
         f"- 📈 抽奖概率(☆/★/★★/★★★)：**{w_junk}/{w_normal}/{w_rare}/{w_legend}**\n"
         f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
         f"- 💬 有效发言：不再单条加分，会提升报到加成\n"
@@ -182,6 +241,16 @@ class RoleLotteryView(discord.ui.View):
 
         modify_user_points(user.id, -cost, guild_id, source="role_lottery", reason=f"draw_count={draw_count}")
 
+        outcome_cfg = cfg.get("outcome_weights", {})
+        outcome_pool = [LOTTERY_OUTCOME_ROLE, LOTTERY_OUTCOME_SHELLS, LOTTERY_OUTCOME_EMPTY]
+        outcome_weights = [
+            max(0, int(outcome_cfg.get(outcome, 1)))
+            for outcome in outcome_pool
+        ]
+        if sum(outcome_weights) <= 0:
+            outcome_weights = [20, 30, 50]
+        picked_outcomes = random.choices(outcome_pool, weights=outcome_weights, k=draw_count)
+
         weights_cfg = cfg.get("weights", {})
         rarity_pool = [RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY]
         weights = [
@@ -191,22 +260,37 @@ class RoleLotteryView(discord.ui.View):
         if sum(weights) <= 0:
             weights = [55, 37, 6, 2]
 
-        picked_rarities = random.choices(rarity_pool, weights=weights, k=draw_count)
-
         user_collection_ids = set(get_user_collection(user.id))
         refund_cfg = cfg.get("refund", {})
+        shell_reward_cfg = cfg.get("shell_reward", {})
+        shell_reward_min = max(0.0, float(shell_reward_cfg.get("min", 0.1)))
+        shell_reward_max = max(shell_reward_min, float(shell_reward_cfg.get("max", 1.0)))
 
         results = []
         granted_roles = []
         total_refund = 0
+        total_shell_reward = 0.0
 
-        for rarity in picked_rarities:
+        for outcome in picked_outcomes:
+            if outcome == LOTTERY_OUTCOME_EMPTY:
+                results.append({"type": "empty", "role": None, "rarity": 0, "dupe": False, "refund": 0, "shell_reward": 0})
+                continue
+
+            if outcome == LOTTERY_OUTCOME_SHELLS:
+                min_steps = int(round(shell_reward_min * 10))
+                max_steps = int(round(shell_reward_max * 10))
+                shell_reward = round(random.randint(min_steps, max_steps) / 10, 1)
+                total_shell_reward += shell_reward
+                results.append({"type": "shells", "role": None, "rarity": 0, "dupe": False, "refund": 0, "shell_reward": shell_reward})
+                continue
+
+            rarity = random.choices(rarity_pool, weights=weights, k=1)[0]
             available_kinds = [
                 k for k in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
                 if pools_by_kind_rarity.get(k, {}).get(rarity, [])
             ]
             if not available_kinds:
-                results.append({"role": None, "rarity": 0, "dupe": False, "refund": 0})
+                results.append({"type": "empty", "role": None, "rarity": 0, "dupe": False, "refund": 0, "shell_reward": 0, "reason": "no_role"})
                 continue
 
             picked_kind = random.choice(available_kinds)
@@ -216,15 +300,17 @@ class RoleLotteryView(discord.ui.View):
             if won_role.id in user_collection_ids:
                 refund_amt = max(0.0, float(refund_cfg.get(str(rarity), fallback_refund)))
                 total_refund += refund_amt
-                results.append({"role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": True, "refund": refund_amt})
+                results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": True, "refund": refund_amt, "shell_reward": 0})
             else:
                 add_to_collection(user.id, won_role.id)
                 user_collection_ids.add(won_role.id)
                 granted_roles.append(won_role)
-                results.append({"role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": False, "refund": 0})
+                results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": False, "refund": 0, "shell_reward": 0})
 
         if total_refund > 0:
             modify_user_points(user.id, total_refund, guild_id, source="role_lottery_refund", reason=f"draw_count={draw_count}")
+        if total_shell_reward > 0:
+            modify_user_points(user.id, total_shell_reward, guild_id, source="role_lottery_shell_reward", reason=f"draw_count={draw_count}")
 
         equipped_role = granted_roles[-1] if granted_roles else None
         equip_error = None
@@ -245,7 +331,8 @@ class RoleLotteryView(discord.ui.View):
         final_points = get_user_points(user.id, guild_id)
         new_count = sum(1 for row in results if row["role"] and not row["dupe"])
         dupe_count = sum(1 for row in results if row["dupe"])
-        miss_count = sum(1 for row in results if row["role"] is None)
+        shell_count = sum(1 for row in results if row.get("type") == "shells")
+        miss_count = sum(1 for row in results if row.get("type") == "empty")
 
         title_map = {
             1: "🎰 命运之轮转动了...",
@@ -257,8 +344,12 @@ class RoleLotteryView(discord.ui.View):
 
         lines = []
         for row in results[:10]:
-            if row["role"] is None:
-                lines.append("▫️ 空抽 (该稀有度当前无上架身份组)")
+            if row.get("type") == "empty":
+                reason = "该稀有度当前无上架身份组" if row.get("reason") == "no_role" else "什么都没有抽到"
+                lines.append(f"▫️ 抽空 ({reason})")
+                continue
+            if row.get("type") == "shells":
+                lines.append(f"🥚 抽到蛋壳 +{format_shells(row.get('shell_reward', 0))} 蛋壳")
                 continue
 
             role = row["role"]
@@ -277,8 +368,9 @@ class RoleLotteryView(discord.ui.View):
             value=(
                 f"本次消耗: **{format_shells(cost)}** 蛋壳\n"
                 f"重复返还: **{format_shells(total_refund)}** 蛋壳\n"
+                f"蛋壳奖励: **{format_shells(total_shell_reward)}** 蛋壳\n"
                 f"当前余额: **{format_shells(final_points)}** 蛋壳\n"
-                f"新解锁: **{new_count}** | 重复: **{dupe_count}** | 空抽: **{miss_count}**"
+                f"新解锁: **{new_count}** | 重复: **{dupe_count}** | 蛋壳: **{shell_count}** | 空抽: **{miss_count}**"
             ),
             inline=False,
         )
@@ -458,6 +550,130 @@ class RoleSelectionView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # 允许此视图中的所有组件交互
         return True
+
+
+def build_redeem_shop_embed(guild: discord.Guild, user_id: int) -> discord.Embed:
+    data = load_role_data()
+    redeem_ids = data.get("redeem_roles", [])
+    lines = []
+    for rid in redeem_ids:
+        role = guild.get_role(rid)
+        if not role:
+            continue
+        meta = get_redeem_role_config(rid, data)
+        lines.append(f"{role.mention} - {_redeem_price_line(meta)}")
+
+    balance = get_user_points(user_id, guild.id)
+    embed = discord.Embed(
+        title="🥚 身份兑换",
+        description=(
+            "用蛋壳直接兑换常驻身份组。\n"
+            f"你的蛋壳：**{format_shells(balance)}**\n\n"
+            + ("\n".join(lines) if lines else "*当前暂无可兑换身份组。*")
+        ),
+        color=STYLE["KIMI_YELLOW"],
+    )
+    embed.set_footer(text="限时优惠按北京时间计算。")
+    return embed
+
+
+class RedeemRoleSelect(discord.ui.Select):
+    def __init__(self, guild: discord.Guild):
+        data = load_role_data()
+        options = []
+        for rid in data.get("redeem_roles", []):
+            role = guild.get_role(rid)
+            if not role:
+                continue
+            meta = get_redeem_role_config(rid, data)
+            price, active = _effective_redeem_price(meta)
+            desc = f"{'限时优惠' if active else '当前价格'}: {format_shells(price)} 蛋壳"
+            options.append(
+                discord.SelectOption(
+                    label=role.name[:100],
+                    value=str(rid),
+                    description=desc[:100],
+                    emoji="🥚",
+                )
+            )
+
+        if not options:
+            options.append(discord.SelectOption(label="暂无可兑换身份组", value="none", description="请稍后再来看看"))
+            disabled = True
+        else:
+            disabled = False
+
+        super().__init__(
+            placeholder="选择要兑换的身份组...",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            disabled=disabled,
+            custom_id="role_redeem_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.values or self.values[0] == "none":
+            return await interaction.response.send_message("当前暂无可兑换身份组。", ephemeral=True)
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+
+        role_id = int(self.values[0])
+        data = load_role_data()
+        if role_id not in data.get("redeem_roles", []):
+            return await interaction.response.send_message("这个身份组已下架。", ephemeral=True)
+
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            return await interaction.response.send_message("这个身份组已失效，请联系管理员。", ephemeral=True)
+        if role in interaction.user.roles:
+            return await interaction.response.send_message(f"你已经拥有 {role.mention} 啦。", ephemeral=True)
+
+        meta = get_redeem_role_config(role_id, data)
+        price, discount_active = _effective_redeem_price(meta)
+        balance = get_user_points(interaction.user.id, interaction.guild_id)
+        if balance < price:
+            return await interaction.response.send_message(
+                f"蛋壳不足，兑换 {role.mention} 需要 **{format_shells(price)}** 蛋壳，你当前只有 **{format_shells(balance)}**。",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True)
+        modify_user_points(
+            interaction.user.id,
+            -price,
+            interaction.guild_id,
+            source="role_redeem",
+            reason=f"role_id={role_id};discount={discount_active}",
+        )
+        try:
+            await interaction.user.add_roles(role, reason="蛋壳兑换身份组")
+        except Exception as exc:
+            modify_user_points(
+                interaction.user.id,
+                price,
+                interaction.guild_id,
+                source="role_redeem_refund",
+                reason=f"role_id={role_id};grant_failed={type(exc).__name__}",
+            )
+            return await interaction.followup.send(
+                f"❌ 发放身份组失败，已退回 **{format_shells(price)}** 蛋壳。请检查机器人身份组层级和权限。",
+                ephemeral=True,
+            )
+
+        new_balance = get_user_points(interaction.user.id, interaction.guild_id)
+        await interaction.followup.send(
+            f"✅ 兑换成功！你获得了 {role.mention}。\n"
+            f"本次消耗：**{format_shells(price)}** 蛋壳\n"
+            f"当前余额：**{format_shells(new_balance)}** 蛋壳",
+            ephemeral=True,
+        )
+
+
+class RedeemShopView(discord.ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=300)
+        self.add_item(RedeemRoleSelect(guild))
 
 
 class AccelerationShopView(discord.ui.View):
@@ -737,6 +953,17 @@ class RoleClaimView(discord.ui.View):
             f"★★{format_shells(refund_cfg.get(str(RARITY_RARE), 0))} / "
             f"★★★{format_shells(refund_cfg.get(str(RARITY_LEGENDARY), 0))}"
         )
+        outcome_cfg = cfg.get("outcome_weights", {})
+        shell_reward_cfg = cfg.get("shell_reward", {})
+        outcome_line = (
+            f"抽空 {int(outcome_cfg.get(LOTTERY_OUTCOME_EMPTY, 50))} / "
+            f"蛋壳 {int(outcome_cfg.get(LOTTERY_OUTCOME_SHELLS, 30))} / "
+            f"身份 {int(outcome_cfg.get(LOTTERY_OUTCOME_ROLE, 20))}"
+        )
+        shell_reward_line = (
+            f"{format_shells(shell_reward_cfg.get('min', 0.1))}-"
+            f"{format_shells(shell_reward_cfg.get('max', 1.0))}"
+        )
 
         points = get_user_points(interaction.user.id, interaction.guild_id or 0)
         embed = discord.Embed(
@@ -745,6 +972,8 @@ class RoleClaimView(discord.ui.View):
                         f"💳 **单抽消耗**: {format_shells(single_cost)} 蛋壳\n"
                         f"💳 **五抽消耗**: {format_shells(five_cost)} 蛋壳\n"
                         f"💳 **十连消耗**: {format_shells(ten_cost)} 蛋壳\n"
+                        f"🎁 **结果权重**: {outcome_line}\n"
+                        f"🥚 **蛋壳结果**: 随机 {shell_reward_line} 蛋壳\n"
                         f"🔄 **重复补偿**: {refund_line} 蛋壳\n"
                         f"🥚 **你的蛋壳**: **{format_shells(points)}**\n\n"
                         f"📌 **蛋壳获取**\n"
@@ -754,6 +983,13 @@ class RoleClaimView(discord.ui.View):
             color=discord.Color.purple()
         )
         await interaction.response.send_message(embed=embed, view=RoleLotteryView(), ephemeral=True)
+
+    @discord.ui.button(label="身份兑换", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_redeem", row=1)
+    async def redeem_entry_callback(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        embed = build_redeem_shop_embed(interaction.guild, interaction.user.id)
+        await interaction.response.send_message(embed=embed, view=RedeemShopView(interaction.guild), ephemeral=True)
 
     @discord.ui.button(label="每日签到", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="role_main_sign_in", row=0)
     async def main_sign_in_callback(self, button, interaction: discord.Interaction):
@@ -930,13 +1166,15 @@ class AdminAddRoleSelect(discord.ui.Select):
         map_titles = {
             "claimable": "➕ 添加到【普通池】...",
             "lottery": "➕ 添加到【奖池】...",
-            "notification": "➕ 添加到【通知订阅】..."
+            "notification": "➕ 添加到【通知订阅】...",
+            "redeem": "➕ 添加到【兑换池】...",
         }
 
         row_map = {
             "lottery": 0,
             "claimable": 1,
-            "notification": 2
+            "notification": 2,
+            "redeem": 0,
         }
 
         super().__init__(
@@ -958,7 +1196,8 @@ class AdminAddRoleSelect(discord.ui.Select):
         key_map = {
             "claimable": "claimable_roles",
             "lottery": "lottery_roles",
-            "notification": "notification_roles"
+            "notification": "notification_roles",
+            "redeem": "redeem_roles",
         }
         target_list_key = key_map.get(self.pool_type)
         if not target_list_key: return
@@ -967,7 +1206,7 @@ class AdminAddRoleSelect(discord.ui.Select):
         if target_list_key not in data: data[target_list_key] = []
 
         # 检查逻辑：全池查重（支持批量）
-        all_lists = ["claimable_roles", "lottery_roles", "notification_roles"]
+        all_lists = ["claimable_roles", "lottery_roles", "notification_roles", "redeem_roles"]
         added = []
         skipped = []
         for role_id in selected_ids:
@@ -1024,7 +1263,7 @@ class AdminRemoveSelect(Select):
         for role, r_type in role_entries[start:end]:
 
             # 图标区分
-            emoji_map = {"lottery": "🎟️", "claimable": "🎨", "notification": "🔔"}
+            emoji_map = {"lottery": "🎟️", "claimable": "🎨", "notification": "🔔", "redeem": "🥚"}
             emoji = emoji_map.get(r_type, "❓")
 
             desc = f"ID: {role.id} | 类型: {r_type}"
@@ -1063,7 +1302,7 @@ class AdminRemoveSelect(Select):
         removed_count = 0
 
         # 遍历所有可能的列表进行删除
-        keys = ["claimable_roles", "lottery_roles", "notification_roles"]
+        keys = ["claimable_roles", "lottery_roles", "notification_roles", "redeem_roles"]
         for k in keys:
             source = data.get(k, [])
             kept = [rid for rid in source if rid not in target_ids]
@@ -1349,6 +1588,8 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
 
         w = config_data.get("weights", {})
         r = config_data.get("refund", {})
+        ow = config_data.get("outcome_weights", {})
+        sr = config_data.get("shell_reward", {})
 
         self.weights_input = ui.InputText(
             label="概率(☆,★,★★,★★★)",
@@ -1364,8 +1605,24 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
             required=True,
             max_length=32,
         )
+        self.outcome_weights_input = ui.InputText(
+            label="结果权重(抽空,蛋壳,身份)",
+            placeholder="例如 50,30,20",
+            value=f"{int(ow.get(LOTTERY_OUTCOME_EMPTY, 50))},{int(ow.get(LOTTERY_OUTCOME_SHELLS, 30))},{int(ow.get(LOTTERY_OUTCOME_ROLE, 20))}",
+            required=True,
+            max_length=32,
+        )
+        self.shell_reward_input = ui.InputText(
+            label="蛋壳结果范围(min,max)",
+            placeholder="例如 0.1,1.0",
+            value=f"{format_shells(sr.get('min', 0.1))},{format_shells(sr.get('max', 1.0))}",
+            required=True,
+            max_length=32,
+        )
         self.add_item(self.weights_input)
         self.add_item(self.refund_input)
+        self.add_item(self.outcome_weights_input)
+        self.add_item(self.shell_reward_input)
 
     @staticmethod
     def _parse_quad(raw: str, *, as_float: bool = False):
@@ -1374,13 +1631,29 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
             raise ValueError("需要4个数值")
         return [float(v) if as_float else int(v) for v in values]
 
+    @staticmethod
+    def _parse_triplet(raw: str, *, as_float: bool = False):
+        values = [x.strip() for x in (raw or "").split(",") if x.strip()]
+        if len(values) != 3:
+            raise ValueError("需要3个数值")
+        return [float(v) if as_float else int(v) for v in values]
+
+    @staticmethod
+    def _parse_pair(raw: str, *, as_float: bool = False):
+        values = [x.strip() for x in (raw or "").split(",") if x.strip()]
+        if len(values) != 2:
+            raise ValueError("需要2个数值")
+        return [float(v) if as_float else int(v) for v in values]
+
     async def callback(self, interaction: discord.Interaction):
         try:
             w_junk, w_normal, w_rare, w_legend = self._parse_quad(self.weights_input.value)
             r_junk, r_normal, r_rare, r_legend = self._parse_quad(self.refund_input.value, as_float=True)
+            o_empty, o_shells, o_role = self._parse_triplet(self.outcome_weights_input.value)
+            shell_min, shell_max = self._parse_pair(self.shell_reward_input.value, as_float=True)
         except ValueError:
             return await interaction.response.send_message(
-                "❌ 输入格式错误，请按 `a,b,c,d` 填写 4 个数值。",
+                "❌ 输入格式错误，请按提示填写逗号分隔的数值。",
                 ephemeral=True,
             )
 
@@ -1391,6 +1664,12 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
                 str(RARITY_RARE): w_rare,
                 str(RARITY_LEGENDARY): w_legend,
             },
+            outcome_weights={
+                LOTTERY_OUTCOME_EMPTY: o_empty,
+                LOTTERY_OUTCOME_SHELLS: o_shells,
+                LOTTERY_OUTCOME_ROLE: o_role,
+            },
+            shell_reward={"min": shell_min, "max": shell_max},
             refund={
                 str(RARITY_JUNK): r_junk,
                 str(RARITY_NORMAL): r_normal,
@@ -1413,12 +1692,199 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
 
         weights = cfg.get("weights", {})
         refund = cfg.get("refund", {})
+        outcome_weights = cfg.get("outcome_weights", {})
+        shell_reward = cfg.get("shell_reward", {})
         await interaction.followup.send(
             "✅ 概率与重复返还已更新（已保存）\n"
+            f"- 结果(抽空/蛋壳/身份)：{int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 50))}/{int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 30))}/{int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 20))}\n"
+            f"- 蛋壳结果：{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))} 蛋壳\n"
             f"- 概率(☆/★/★★/★★★)：{int(weights.get(str(RARITY_JUNK), 55))}/{int(weights.get(str(RARITY_NORMAL), 37))}/{int(weights.get(str(RARITY_RARE), 6))}/{int(weights.get(str(RARITY_LEGENDARY), 2))}\n"
             f"- 补偿(☆/★/★★/★★★)：{format_shells(refund.get(str(RARITY_JUNK), 0.5))}/{format_shells(refund.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refund.get(str(RARITY_RARE), 2.0))}/{format_shells(refund.get(str(RARITY_LEGENDARY), 5.0))} 蛋壳",
             ephemeral=True,
         )
+
+
+class RedeemConfigSelect(discord.ui.Select):
+    def __init__(self, parent_view: "RedeemManagerView"):
+        data = load_role_data()
+        options = []
+        for rid in data.get("redeem_roles", []):
+            role = parent_view.guild.get_role(rid)
+            if not role:
+                continue
+            meta = get_redeem_role_config(rid, data)
+            price, active = _effective_redeem_price(meta)
+            options.append(
+                discord.SelectOption(
+                    label=role.name[:100],
+                    value=str(rid),
+                    description=f"{'优惠中' if active else '当前'} {format_shells(price)} 蛋壳"[:100],
+                    emoji="🥚",
+                )
+            )
+
+        if not options:
+            options.append(discord.SelectOption(label="暂无兑换身份组", value="none", description="先用上方菜单添加身份组"))
+            disabled = True
+        else:
+            disabled = False
+
+        super().__init__(
+            placeholder="选择要配置价格的兑换身份组...",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            disabled=disabled,
+            row=1,
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.values or self.values[0] == "none":
+            return await interaction.response.send_message("当前暂无兑换身份组。", ephemeral=True)
+
+        role_id = int(self.values[0])
+        meta = get_redeem_role_config(role_id, load_role_data())
+        await interaction.response.send_modal(RedeemConfigModal(self.parent_view, role_id, meta))
+
+
+class RedeemConfigModal(discord.ui.Modal):
+    def __init__(self, parent_view: "RedeemManagerView", role_id: int, meta: dict):
+        super().__init__(title="设置兑换价格")
+        self.parent_view = parent_view
+        self.role_id = role_id
+
+        self.price_input = ui.InputText(
+            label="原价（蛋壳）",
+            placeholder="例如 30",
+            value=str(format_shells(meta.get("price", 10.0))),
+            required=True,
+            max_length=8,
+        )
+        self.discount_price_input = ui.InputText(
+            label="限时优惠价（0 表示关闭）",
+            placeholder="例如 20",
+            value=str(format_shells(meta.get("discount_price", 0.0))),
+            required=True,
+            max_length=8,
+        )
+        self.discount_start_input = ui.InputText(
+            label="优惠开始（北京时间，可留空）",
+            placeholder="YYYY-MM-DD HH:MM",
+            value=str(meta.get("discount_start", ""))[:32],
+            required=False,
+            max_length=32,
+        )
+        self.discount_end_input = ui.InputText(
+            label="优惠结束（北京时间，可留空）",
+            placeholder="YYYY-MM-DD HH:MM",
+            value=str(meta.get("discount_end", ""))[:32],
+            required=False,
+            max_length=32,
+        )
+        self.add_item(self.price_input)
+        self.add_item(self.discount_price_input)
+        self.add_item(self.discount_start_input)
+        self.add_item(self.discount_end_input)
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            price = float((self.price_input.value or "").strip())
+            discount_price = float((self.discount_price_input.value or "0").strip())
+        except ValueError:
+            return await interaction.response.send_message("❌ 价格格式错误，请填写数字。", ephemeral=True)
+
+        start = (self.discount_start_input.value or "").strip()
+        end = (self.discount_end_input.value or "").strip()
+        if (start and not _parse_beijing_time(start)) or (end and not _parse_beijing_time(end)):
+            return await interaction.response.send_message(
+                "❌ 时间格式无法识别，请使用 `YYYY-MM-DD HH:MM`，或留空关闭时间区间。",
+                ephemeral=True,
+            )
+
+        ok = set_redeem_role_config(
+            self.role_id,
+            price=price,
+            discount_price=discount_price,
+            discount_start=start,
+            discount_end=end,
+        )
+        if not ok:
+            return await interaction.response.send_message("❌ 该身份组不在兑换池中。", ephemeral=True)
+
+        await interaction.response.send_message("✅ 兑换价格已保存，重新打开兑换配置即可看到最新内容。", ephemeral=True)
+
+
+class RedeemBackButton(discord.ui.Button):
+    def __init__(self, parent_view: "RoleManagerView"):
+        super().__init__(label="返回管理", emoji="↩️", style=discord.ButtonStyle.secondary, row=4)
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.parent_view.refresh_content(interaction)
+
+
+class RedeemRefreshButton(discord.ui.Button):
+    def __init__(self, parent_view: "RedeemManagerView"):
+        super().__init__(label="刷新配置", emoji="🔄", style=discord.ButtonStyle.secondary, row=4)
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.parent_view.refresh_content(interaction)
+
+
+class RedeemManagerView(discord.ui.View):
+    def __init__(self, parent_view: "RoleManagerView", guild: discord.Guild):
+        super().__init__(timeout=600)
+        self.parent_view = parent_view
+        self.guild = guild
+        self.refresh_items()
+
+    def refresh_items(self):
+        self.clear_items()
+        self.add_item(AdminAddRoleSelect(self, pool_type="redeem"))
+
+        data = load_role_data()
+        role_map = {}
+        for rid in data.get("redeem_roles", []):
+            role = self.guild.get_role(rid)
+            if role:
+                role_map[role] = "redeem"
+
+        self.add_item(RedeemConfigSelect(self))
+        self.add_item(AdminRemoveSelect(role_map, self, page=0, page_size=25))
+        self.add_item(RedeemBackButton(self.parent_view))
+        self.add_item(RedeemRefreshButton(self))
+
+    def build_embed(self) -> discord.Embed:
+        data = load_role_data()
+        lines = []
+        for rid in data.get("redeem_roles", []):
+            role = self.guild.get_role(rid)
+            if not role:
+                lines.append(f"`{rid} (失效)`")
+                continue
+            meta = get_redeem_role_config(rid, data)
+            lines.append(f"{role.mention} - {_redeem_price_line(meta)}")
+
+        embed = discord.Embed(
+            title="🥚 身份兑换配置",
+            description=(
+                "把身份组加入兑换池后，成员可以用蛋壳直接兑换。\n"
+                "优惠时间按北京时间计算，格式建议 `YYYY-MM-DD HH:MM`。\n\n"
+                + ("\n".join(lines) if lines else "*当前兑换池为空。*")
+            ),
+            color=0x2B2D31,
+        )
+        return embed
+
+    async def refresh_content(self, interaction: discord.Interaction):
+        self.refresh_items()
+        embed = self.build_embed()
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.edit_original_response(embed=embed, view=self)
 
 
 class AdminActionButton(discord.ui.Button):
@@ -1443,6 +1909,10 @@ class AdminActionButton(discord.ui.Button):
             return
         if self.action == "weights":
             await interaction.response.send_modal(LotteryWeightsRefundModal(self.parent_view, cfg))
+            return
+        if self.action == "redeem":
+            redeem_view = RedeemManagerView(self.parent_view, interaction.guild)
+            await interaction.response.edit_message(embed=redeem_view.build_embed(), view=redeem_view)
             return
 
         await interaction.response.send_message("❌ 未知操作。", ephemeral=True)
@@ -1472,6 +1942,7 @@ class RoleManagerView(discord.ui.View):
         load_to_map("claimable_roles", "claimable")
         load_to_map("lottery_roles", "lottery")
         load_to_map("notification_roles", "notification") # 新增
+        load_to_map("redeem_roles", "redeem")
 
         total_remove_items = len(role_map)
         self.remove_total_pages = max(1, math.ceil(total_remove_items / self.remove_page_size)) if total_remove_items > 0 else 1
@@ -1488,10 +1959,8 @@ class RoleManagerView(discord.ui.View):
         self.add_item(AdminActionButton(self, "rarity", label="稀有度", emoji="⭐"))
         self.add_item(AdminActionButton(self, "cost", label="抽奖消耗", emoji="💳"))
         self.add_item(AdminActionButton(self, "weights", label="概率/补偿", emoji="🎚️"))
+        self.add_item(AdminActionButton(self, "redeem", label="兑换配置", emoji="🥚"))
         self.add_item(AdminRemovePageButton(self))
-        ref_btn = discord.ui.Button(label="🔄 刷新", style=discord.ButtonStyle.secondary, row=4, custom_id="admin_refresh")
-        ref_btn.callback = self.refresh_callback
-        self.add_item(ref_btn)
 
     def build_dashboard_embed(self):
         data = load_role_data()
@@ -1508,11 +1977,14 @@ class RoleManagerView(discord.ui.View):
 
         embed.add_field(name="🎰 抽奖模式", value=fmt_roles("lottery_roles"), inline=False)
         embed.add_field(name="🎨 自选模式", value=fmt_roles("claimable_roles"), inline=False)
+        embed.add_field(name="🥚 蛋壳兑换", value=fmt_roles("redeem_roles"), inline=False)
         embed.add_field(name="🔔 通知订阅", value=fmt_roles("notification_roles"), inline=False) # 新增展示
 
         cfg = get_lottery_config(data)
         refunds = cfg.get("refund", {})
         weights = cfg.get("weights", {})
+        outcome_weights = cfg.get("outcome_weights", {})
+        shell_reward = cfg.get("shell_reward", {})
 
         rarity_lines = []
         kind_color_lines = []
@@ -1555,6 +2027,8 @@ class RoleManagerView(discord.ui.View):
                 f"单抽: **{format_shells(cfg.get('cost_single', 1.0))}** 蛋壳 | "
                 f"五抽: **{format_shells(cfg.get('cost_five', 5.0))}** 蛋壳 | "
                 f"十连: **{format_shells(cfg.get('cost_ten', 10.0))}** 蛋壳\n"
+                f"结果(抽空/蛋壳/身份): **{int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 50))}/{int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 30))}/{int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 20))}**\n"
+                f"蛋壳结果: **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
                 f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 55))}/{int(weights.get(str(RARITY_NORMAL), 37))}/{int(weights.get(str(RARITY_RARE), 6))}/{int(weights.get(str(RARITY_LEGENDARY), 2))}**\n"
                 f"补偿(☆/★/★★/★★★): **{format_shells(refunds.get(str(RARITY_JUNK), 0.5))}/{format_shells(refunds.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refunds.get(str(RARITY_RARE), 2.0))}/{format_shells(refunds.get(str(RARITY_LEGENDARY), 5.0))}** 蛋壳"
             ),

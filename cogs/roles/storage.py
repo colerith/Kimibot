@@ -15,11 +15,24 @@ SUPPORTED_RARITIES = (RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY, RARITY_JUNK)
 LOTTERY_KIND_COLOR = "color"
 LOTTERY_KIND_ICON = "icon"
 SUPPORTED_LOTTERY_KINDS = (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
+LOTTERY_OUTCOME_ROLE = "role"
+LOTTERY_OUTCOME_SHELLS = "shells"
+LOTTERY_OUTCOME_EMPTY = "empty"
+SUPPORTED_LOTTERY_OUTCOMES = (LOTTERY_OUTCOME_ROLE, LOTTERY_OUTCOME_SHELLS, LOTTERY_OUTCOME_EMPTY)
 
 DEFAULT_LOTTERY_CONFIG = {
     "cost_single": 1.0,
     "cost_five": 5.0,
     "cost_ten": 10.0,
+    "outcome_weights": {
+        LOTTERY_OUTCOME_ROLE: 20,
+        LOTTERY_OUTCOME_SHELLS: 30,
+        LOTTERY_OUTCOME_EMPTY: 50,
+    },
+    "shell_reward": {
+        "min": 0.1,
+        "max": 1.0,
+    },
     "weights": {
         str(RARITY_JUNK): 55,
         str(RARITY_NORMAL): 37,
@@ -32,6 +45,13 @@ DEFAULT_LOTTERY_CONFIG = {
             str(RARITY_RARE): 2.0,
             str(RARITY_LEGENDARY): 5.0,
     },
+}
+
+DEFAULT_REDEEM_ROLE_CONFIG = {
+    "price": 10.0,
+    "discount_price": 0.0,
+    "discount_start": "",
+    "discount_end": "",
 }
 
 
@@ -80,6 +100,36 @@ def _normalize_lottery_weights(weights: dict) -> dict:
     return normalized
 
 
+def _normalize_outcome_weights(weights: dict) -> dict:
+    default_weights = DEFAULT_LOTTERY_CONFIG["outcome_weights"]
+    return {
+        outcome: max(0, int(weights.get(outcome, default_weights[outcome])))
+        for outcome in SUPPORTED_LOTTERY_OUTCOMES
+    }
+
+
+def _normalize_shell_reward(raw: dict) -> dict:
+    default_reward = DEFAULT_LOTTERY_CONFIG["shell_reward"]
+    if not isinstance(raw, dict):
+        raw = {}
+    min_amount = _normalize_shell_amount(raw.get("min", default_reward["min"]), default_reward["min"])
+    max_amount = _normalize_shell_amount(raw.get("max", default_reward["max"]), default_reward["max"])
+    if max_amount < min_amount:
+        min_amount, max_amount = max_amount, min_amount
+    return {"min": min_amount, "max": max_amount}
+
+
+def _normalize_redeem_role_config(raw: dict | None = None) -> dict:
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "price": _normalize_shell_amount(raw.get("price", DEFAULT_REDEEM_ROLE_CONFIG["price"]), DEFAULT_REDEEM_ROLE_CONFIG["price"]),
+        "discount_price": _normalize_shell_amount(raw.get("discount_price", DEFAULT_REDEEM_ROLE_CONFIG["discount_price"]), DEFAULT_REDEEM_ROLE_CONFIG["discount_price"]),
+        "discount_start": str(raw.get("discount_start", "") or "").strip(),
+        "discount_end": str(raw.get("discount_end", "") or "").strip(),
+    }
+
+
 def _uniq_ids(values) -> list[int]:
     seen = set()
     result = []
@@ -101,6 +151,7 @@ def _normalize_role_data(data: dict) -> dict:
     claimable = _uniq_ids(data.get("claimable_roles", []))
     lottery = _uniq_ids(data.get("lottery_roles", []))
     notify = _uniq_ids(data.get("notification_roles", []))
+    redeem = _uniq_ids(data.get("redeem_roles", []))
 
     role_meta_raw = data.get("lottery_role_meta", {})
     role_meta = {}
@@ -118,11 +169,19 @@ def _normalize_role_data(data: dict) -> dict:
         for rid in lottery:
             role_meta[str(rid)] = {"rarity": RARITY_NORMAL, "kind": LOTTERY_KIND_COLOR}
 
+    redeem_meta_raw = data.get("redeem_role_meta", {})
+    redeem_meta = {}
+    for rid in redeem:
+        meta = redeem_meta_raw.get(str(rid), {}) if isinstance(redeem_meta_raw, dict) else {}
+        redeem_meta[str(rid)] = _normalize_redeem_role_config(meta)
+
     cfg = data.get("lottery_config", {})
     if not isinstance(cfg, dict):
         cfg = {}
 
     weights = cfg.get("weights", {}) if isinstance(cfg.get("weights", {}), dict) else {}
+    outcome_weights = cfg.get("outcome_weights", {}) if isinstance(cfg.get("outcome_weights", {}), dict) else {}
+    shell_reward = cfg.get("shell_reward", {}) if isinstance(cfg.get("shell_reward", {}), dict) else {}
     refund = cfg.get("refund", {}) if isinstance(cfg.get("refund", {}), dict) else {}
     lottery_config = {
         "cost_single": _migrate_lottery_cost(
@@ -140,6 +199,8 @@ def _normalize_role_data(data: dict) -> dict:
             DEFAULT_LOTTERY_CONFIG["cost_ten"],
             old_defaults=(25.0, 100.0, 888.0, 900.0),
         ),
+        "outcome_weights": _normalize_outcome_weights(outcome_weights),
+        "shell_reward": _normalize_shell_reward(shell_reward),
         "weights": _normalize_lottery_weights(weights),
         "refund": {
                 str(r): _migrate_lottery_refund(
@@ -158,8 +219,10 @@ def _normalize_role_data(data: dict) -> dict:
         "claimable_roles": claimable,
         "lottery_roles": lottery,
         "notification_roles": notify,
+        "redeem_roles": redeem,
         "panel_info": panel_info,
         "lottery_role_meta": role_meta,
+        "redeem_role_meta": redeem_meta,
         "lottery_config": lottery_config,
     }
 
@@ -224,6 +287,36 @@ def get_lottery_config(role_data: dict | None = None) -> dict:
     return _normalize_role_data({"lottery_config": cfg}).get("lottery_config", DEFAULT_LOTTERY_CONFIG)
 
 
+def get_redeem_role_config(role_id: int, role_data: dict | None = None) -> dict:
+    data = role_data if role_data is not None else load_role_data()
+    meta = data.get("redeem_role_meta", {})
+    return _normalize_redeem_role_config(meta.get(str(role_id), {}) if isinstance(meta, dict) else {})
+
+
+def set_redeem_role_config(
+    role_id: int,
+    *,
+    price: float,
+    discount_price: float = 0.0,
+    discount_start: str = "",
+    discount_end: str = "",
+) -> bool:
+    data = load_role_data()
+    if role_id not in data.get("redeem_roles", []):
+        return False
+
+    data.setdefault("redeem_role_meta", {})[str(role_id)] = _normalize_redeem_role_config(
+        {
+            "price": price,
+            "discount_price": discount_price,
+            "discount_start": discount_start,
+            "discount_end": discount_end,
+        }
+    )
+    save_role_data(data)
+    return True
+
+
 def set_lottery_role_rarity(role_id: int, rarity: int) -> bool:
     if rarity not in SUPPORTED_RARITIES:
         return False
@@ -264,6 +357,8 @@ def update_lottery_config(
     cost_five: float | None = None,
     cost_ten: float | None = None,
     weights: dict | None = None,
+    outcome_weights: dict | None = None,
+    shell_reward: dict | None = None,
     refund: dict | None = None,
 ) -> dict:
     data = load_role_data()
@@ -281,6 +376,14 @@ def update_lottery_config(
             key = str(rarity)
             if key in weights:
                 cfg["weights"][key] = max(0, int(weights[key]))
+
+    if isinstance(outcome_weights, dict):
+        for outcome in SUPPORTED_LOTTERY_OUTCOMES:
+            if outcome in outcome_weights:
+                cfg["outcome_weights"][outcome] = max(0, int(outcome_weights[outcome]))
+
+    if isinstance(shell_reward, dict):
+        cfg["shell_reward"] = _normalize_shell_reward(shell_reward)
 
     if isinstance(refund, dict):
         for rarity in SUPPORTED_RARITIES:
