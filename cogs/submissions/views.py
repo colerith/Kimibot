@@ -848,7 +848,7 @@ class RecommendationActionView(discord.ui.View):
             return await interaction.response.send_message("没有找到投稿记录。", ephemeral=True)
         await interaction.response.send_message(embed=_build_full_content_embed(record), ephemeral=True)
 
-    @discord.ui.button(label="觉得有用", style=discord.ButtonStyle.success, custom_id="submission_useful")
+    @discord.ui.button(label="觉得有用", emoji="👍", style=discord.ButtonStyle.success, custom_id="submission_useful")
     async def useful(self, button, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         record = find_by_message_id(interaction.message.id)
@@ -875,7 +875,7 @@ class RecommendationActionView(discord.ui.View):
         status = "已计入" if result["added"] else "已取消"
         await interaction.followup.send(f"✅ {status}觉得有用。", ephemeral=True)
 
-    @discord.ui.button(label="盖楼回复", style=discord.ButtonStyle.secondary, custom_id="submission_comment")
+    @discord.ui.button(label="盖楼回复", emoji="💬", style=discord.ButtonStyle.secondary, custom_id="submission_comment")
     async def comment(self, button, interaction: discord.Interaction):
         record = find_by_message_id(interaction.message.id)
         if not record:
