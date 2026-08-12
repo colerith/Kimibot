@@ -1040,7 +1040,8 @@ def build_role_panel_embed(
     if top10:
         names = top_names or {}
         top_lines = [
-            f"`{index}.` @{discord.utils.escape_markdown(names.get(str(user_id), '未知成员'))}"
+            f"`{index}.` [@{discord.utils.escape_markdown(names.get(str(user_id), '未知成员'))}]"
+            f"(https://discord.com/users/{user_id})"
             for index, user_id in enumerate(top10, start=1)
         ]
         top_text = "\n".join(top_lines)

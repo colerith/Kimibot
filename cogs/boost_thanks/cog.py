@@ -75,6 +75,13 @@ def _safe_display_name(user) -> str:
     return discord.utils.escape_markdown(str(name))
 
 
+def _user_profile_link(user_id: int, display_name: str) -> str:
+    safe_name = discord.utils.escape_markdown(str(display_name or "未知成员"))
+    if not user_id:
+        return f"@{safe_name}"
+    return f"[@{safe_name}](https://discord.com/users/{user_id})"
+
+
 def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.Guild, thanks_text: str, bot=None) -> discord.Embed:
     tier = int(getattr(guild, "premium_tier", 0) or 0)
     total_boosts = int(getattr(guild, "premium_subscription_count", 0) or 0)
@@ -83,7 +90,7 @@ def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.
     embed = discord.Embed(
         title=BOOST_THANKS_TITLE,
         description=(
-            f"@{_safe_display_name(member)}\n\n"
+            f"{_user_profile_link(member.id, member.display_name)}\n\n"
             f"{thanks_text}\n\n"
             f"本次助力：{boost_digits}\n"
             f"当前服务器等级：**Level {tier}**\n"
@@ -128,6 +135,7 @@ def _refresh_boost_embed(
     embed: discord.Embed,
     boost_count: int,
     *,
+    user_id: int,
     display_name: str,
     color: int,
     avatar_url: str | None = None,
@@ -144,7 +152,7 @@ def _refresh_boost_embed(
     refreshed.description = refreshed_description
     lines = refreshed.description.splitlines()
     if lines:
-        lines[0] = f"@{discord.utils.escape_markdown(display_name or '未知成员')}"
+        lines[0] = _user_profile_link(user_id, display_name)
         refreshed.description = "\n".join(lines)
     refreshed.color = discord.Color(color)
     if avatar_url:
@@ -294,6 +302,7 @@ class BoostThanksCog(commands.Cog):
             refreshed = _refresh_boost_embed(
                 embed,
                 boost_count,
+                user_id=user_id,
                 display_name=display_name,
                 color=color,
                 avatar_url=avatar_url,
