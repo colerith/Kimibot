@@ -25,7 +25,7 @@ def _today() -> str:
 
 
 def _empty_data() -> dict:
-    return {"version": 1, "questions": {}}
+    return {"version": 1, "questions": {}, "panels": {}}
 
 
 def load_data() -> dict:
@@ -37,7 +37,10 @@ def load_data() -> dict:
 
     if not isinstance(raw, dict) or not isinstance(raw.get("questions"), dict):
         return _empty_data()
-    return {"version": 1, "questions": raw["questions"]}
+    panels = raw.get("panels", {})
+    if not isinstance(panels, dict):
+        panels = {}
+    return {"version": 1, "questions": raw["questions"], "panels": panels}
 
 
 def save_data(data: dict) -> None:
@@ -58,6 +61,36 @@ def get_daily_usage(user_id: int, guild_id: int) -> int:
         and row.get("guild_id") == gid
         and row.get("date") == today
     )
+
+
+def save_panel(channel_id: int, message_id: int) -> None:
+    data = load_data()
+    data["panels"][str(channel_id)] = {
+        "channel_id": str(channel_id),
+        "message_id": str(message_id),
+        "updated_at": _now_iso(),
+    }
+    save_data(data)
+
+
+def get_panel(channel_id: int) -> dict | None:
+    panel = load_data()["panels"].get(str(channel_id))
+    return panel if isinstance(panel, dict) else None
+
+
+def list_panels() -> list[dict]:
+    return [row for row in load_data()["panels"].values() if isinstance(row, dict)]
+
+
+def remove_panel(channel_id: int, message_id: int | None = None) -> None:
+    data = load_data()
+    panel = data["panels"].get(str(channel_id))
+    if not isinstance(panel, dict):
+        return
+    if message_id is not None and panel.get("message_id") != str(message_id):
+        return
+    data["panels"].pop(str(channel_id), None)
+    save_data(data)
 
 
 def create_question(*, author_id: int, guild_id: int, channel_id: int, content: str) -> dict | None:

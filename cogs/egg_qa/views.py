@@ -9,6 +9,8 @@ from .storage import (
     create_question,
     finalize_question,
     get_daily_usage,
+    get_panel,
+    save_panel,
 )
 
 
@@ -86,6 +88,9 @@ class EggQuestionModal(discord.ui.Modal):
             return await interaction.followup.send("❌ 问题发送失败，请检查机器人在该频道的权限。", ephemeral=True)
 
         finalize_question(record["id"], message.id)
+        cog = interaction.client.get_cog("小蛋问答")
+        if cog and interaction.channel.id == cog._bottom_channel_id():
+            cog._schedule_bottom_refresh()
         used = get_daily_usage(interaction.user.id, interaction.guild_id)
         await interaction.followup.send(
             f"✅ 问题已发出！你今天还可以发起 **{max(0, DAILY_QUESTION_LIMIT - used)} 次**。",
@@ -136,5 +141,42 @@ def build_panel_embed() -> discord.Embed:
 
 
 async def deploy_egg_qa_panel(channel) -> discord.Message:
-    """在指定频道发布小蛋问答入口面板。"""
-    return await channel.send(embed=build_panel_embed(), view=EggQAPanelView())
+    """发送或原地更新指定频道的小蛋问答面板。"""
+    panel = get_panel(channel.id)
+    if panel and panel.get("message_id"):
+        try:
+            message = await channel.fetch_message(int(panel["message_id"]))
+            await message.edit(embed=build_panel_embed(), view=EggQAPanelView())
+            return message
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    # 兼容升级前已发送但尚未记录的面板，避免升级后重复发送。
+    try:
+        async for old_message in channel.history(limit=200):
+            if not old_message.embeds or old_message.embeds[0].title != "🥚 小蛋问答站":
+                continue
+            await old_message.edit(embed=build_panel_embed(), view=EggQAPanelView())
+            save_panel(channel.id, old_message.id)
+            return old_message
+    except (AttributeError, discord.Forbidden, discord.HTTPException):
+        pass
+
+    message = await channel.send(embed=build_panel_embed(), view=EggQAPanelView())
+    save_panel(channel.id, message.id)
+    return message
+
+
+async def refresh_bottom_egg_qa_panel(channel) -> discord.Message:
+    """删除旧面板后重发，使问答面板保持在固定频道底部。"""
+    panel = get_panel(channel.id)
+    if panel and panel.get("message_id"):
+        try:
+            message = await channel.fetch_message(int(panel["message_id"]))
+            await message.delete(reason="刷新置底小蛋问答面板")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    message = await channel.send(embed=build_panel_embed(), view=EggQAPanelView())
+    save_panel(channel.id, message.id)
+    return message

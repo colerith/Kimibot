@@ -1,10 +1,13 @@
+import asyncio
+
 import discord
 from discord.ext import commands
 
+import config
 from cogs.points.storage import modify_user_points
 
-from .storage import claim_reply_reward, find_question_by_message, revoke_reply_reward
-from .views import EggQAPanelView
+from .storage import claim_reply_reward, find_question_by_message, list_panels, remove_panel, revoke_reply_reward
+from .views import EggQAPanelView, build_panel_embed, deploy_egg_qa_panel, refresh_bottom_egg_qa_panel
 
 
 REWARD_NUMBER_EMOJIS = {
@@ -33,15 +36,92 @@ def _reward_reactions(amount: int) -> list[str]:
 class EggQACog(commands.Cog, name="小蛋问答"):
     def __init__(self, bot):
         self.bot = bot
+        self.panels_refreshed = False
+        self.bottom_refresh_task = None
 
     @commands.Cog.listener()
     async def on_ready(self):
         self.bot.add_view(EggQAPanelView())
         print("[EggQA] Cog loaded and persistent view registered.")
+        if not self.panels_refreshed:
+            self.panels_refreshed = True
+            self.bot.loop.create_task(self._refresh_saved_panels())
+
+    def cog_unload(self):
+        if self.bottom_refresh_task:
+            self.bottom_refresh_task.cancel()
+
+    def _bottom_channel_id(self) -> int:
+        cfg = getattr(config, "EGG_QA", {})
+        return int(cfg.get("BOTTOM_PANEL_CHANNEL_ID", 0) or 0) if isinstance(cfg, dict) else 0
+
+    async def _fetch_channel(self, channel_id: int):
+        channel = self.bot.get_channel(channel_id)
+        if channel:
+            return channel
+        try:
+            return await self.bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    async def _refresh_saved_panels(self):
+        await self.bot.wait_until_ready()
+        refreshed = 0
+        for panel in list_panels():
+            channel_id = int(panel.get("channel_id") or 0)
+            message_id = int(panel.get("message_id") or 0)
+            if not channel_id or not message_id:
+                continue
+            channel = await self._fetch_channel(channel_id)
+            if not channel:
+                continue
+            try:
+                message = await channel.fetch_message(message_id)
+                await message.edit(embed=build_panel_embed(), view=EggQAPanelView())
+                refreshed += 1
+            except discord.NotFound:
+                remove_panel(channel_id, message_id)
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+
+        bottom_channel_id = self._bottom_channel_id()
+        if bottom_channel_id and not any(
+            int(panel.get("channel_id") or 0) == bottom_channel_id for panel in list_panels()
+        ):
+            channel = await self._fetch_channel(bottom_channel_id)
+            if channel:
+                try:
+                    await deploy_egg_qa_panel(channel)
+                    refreshed += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+        print(f"[EggQA] refreshed {refreshed} saved panels.")
+
+    async def _delayed_bottom_refresh(self):
+        try:
+            await asyncio.sleep(1.5)
+            channel = await self._fetch_channel(self._bottom_channel_id())
+            if channel:
+                await refresh_bottom_egg_qa_panel(channel)
+        except asyncio.CancelledError:
+            pass
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"[EggQA] bottom panel refresh failed: {error}")
+
+    def _schedule_bottom_refresh(self):
+        if self.bottom_refresh_task and not self.bottom_refresh_task.done():
+            self.bottom_refresh_task.cancel()
+        self.bottom_refresh_task = self.bot.loop.create_task(self._delayed_bottom_refresh())
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild or not message.reference:
+        if not message.guild:
+            return
+
+        if not message.author.bot and message.channel.id == self._bottom_channel_id():
+            self._schedule_bottom_refresh()
+
+        if message.author.bot or not message.reference:
             return
         if not message.content.strip() and not message.attachments:
             return

@@ -84,7 +84,6 @@ SHELLS = {
 }
 
 SUBMISSIONS = {
-    "BOTTOM_ENTRY_CHANNEL_ID": 1536931285300154408,
     "CHANNEL_IDS": {
         "repo_sfw": 1441437806617563156,
         "repo_nsfw": 1417576370451513495,
@@ -99,6 +98,10 @@ SUBMISSIONS = {
         "reply_bug": (0.5, 2.0),
     },
     "DELETE_PENALTY_RATE": 0.5,
+}
+
+EGG_QA = {
+    "BOTTOM_PANEL_CHANNEL_ID": 1536931285300154408,
 }
 
 SUBMISSION_USEFUL_TIERS = [
@@ -118,3 +121,4 @@ globals().update(LOTTERY)
 globals().update(POINTS)
 globals().update(SHELLS)
 globals().update(SUBMISSIONS)
+globals().update(EGG_QA)

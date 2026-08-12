@@ -15,7 +15,6 @@ from .storage import (
     can_create_submission,
     create_submission,
     find_by_message_id,
-    get_bottom_entry_info,
     get_panel_info,
     get_submission,
     list_submissions,
@@ -24,7 +23,6 @@ from .storage import (
     random_reward,
     save_submission,
     set_panel_info,
-    set_bottom_entry_info,
     toggle_useful,
     update_submission_fields,
 )
@@ -634,52 +632,6 @@ class SubmissionPanelView(discord.ui.View):
             view=SubmissionManageView(interaction.user.id, rows),
             ephemeral=True,
         )
-
-
-class SubmissionBottomEntryView(discord.ui.View):
-    """频道底部的持久入口；完整投稿面板只对点击者可见。"""
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="打开投稿面板",
-        emoji="📮",
-        style=discord.ButtonStyle.primary,
-        custom_id="submission_bottom_entry_open",
-    )
-    async def open_panel(self, button, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            embed=build_panel_embed(),
-            view=SubmissionPanelView(),
-            ephemeral=True,
-        )
-
-
-def build_bottom_entry_embed() -> discord.Embed:
-    embed = discord.Embed(
-        title="📮 奇米蛋投稿入口",
-        description="点击下方按钮打开投稿面板。面板内容 **仅你自己可见**。",
-        color=PANEL_COLOR,
-    )
-    embed.set_footer(text="有新消息时，本入口会自动回到频道底部。")
-    return embed
-
-
-async def refresh_bottom_submission_entry(channel) -> discord.Message:
-    """删除旧入口并重新发送，使入口保持在指定频道底部。"""
-    info = get_bottom_entry_info()
-    old_message_id = int(info.get("message_id") or 0)
-    if old_message_id and str(info.get("channel_id", "")) == str(channel.id):
-        try:
-            old_message = await channel.fetch_message(old_message_id)
-            await old_message.delete(reason="刷新置底投稿入口")
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
-
-    message = await channel.send(embed=build_bottom_entry_embed(), view=SubmissionBottomEntryView())
-    set_bottom_entry_info(channel.id, message.id)
-    return message
 
 
 class SubmissionDraftView(discord.ui.View):
