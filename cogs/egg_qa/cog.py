@@ -2,10 +2,9 @@ import discord
 from discord.ext import commands
 
 from cogs.points.storage import modify_user_points
-from cogs.shared.utils import is_super_egg
 
 from .storage import claim_reply_reward, find_question_by_message, revoke_reply_reward
-from .views import EggQAPanelView, build_panel_embed
+from .views import EggQAPanelView
 
 
 REWARD_NUMBER_EMOJIS = {
@@ -94,10 +93,3 @@ class EggQACog(commands.Cog, name="小蛋问答"):
                 await message.add_reaction(emoji)
             except discord.HTTPException:
                 pass
-
-    @discord.slash_command(name="小蛋问答面板", description="（仅限超级小蛋）在当前频道发布小蛋问答面板")
-    @is_super_egg()
-    async def deploy_panel(self, ctx: discord.ApplicationContext):
-        await ctx.defer(ephemeral=True)
-        await ctx.channel.send(embed=build_panel_embed(), view=EggQAPanelView())
-        await ctx.followup.send("✅ 小蛋问答面板已发送到当前频道。", ephemeral=True)

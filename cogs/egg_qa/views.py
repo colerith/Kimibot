@@ -131,3 +131,8 @@ def build_panel_embed() -> discord.Embed:
     embed.add_field(name="💡 小提示", value="问题写得具体一点，大家会更容易接住你的脑电波。", inline=False)
     embed.set_footer(text="小蛋问答 · 分享好奇，也分享蛋壳")
     return embed
+
+
+async def deploy_egg_qa_panel(channel) -> discord.Message:
+    """在指定频道发布小蛋问答入口面板。"""
+    return await channel.send(embed=build_panel_embed(), view=EggQAPanelView())
