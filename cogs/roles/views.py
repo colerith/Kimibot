@@ -2411,6 +2411,15 @@ class CommunityPanelManageView(discord.ui.View):
             return await interaction.followup.send("❌ 小蛋问答面板发送失败，请检查机器人在当前频道的权限。", ephemeral=True)
         await interaction.followup.send("✅ 已发送小蛋问答面板。", ephemeral=True)
 
+    @discord.ui.button(label="通知面板", style=discord.ButtonStyle.success, emoji="📬", custom_id="community_admin_notification_panel")
+    async def notification_panel_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await deploy_notification_panel(interaction.channel)
+        except (discord.Forbidden, discord.HTTPException):
+            return await interaction.followup.send("❌ 通知订阅面板发送失败，请检查机器人在当前频道的权限。", ephemeral=True)
+        await interaction.followup.send("✅ 已发送通知订阅面板。", ephemeral=True)
+
     @discord.ui.button(label="题库刷新", style=discord.ButtonStyle.secondary, emoji="📚", custom_id="community_admin_prequiz_bank")
     async def prequiz_bank_callback(self, button, interaction: discord.Interaction):
         from cogs.prequiz.storage import load_question_bank
@@ -2459,6 +2468,36 @@ def build_community_manage_embed(guild: discord.Guild | None):
     if guild:
         embed.set_footer(text=guild.name, icon_url=guild.icon.url if guild.icon else None)
     return embed
+
+
+NOTIFICATION_PANEL_COLOR = 0x8FA3B5  # 莫兰迪雾霾蓝
+
+
+def build_notification_panel_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="📬 社区通知中心",
+        description=(
+            "不想错过重要消息？在这里订阅你感兴趣的通知类型。\n\n"
+            "### ✨ 使用方法\n"
+            "点击下方按钮，勾选想接收的通知，系统会自动添加对应身份组。\n"
+            "再次进入并取消勾选，即可更新订阅。"
+        ),
+        color=NOTIFICATION_PANEL_COLOR,
+    )
+    embed.set_footer(text="按需订阅 · 安静陪伴 · 拒绝打扰")
+    return embed
+
+
+async def deploy_notification_panel(channel) -> discord.Message:
+    try:
+        async for message in channel.history(limit=200):
+            if not message.embeds or message.embeds[0].title not in {"📬 社区通知中心", "📬 **社区通知中心**"}:
+                continue
+            await message.edit(embed=build_notification_panel_embed(), view=NotificationEntranceView())
+            return message
+    except (AttributeError, discord.Forbidden, discord.HTTPException):
+        pass
+    return await channel.send(embed=build_notification_panel_embed(), view=NotificationEntranceView())
 
 
 def build_acceleration_admin_embed() -> discord.Embed:

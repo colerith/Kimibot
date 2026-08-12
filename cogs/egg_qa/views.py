@@ -24,7 +24,7 @@ EMBED_COLORS = [
     0x74C7A5,
 ]
 
-EGG_QA_PANEL_COLOR = 0x879B87  # 莫兰迪鼠尾草绿 / Sage Green
+EGG_QA_PANEL_COLOR = 0x96ACA0  # 莫兰迪鼠尾草绿 / Sage Green
 
 
 class EggQuestionModal(discord.ui.Modal):

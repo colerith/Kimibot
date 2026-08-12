@@ -43,7 +43,7 @@ CONTENT_COLLAPSE_LIMIT = 350
 RECOMMENDATION_DOMAIN_COLORS = {
     # 图一自然系配色
     "酒馆好物": 0xB66E4A,  # Warm Wood
-    "书籍安利": 0xFFF5E6,  # Sunlit Linen
+    "书籍安利": 0xC0B9DD,  # Sunlit Linen
     "影视安利": 0xFFCDB0,  # Peach Blossom
     "游戏安利": 0x87A6BF,  # Harbor Sky
     "便利生活": 0xB9D4CF,  # Ocean Breeze
