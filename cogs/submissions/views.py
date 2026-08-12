@@ -35,7 +35,7 @@ REPO_NSFW_CHANNEL_ID = 1417576370451513495
 BUG_CHANNEL_ID = 1417577014096957554
 RECOMMENDATION_CHANNEL_ID = 1536024803587137536
 
-DOMAIN_OPTIONS = ["酒馆好物", "书籍安利", "影视安利", "游戏安利", "便利生活", "其他类型"]
+DOMAIN_OPTIONS = ["酒馆好物", "书籍安利", "影视安利", "音乐安利", "游戏安利", "便利生活", "其他类型"]
 TYPE_OPTIONS = ["sfw", "nsfw"]
 COMMENTS_PER_PAGE = 10
 CONTENT_COLLAPSE_LIMIT = 350
@@ -45,6 +45,7 @@ RECOMMENDATION_DOMAIN_COLORS = {
     "酒馆好物": 0xB66E4A,  # Warm Wood
     "书籍安利": 0xC0B9DD,  # Sunlit Linen
     "影视安利": 0xFFCDB0,  # Peach Blossom
+    "音乐安利": 0xABABDC,  
     "游戏安利": 0x87A6BF,  # Harbor Sky
     "便利生活": 0xB9D4CF,  # Ocean Breeze
     "其他类型": 0xFFD47F,  # Honeycomb
