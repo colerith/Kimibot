@@ -29,6 +29,7 @@ from .storage import (
 
 
 PANEL_COLOR = 0xFFD36A
+SUBMISSION_MAIN_PANEL_COLOR = 0xB88F8A  # 莫兰迪灰粉 / Dusty Rose
 REPO_SFW_CHANNEL_ID = 1441437806617563156
 REPO_NSFW_CHANNEL_ID = 1417576370451513495
 BUG_CHANNEL_ID = 1417577014096957554
@@ -176,7 +177,7 @@ def build_panel_embed() -> discord.Embed:
             "📎 填完表后可以开启收图，最多收纳 9 张图片。\n"
             "🧺 每类投稿每天最多 5 次，防止小蛋箱被塞爆~"
         ),
-        color=PANEL_COLOR,
+        color=SUBMISSION_MAIN_PANEL_COLOR,
     )
     embed.add_field(name="📦 我要repo", value="提交想 repo 的标题、类型与内容，仅限电波系的作品哦。", inline=False)
     embed.add_field(name="🐞 我要捉虫", value="提交问题对象与详细描述，仅限电波系的作品哦。", inline=False)

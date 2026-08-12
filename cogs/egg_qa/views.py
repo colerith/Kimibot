@@ -24,6 +24,8 @@ EMBED_COLORS = [
     0x74C7A5,
 ]
 
+EGG_QA_PANEL_COLOR = 0x879B87  # 莫兰迪鼠尾草绿 / Sage Green
+
 
 class EggQuestionModal(discord.ui.Modal):
     def __init__(self):
@@ -153,7 +155,7 @@ def build_panel_embed() -> discord.Embed:
             f"> 每位用户每天最多发起 **{DAILY_QUESTION_LIMIT} 次**；每题每人只可领取一次奖励；"
             f"每天回答奖励最多 **{DAILY_REPLY_REWARD_CAP} 蛋壳**。"
         ),
-        color=0xF3B83F,
+        color=EGG_QA_PANEL_COLOR,
     )
     embed.add_field(name="💡 小提示", value="问题写得具体一点，大家会更容易接住你的脑电波。", inline=False)
     embed.set_footer(text="小蛋问答 · 分享好奇，也分享蛋壳")
@@ -164,7 +166,7 @@ def build_entry_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🙋‍♀️ 小蛋问答入口",
         description="有问题想问大家？点击下方按钮打开提问面板。",
-        color=0xF3B83F,
+        color=EGG_QA_PANEL_COLOR,
     )
     embed.set_footer(text="完整面板仅你自己可见 · 本入口会自动保持在频道底部")
     return embed
