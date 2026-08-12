@@ -158,14 +158,14 @@ def build_panel_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🥚 奇米蛋投稿箱",
         description=(
-            "📮 想 repo、想捉虫、想安利，都可以投进这里。\n"
+            "📮 想给电波系repo、想捉虫电波系预设的小bug、想安利，都可以投进这里。\n"
             "🥚 奇米蛋会给认真投稿的小饱饱发一点亮晶晶的蛋壳。\n"
             "📎 填完表后可以开启收图，最多收纳 9 张图片。\n"
             "🧺 每类投稿每天最多 5 次，防止小蛋箱被塞爆~"
         ),
         color=PANEL_COLOR,
     )
-    embed.add_field(name="📦 我要repo", value="提交想 repo 的标题、类型与内容。", inline=False)
+    embed.add_field(name="📦 我要repo", value="提交想 repo 的标题、类型与内容，仅限电波系的作品哦", inline=False)
     embed.add_field(name="🐞 我要捉虫", value="提交问题对象与详细描述。", inline=False)
     embed.add_field(name="🌟 我要安利", value="分享好物、书籍、影视、游戏或生活经验。", inline=False)
     embed.add_field(name="🗂️ 管理投稿", value="修改或删除自己发过的投稿。", inline=False)
