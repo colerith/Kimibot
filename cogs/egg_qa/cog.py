@@ -1,11 +1,34 @@
 import discord
 from discord.ext import commands
 
-from cogs.points.storage import format_shells, modify_user_points
+from cogs.points.storage import modify_user_points
 from cogs.shared.utils import is_super_egg
 
 from .storage import claim_reply_reward, find_question_by_message, revoke_reply_reward
 from .views import EggQAPanelView, build_panel_embed
+
+
+REWARD_NUMBER_EMOJIS = {
+    1: "1️⃣",
+    2: "2️⃣",
+    3: "3️⃣",
+    4: "4️⃣",
+    5: "5️⃣",
+    6: "6️⃣",
+    7: "7️⃣",
+    8: "8️⃣",
+    9: "9️⃣",
+    10: "🔟",
+}
+
+
+def _reward_reactions(amount: int) -> list[str]:
+    """用 Discord 数字反应表达 3～15；11～15 表示为 10 加余数。"""
+    if amount <= 10:
+        emoji = REWARD_NUMBER_EMOJIS.get(amount)
+        return [emoji] if emoji else []
+    remainder = amount - 10
+    return [REWARD_NUMBER_EMOJIS[10], REWARD_NUMBER_EMOJIS[remainder]]
 
 
 class EggQACog(commands.Cog, name="小蛋问答"):
@@ -34,25 +57,28 @@ class EggQACog(commands.Cog, name="小蛋问答"):
             return
         if question.get("channel_id") != str(message.channel.id):
             return
-        if question.get("author_id") == str(message.author.id):
-            return
+        is_self_answer = question.get("author_id") == str(message.author.id)
 
         reward = claim_reply_reward(
             question_id=question["id"],
             user_id=message.author.id,
             reply_message_id=message.id,
+            is_self_answer=is_self_answer,
         )
         if not reward:
             return
 
         amount = int(reward["amount"])
         try:
-            balance = modify_user_points(
+            modify_user_points(
                 message.author.id,
                 amount,
                 message.guild.id,
-                source="egg_qa_reply",
-                reason=f"question_id={question['id']};reply_message_id={message.id}",
+                source="egg_qa_self_reply" if is_self_answer else "egg_qa_reply",
+                reason=(
+                    f"question_id={question['id']};reply_message_id={message.id};"
+                    f"self_answer={str(is_self_answer).lower()}"
+                ),
             )
         except Exception as error:
             revoke_reply_reward(
@@ -63,21 +89,11 @@ class EggQACog(commands.Cog, name="小蛋问答"):
             print(f"[EggQA] reward failed: reply={message.id} error={error}")
             return
 
-        reward_embed = discord.Embed(
-            description=(
-                f"🥚 **回答彩蛋掉落！** {message.author.mention} 获得了 "
-                f"**{amount} 蛋壳**\n当前余额：**{format_shells(balance)} 蛋壳**"
-            ),
-            color=0xF3B83F,
-        )
-        try:
-            await message.reply(
-                embed=reward_embed,
-                mention_author=False,
-                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+        for emoji in _reward_reactions(amount):
+            try:
+                await message.add_reaction(emoji)
+            except discord.HTTPException:
+                pass
 
     @discord.slash_command(name="小蛋问答面板", description="（仅限超级小蛋）在当前频道发布小蛋问答面板")
     @is_super_egg()

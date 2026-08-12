@@ -67,7 +67,10 @@ class EggQuestionModal(discord.ui.Modal):
         )
         embed.add_field(
             name="🥚 回答有礼",
-            value="使用 Discord 的 **回复** 功能回答这条问题，就有机会获得 **3～15 蛋壳**。奖励越高越稀有！",
+            value=(
+                "使用 Discord 的 **回复** 功能回答这条问题，就有机会获得 **3～15 蛋壳**。"
+                "奖励越高越稀有！\n提问者自己补充回答时，可获得 **1～3 蛋壳**。"
+            ),
             inline=False,
         )
         embed.set_footer(text="每位小蛋对本题限领一次 · 认真回答会更可爱")
@@ -120,6 +123,7 @@ def build_panel_embed() -> discord.Embed:
             "**发起问题**　点击下方 **🙋‍♀️ 发起问答**，填写问题后公开发布。\n"
             "**参与回答**　对问题卡片使用 Discord 自带的 **回复** 功能。\n"
             "**领取彩蛋**　首次有效回答可随机获得 **3～15 蛋壳**，大奖更稀有。\n\n"
+            "**自问自答**　提问者自己回复问题时，可随机获得 **1～3 蛋壳**。\n\n"
             f"> 每位用户每天最多发起 **{DAILY_QUESTION_LIMIT} 次**；每题每人只可领取一次奖励。"
         ),
         color=0xF3B83F,

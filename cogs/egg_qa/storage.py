@@ -11,6 +11,8 @@ DAILY_QUESTION_LIMIT = 3
 # 低额奖励常见，高额奖励逐渐稀有。
 REWARD_AMOUNTS = list(range(3, 16))
 REWARD_WEIGHTS = [60, 50, 42, 34, 26, 20, 16, 12, 8, 6, 4, 2, 1]
+SELF_ANSWER_AMOUNTS = [1, 2, 3]
+SELF_ANSWER_WEIGHTS = [6, 3, 1]
 
 
 def _now_iso() -> str:
@@ -112,7 +114,13 @@ def find_question_by_message(message_id: int) -> dict | None:
     return None
 
 
-def claim_reply_reward(*, question_id: str, user_id: int, reply_message_id: int) -> dict | None:
+def claim_reply_reward(
+    *,
+    question_id: str,
+    user_id: int,
+    reply_message_id: int,
+    is_self_answer: bool = False,
+) -> dict | None:
     """原子式记录首次回复奖励；同一用户对同一问题只能成功一次。"""
     data = load_data()
     record = data["questions"].get(str(question_id))
@@ -124,11 +132,15 @@ def claim_reply_reward(*, question_id: str, user_id: int, reply_message_id: int)
     if uid in rewards:
         return None
 
-    amount = random.choices(REWARD_AMOUNTS, weights=REWARD_WEIGHTS, k=1)[0]
+    if is_self_answer:
+        amount = random.choices(SELF_ANSWER_AMOUNTS, weights=SELF_ANSWER_WEIGHTS, k=1)[0]
+    else:
+        amount = random.choices(REWARD_AMOUNTS, weights=REWARD_WEIGHTS, k=1)[0]
     reward = {
         "user_id": uid,
         "reply_message_id": str(reply_message_id),
         "amount": amount,
+        "self_answer": bool(is_self_answer),
         "created_at": _now_iso(),
     }
     rewards[uid] = reward
