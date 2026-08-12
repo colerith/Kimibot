@@ -1030,11 +1030,19 @@ def build_shell_help_embed() -> discord.Embed:
     return embed
 
 
-def build_role_panel_embed(guild: discord.Guild, user_avatar_url: str | None = None) -> discord.Embed:
+def build_role_panel_embed(
+    guild: discord.Guild,
+    user_avatar_url: str | None = None,
+    top_names: dict[str, str] | None = None,
+) -> discord.Embed:
     summary = get_daily_signin_summary(guild.id)
     top10 = summary.get("top10", [])
     if top10:
-        top_lines = [f"`{index}.` <@{user_id}>" for index, user_id in enumerate(top10, start=1)]
+        names = top_names or {}
+        top_lines = [
+            f"`{index}.` @{discord.utils.escape_markdown(names.get(str(user_id), '未知成员'))}"
+            for index, user_id in enumerate(top10, start=1)
+        ]
         top_text = "\n".join(top_lines)
     else:
         top_text = "今天还没有人报到，等一个第 1 名小蛋。"
@@ -1062,6 +1070,28 @@ def build_role_panel_embed(guild: discord.Guild, user_avatar_url: str | None = N
     return embed
 
 
+async def _resolve_signin_top_names(guild: discord.Guild) -> dict[str, str]:
+    summary = get_daily_signin_summary(guild.id)
+    names = {}
+    for raw_user_id in summary.get("top10", []):
+        user_id = int(raw_user_id)
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+        if member is not None:
+            names[str(raw_user_id)] = member.display_name
+            continue
+        try:
+            user = await guild._state._get_client().fetch_user(user_id)
+            names[str(raw_user_id)] = user.display_name
+        except (AttributeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+            names[str(raw_user_id)] = "未知成员"
+    return names
+
+
 async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None = None):
     data = load_role_data()
     panel_info = data.get("panel_info", {})
@@ -1076,7 +1106,8 @@ async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None =
 
     try:
         message = await channel.fetch_message(int(message_id))
-        await message.edit(embed=build_role_panel_embed(guild, user_avatar_url), view=RoleClaimView())
+        top_names = await _resolve_signin_top_names(guild)
+        await message.edit(embed=build_role_panel_embed(guild, user_avatar_url, top_names), view=RoleClaimView())
         return True
     except (discord.NotFound, discord.Forbidden):
         return False
@@ -2664,7 +2695,8 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
     """
     统一的面板部署逻辑
     """
-    embed = build_role_panel_embed(guild, user_avatar_url)
+    top_names = await _resolve_signin_top_names(guild)
+    embed = build_role_panel_embed(guild, user_avatar_url, top_names)
     view = RoleClaimView()
 
     # 2. 检查是否需要更新

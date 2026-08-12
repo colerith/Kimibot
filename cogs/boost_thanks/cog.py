@@ -1,4 +1,5 @@
 import re
+import random
 
 import discord
 from discord import Option
@@ -8,7 +9,14 @@ import config
 from cogs.points.storage import format_shells, modify_user_points
 from cogs.shared.utils import is_super_egg
 
-from .storage import DIGIT_EMOJI_IDS, format_digit_emojis, mark_processed, pick_thanks_message, update_processed_message
+from .storage import (
+    DIGIT_EMOJI_IDS,
+    format_digit_emojis,
+    load_boost_thanks_data,
+    mark_processed,
+    pick_thanks_message,
+    update_processed_message,
+)
 
 BOOST_MESSAGE_TYPE_NAMES = {
     "premium_guild_subscription",
@@ -33,6 +41,15 @@ CHINESE_DIGITS = {
 }
 
 BOOST_THANKS_TITLE = "🥚 小蛋收到助力啦"
+BOOST_EMBED_COLORS = [
+    0xF4B7C7,
+    0xF7C873,
+    0x8FD5C7,
+    0x79B8F3,
+    0xA99BEF,
+    0xE89AC7,
+    0x74C7A5,
+]
 
 
 def _message_type_name(message: discord.Message) -> str:
@@ -53,6 +70,11 @@ def _extract_boost_count(message: discord.Message) -> int:
     return 1
 
 
+def _safe_display_name(user) -> str:
+    name = getattr(user, "display_name", None) or getattr(user, "name", None) or "未知成员"
+    return discord.utils.escape_markdown(str(name))
+
+
 def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.Guild, thanks_text: str, bot=None) -> discord.Embed:
     tier = int(getattr(guild, "premium_tier", 0) or 0)
     total_boosts = int(getattr(guild, "premium_subscription_count", 0) or 0)
@@ -61,13 +83,13 @@ def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.
     embed = discord.Embed(
         title=BOOST_THANKS_TITLE,
         description=(
-            f"{member.mention}\n\n"
+            f"@{_safe_display_name(member)}\n\n"
             f"{thanks_text}\n\n"
             f"本次助力：{boost_digits}\n"
             f"当前服务器等级：**Level {tier}**\n"
             f"当前服务器助力数：**{total_boosts}**"
         ),
-        color=getattr(config, "KIMI_YELLOW", 0xFFD700),
+        color=random.choice(BOOST_EMBED_COLORS),
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.set_footer(text="奇米蛋感谢你的助力。")
@@ -102,7 +124,15 @@ def _extract_boost_count_from_embed(embed: discord.Embed) -> int | None:
     return None
 
 
-def _refresh_boost_embed_digits(embed: discord.Embed, boost_count: int, bot=None) -> discord.Embed:
+def _refresh_boost_embed(
+    embed: discord.Embed,
+    boost_count: int,
+    *,
+    display_name: str,
+    color: int,
+    avatar_url: str | None = None,
+    bot=None,
+) -> discord.Embed:
     description = embed.description or ""
     refreshed_description = re.sub(
         r"本次助力[：:].*",
@@ -112,6 +142,13 @@ def _refresh_boost_embed_digits(embed: discord.Embed, boost_count: int, bot=None
     )
     refreshed = discord.Embed.from_dict(embed.to_dict())
     refreshed.description = refreshed_description
+    lines = refreshed.description.splitlines()
+    if lines:
+        lines[0] = f"@{discord.utils.escape_markdown(display_name or '未知成员')}"
+        refreshed.description = "\n".join(lines)
+    refreshed.color = discord.Color(color)
+    if avatar_url:
+        refreshed.set_thumbnail(url=avatar_url)
     return refreshed
 
 
@@ -206,10 +243,30 @@ class BoostThanksCog(commands.Cog):
         except discord.HTTPException:
             return None
 
+    async def _resolve_boost_user(self, guild: discord.Guild, user_id: int):
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+        if member is not None:
+            return member
+        try:
+            return await self.bot.fetch_user(user_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
     async def _refresh_channel_boost_embeds(self, channel, *, limit: int | None) -> tuple[int, int, int]:
         scanned = 0
         updated = 0
         skipped = 0
+        processed = load_boost_thanks_data().get("processed", {})
+        records_by_thanks_message = {
+            str(record.get("thanks_message_id")): record
+            for record in processed.values()
+            if isinstance(record, dict) and record.get("thanks_message_id")
+        }
         async for message in channel.history(limit=limit):
             scanned += 1
             if message.author.id != self.bot.user.id or not message.embeds:
@@ -222,9 +279,26 @@ class BoostThanksCog(commands.Cog):
                 skipped += 1
                 continue
 
-            refreshed = _refresh_boost_embed_digits(embed, boost_count, bot=self.bot)
-            if refreshed.description == embed.description:
-                continue
+            record = records_by_thanks_message.get(str(message.id), {})
+            user_id = int(record.get("user_id") or 0)
+            if not user_id:
+                old_mention = re.search(r"<@!?(\d+)>", embed.description or "")
+                user_id = int(old_mention.group(1)) if old_mention else 0
+            user = await self._resolve_boost_user(channel.guild, user_id) if user_id else None
+            display_name = (
+                getattr(user, "display_name", None) or getattr(user, "name", None) or "未知成员"
+                if user else "未知成员"
+            )
+            avatar_url = str(user.display_avatar.url) if user and getattr(user, "display_avatar", None) else None
+            color = random.Random(message.id).choice(BOOST_EMBED_COLORS)
+            refreshed = _refresh_boost_embed(
+                embed,
+                boost_count,
+                display_name=display_name,
+                color=color,
+                avatar_url=avatar_url,
+                bot=self.bot,
+            )
             try:
                 await message.edit(embed=refreshed, allowed_mentions=discord.AllowedMentions.none())
                 updated += 1

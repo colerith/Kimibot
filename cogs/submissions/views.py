@@ -43,7 +43,7 @@ CONTENT_COLLAPSE_LIMIT = 350
 RECOMMENDATION_DOMAIN_COLORS = {
     # 图一自然系配色
     "酒馆好物": 0xB66E4A,  # Warm Wood
-    "书籍安利": 0xC0B9DD,  # Sunlit Linen
+    "书籍安利": 0xB7D3F4,  # Sunlit Linen
     "影视安利": 0xFFCDB0,  # Peach Blossom
     "音乐安利": 0xABABDC,  
     "游戏安利": 0x87A6BF,  # Harbor Sky
@@ -576,6 +576,7 @@ class RecommendationDomainSelect(discord.ui.Select):
                 ("酒馆好物", "🍻"),
                 ("书籍安利", "📚"),
                 ("影视安利", "🎬"),
+                ("音乐安利", "🎵"),
                 ("游戏安利", "🎮"),
                 ("便利生活", "🧰"),
                 ("其他类型", "✨"),
@@ -626,7 +627,11 @@ class SubmissionPanelView(discord.ui.View):
 
     @discord.ui.button(label="我要repo", emoji="📦", style=discord.ButtonStyle.primary, custom_id="submission_panel_repo")
     async def repo(self, button, interaction: discord.Interaction):
-        await interaction.response.send_message(
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        await interaction.followup.send(
             "先选择 repo 类型。",
             view=SubmissionTypeSelectView(interaction.user.id, KIND_REPO),
             ephemeral=True,
@@ -634,11 +639,18 @@ class SubmissionPanelView(discord.ui.View):
 
     @discord.ui.button(label="我要捉虫", emoji="🐞", style=discord.ButtonStyle.danger, custom_id="submission_panel_bug")
     async def bug(self, button, interaction: discord.Interaction):
-        await interaction.response.send_modal(SubmissionModal(KIND_BUG))
+        try:
+            await interaction.response.send_modal(SubmissionModal(KIND_BUG))
+        except discord.NotFound:
+            return
 
     @discord.ui.button(label="我要安利", emoji="🌟", style=discord.ButtonStyle.success, custom_id="submission_panel_recommend")
     async def recommend(self, button, interaction: discord.Interaction):
-        await interaction.response.send_message(
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        await interaction.followup.send(
             "先选择安利类型。",
             view=SubmissionTypeSelectView(interaction.user.id, KIND_RECOMMENDATION),
             ephemeral=True,
@@ -646,10 +658,14 @@ class SubmissionPanelView(discord.ui.View):
 
     @discord.ui.button(label="管理投稿", emoji="🗂️", style=discord.ButtonStyle.secondary, custom_id="submission_panel_manage")
     async def manage(self, button, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         rows = list_user_submissions(interaction.user.id, interaction.guild_id)
         if not rows:
-            return await interaction.response.send_message("你还没有可管理的投稿。", ephemeral=True)
-        await interaction.response.send_message(
+            return await interaction.followup.send("你还没有可管理的投稿。", ephemeral=True)
+        await interaction.followup.send(
             "选择一条投稿进行修改或删除。",
             view=SubmissionManageView(interaction.user.id, rows),
             ephemeral=True,
