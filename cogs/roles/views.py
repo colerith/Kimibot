@@ -1033,15 +1033,12 @@ def build_shell_help_embed() -> discord.Embed:
 def build_role_panel_embed(
     guild: discord.Guild,
     user_avatar_url: str | None = None,
-    top_names: dict[str, str] | None = None,
 ) -> discord.Embed:
     summary = get_daily_signin_summary(guild.id)
     top10 = summary.get("top10", [])
     if top10:
-        names = top_names or {}
         top_lines = [
-            f"`{index}.` [@{discord.utils.escape_markdown(names.get(str(user_id), '未知成员'))}]"
-            f"(https://discord.com/users/{user_id})"
+            f"`{index}.` <@{user_id}>"
             for index, user_id in enumerate(top10, start=1)
         ]
         top_text = "\n".join(top_lines)
@@ -1071,28 +1068,6 @@ def build_role_panel_embed(
     return embed
 
 
-async def _resolve_signin_top_names(guild: discord.Guild) -> dict[str, str]:
-    summary = get_daily_signin_summary(guild.id)
-    names = {}
-    for raw_user_id in summary.get("top10", []):
-        user_id = int(raw_user_id)
-        member = guild.get_member(user_id)
-        if member is None:
-            try:
-                member = await guild.fetch_member(user_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                member = None
-        if member is not None:
-            names[str(raw_user_id)] = member.display_name
-            continue
-        try:
-            user = await guild._state._get_client().fetch_user(user_id)
-            names[str(raw_user_id)] = user.display_name
-        except (AttributeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
-            names[str(raw_user_id)] = "未知成员"
-    return names
-
-
 async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None = None):
     data = load_role_data()
     panel_info = data.get("panel_info", {})
@@ -1107,8 +1082,11 @@ async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None =
 
     try:
         message = await channel.fetch_message(int(message_id))
-        top_names = await _resolve_signin_top_names(guild)
-        await message.edit(embed=build_role_panel_embed(guild, user_avatar_url, top_names), view=RoleClaimView())
+        await message.edit(
+            embed=build_role_panel_embed(guild, user_avatar_url),
+            view=RoleClaimView(),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         return True
     except (discord.NotFound, discord.Forbidden):
         return False
@@ -2696,8 +2674,7 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
     """
     统一的面板部署逻辑
     """
-    top_names = await _resolve_signin_top_names(guild)
-    embed = build_role_panel_embed(guild, user_avatar_url, top_names)
+    embed = build_role_panel_embed(guild, user_avatar_url)
     view = RoleClaimView()
 
     # 2. 检查是否需要更新
@@ -2712,14 +2689,14 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
     if last_channel_id == channel.id and last_message_id:
         try:
             message = await channel.fetch_message(last_message_id)
-            await message.edit(embed=embed, view=view)
+            await message.edit(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
             return "updated"
         except (discord.NotFound, discord.Forbidden):
             message = None
 
     # 3. 发送新消息
     if not message:
-        message = await channel.send(embed=embed, view=view)
+        message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
 
         # 4. 保存新的消息ID到数据库
         data["panel_info"] = {
