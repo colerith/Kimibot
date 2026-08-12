@@ -7,7 +7,7 @@ import config
 from cogs.points.storage import modify_user_points
 
 from .storage import claim_reply_reward, find_question_by_message, list_panels, remove_panel, revoke_reply_reward
-from .views import EggQAPanelView, build_panel_embed, deploy_egg_qa_panel, refresh_bottom_egg_qa_panel
+from .views import EggQAEntryView, EggQAPanelView, deploy_egg_qa_panel, refresh_bottom_egg_qa_panel
 
 
 REWARD_NUMBER_EMOJIS = {
@@ -38,10 +38,12 @@ class EggQACog(commands.Cog, name="小蛋问答"):
         self.bot = bot
         self.panels_refreshed = False
         self.bottom_refresh_task = None
+        self.bottom_refresh_lock = asyncio.Lock()
 
     @commands.Cog.listener()
     async def on_ready(self):
         self.bot.add_view(EggQAPanelView())
+        self.bot.add_view(EggQAEntryView())
         print("[EggQA] Cog loaded and persistent view registered.")
         if not self.panels_refreshed:
             self.panels_refreshed = True
@@ -67,7 +69,8 @@ class EggQACog(commands.Cog, name="小蛋问答"):
     async def _refresh_saved_panels(self):
         await self.bot.wait_until_ready()
         refreshed = 0
-        for panel in list_panels():
+        saved_panels = list_panels()
+        for panel in saved_panels:
             channel_id = int(panel.get("channel_id") or 0)
             message_id = int(panel.get("message_id") or 0)
             if not channel_id or not message_id:
@@ -76,8 +79,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
             if not channel:
                 continue
             try:
-                message = await channel.fetch_message(message_id)
-                await message.edit(embed=build_panel_embed(), view=EggQAPanelView())
+                await deploy_egg_qa_panel(channel)
                 refreshed += 1
             except discord.NotFound:
                 remove_panel(channel_id, message_id)
@@ -86,7 +88,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
 
         bottom_channel_id = self._bottom_channel_id()
         if bottom_channel_id and not any(
-            int(panel.get("channel_id") or 0) == bottom_channel_id for panel in list_panels()
+            int(panel.get("channel_id") or 0) == bottom_channel_id for panel in saved_panels
         ):
             channel = await self._fetch_channel(bottom_channel_id)
             if channel:
@@ -100,9 +102,10 @@ class EggQACog(commands.Cog, name="小蛋问答"):
     async def _delayed_bottom_refresh(self):
         try:
             await asyncio.sleep(1.5)
-            channel = await self._fetch_channel(self._bottom_channel_id())
-            if channel:
-                await refresh_bottom_egg_qa_panel(channel)
+            async with self.bottom_refresh_lock:
+                channel = await self._fetch_channel(self._bottom_channel_id())
+                if channel:
+                    await refresh_bottom_egg_qa_panel(channel)
         except asyncio.CancelledError:
             pass
         except (discord.Forbidden, discord.HTTPException) as error:
@@ -110,7 +113,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
 
     def _schedule_bottom_refresh(self):
         if self.bottom_refresh_task and not self.bottom_refresh_task.done():
-            self.bottom_refresh_task.cancel()
+            return
         self.bottom_refresh_task = self.bot.loop.create_task(self._delayed_bottom_refresh())
 
     @commands.Cog.listener()

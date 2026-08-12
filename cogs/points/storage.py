@@ -701,7 +701,13 @@ def reward_daily_kimi_praise(user_id: int, guild_id: int, message_id: int) -> di
     rows = data.setdefault("daily_praise_rewards", {}).setdefault(reward_key, {})
     uid = str(user_id)
     if uid in rows:
-        return {"success": False, "reason": "already_claimed", "amount": 0.0}
+        existing = rows.get(uid, {})
+        return {
+            "success": False,
+            "reason": "already_claimed",
+            "amount": _round_delta(existing.get("amount", 0)) if isinstance(existing, dict) else 0.0,
+            "message_id": str(existing.get("message_id", "")) if isinstance(existing, dict) else "",
+        }
 
     amount = random.choices(list(range(1, 10)), weights=_get_praise_weights(), k=1)[0]
     record, _ = _ensure_user_record(data, user_id, guild_id)

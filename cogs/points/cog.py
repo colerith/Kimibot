@@ -1,7 +1,8 @@
 # cogs/points/cog.py
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+import datetime
 import time
 import re
 
@@ -23,6 +24,7 @@ POINTS_MSG_COOLDOWN = getattr(
 )
 PRAISE_KIMI_CHANNEL_ID = int(getattr(config, "PRAISE_KIMI_CHANNEL_ID", 1450480250210484357))
 PRAISE_KIMI_TRIGGER = str(getattr(config, "PRAISE_KIMI_TRIGGER", "赞美奇米蛋！")).strip()
+PRAISE_RESCAN_MINUTES = max(1, int(getattr(config, "PRAISE_KIMI_RESCAN_MINUTES", 5)))
 PRAISE_REWARD_EMOJIS = {
     1: "1️⃣",
     2: "2️⃣",
@@ -65,6 +67,75 @@ class PointListener(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.user_cooldowns = {}
+        self.praise_scanner_started = False
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if not self.praise_scanner_started:
+            self.praise_scanner_started = True
+            self.praise_reward_rescan.change_interval(minutes=PRAISE_RESCAN_MINUTES)
+            self.praise_reward_rescan.start()
+
+    def cog_unload(self):
+        self.praise_reward_rescan.cancel()
+
+    async def _reward_praise_message(self, message: discord.Message, *, recovered: bool = False) -> bool:
+        if message.author.bot or not message.guild:
+            return False
+        if message.channel.id != PRAISE_KIMI_CHANNEL_ID or message.content.strip() != PRAISE_KIMI_TRIGGER:
+            return False
+
+        reward = reward_daily_kimi_praise(
+            user_id=message.author.id,
+            guild_id=message.guild.id,
+            message_id=message.id,
+        )
+        if not reward.get("success"):
+            if reward.get("reason") == "already_claimed" and reward.get("message_id") == str(message.id):
+                amount = int(float(reward.get("amount", 0) or 0))
+                emoji = PRAISE_REWARD_EMOJIS.get(amount)
+                if emoji and not any(str(reaction.emoji) == emoji for reaction in message.reactions):
+                    try:
+                        await message.add_reaction(emoji)
+                    except discord.HTTPException:
+                        pass
+            return False
+
+        amount = int(float(reward.get("amount", 0) or 0))
+        emoji = PRAISE_REWARD_EMOJIS.get(amount)
+        if emoji:
+            try:
+                await message.add_reaction(emoji)
+            except discord.HTTPException:
+                pass
+        marker = "定期扫描补发" if recovered else "即时奖励"
+        print(
+            f"🥚 [蛋壳系统] {message.author.name} 赞美奇米蛋{marker} "
+            f"+{format_shells(amount)} 蛋壳 (Message {message.id})"
+        )
+        return True
+
+    @tasks.loop(minutes=5)
+    async def praise_reward_rescan(self):
+        channel = self.bot.get_channel(PRAISE_KIMI_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(PRAISE_KIMI_CHANNEL_ID)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+
+        today_cn = datetime.datetime.now(config.TZ_CN).date()
+        after_cn = datetime.datetime.combine(today_cn, datetime.time.min, tzinfo=config.TZ_CN)
+        after_utc = after_cn.astimezone(datetime.timezone.utc)
+        try:
+            async for message in channel.history(limit=None, after=after_utc, oldest_first=True):
+                await self._reward_praise_message(message, recovered=True)
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"[蛋壳系统] 赞美奇米蛋补发扫描失败: {error}")
+
+    @praise_reward_rescan.before_loop
+    async def before_praise_reward_rescan(self):
+        await self.bot.wait_until_ready()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -75,22 +146,7 @@ class PointListener(commands.Cog):
             message.channel.id == PRAISE_KIMI_CHANNEL_ID
             and message.content.strip() == PRAISE_KIMI_TRIGGER
         ):
-            reward = reward_daily_kimi_praise(
-                user_id=message.author.id,
-                guild_id=message.guild.id,
-                message_id=message.id,
-            )
-            if reward.get("success"):
-                amount = int(float(reward.get("amount", 0) or 0))
-                emoji = PRAISE_REWARD_EMOJIS.get(amount)
-                if emoji:
-                    try:
-                        await message.add_reaction(emoji)
-                    except discord.HTTPException:
-                        pass
-                print(
-                    f"🥚 [蛋壳系统] {message.author.name} 赞美奇米蛋奖励 +{format_shells(amount)} 蛋壳 (Message {message.id})"
-                )
+            await self._reward_praise_message(message)
             return
 
         now = time.time()

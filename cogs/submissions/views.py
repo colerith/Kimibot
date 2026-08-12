@@ -39,6 +39,15 @@ TYPE_OPTIONS = ["sfw", "nsfw"]
 COMMENTS_PER_PAGE = 10
 CONTENT_COLLAPSE_LIMIT = 350
 
+RECOMMENDATION_DOMAIN_COLORS = {
+    "酒馆好物": 0xE67E22,
+    "书籍安利": 0x8E6E53,
+    "影视安利": 0x9B59B6,
+    "游戏安利": 0x5865F2,
+    "便利生活": 0x2ECC71,
+    "其他类型": 0x95A5A6,
+}
+
 
 def _paragraph_style():
     text_style = getattr(discord, "TextStyle", None)
@@ -179,9 +188,14 @@ def build_submission_embed(record: dict) -> discord.Embed:
     content_type = str(fields.get("content_type", "sfw")).lower()
     is_nsfw = content_type == "nsfw"
     title = fields.get("title") or fields.get("target") or "未命名投稿"
+    if kind == KIND_RECOMMENDATION:
+        domain = str(fields.get("domain", "其他类型"))
+        embed_color = RECOMMENDATION_DOMAIN_COLORS.get(domain, RECOMMENDATION_DOMAIN_COLORS["其他类型"])
+    else:
+        embed_color = 0xF5C542 if kind != KIND_BUG else 0xFF9E80
     embed = discord.Embed(
         title=f"🥚 {_kind_label(kind)}投稿 · {_spoiler(str(title), is_nsfw)}",
-        color=0xF5C542 if kind != KIND_BUG else 0xFF9E80,
+        color=embed_color,
     )
     embed.add_field(name="投稿人", value=f"<@{record.get('author_id')}>", inline=True)
     embed.add_field(name="状态", value=record.get("status", "open"), inline=True)

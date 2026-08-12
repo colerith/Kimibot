@@ -1097,6 +1097,10 @@ class RoleClaimView(discord.ui.View):
     async def shells_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
 
         summary = get_user_summary(interaction.user.id, interaction.guild_id)
         text = (
@@ -1105,14 +1109,22 @@ class RoleClaimView(discord.ui.View):
             f"今日有效发言：**{summary['daily_msg_count']}** 条\n\n"
             f"{_rules_text()}"
         )
-        await interaction.response.send_message(text, ephemeral=True)
+        await interaction.followup.send(text, ephemeral=True)
 
     @discord.ui.button(label="使用帮助", style=discord.ButtonStyle.secondary, emoji="❔", custom_id="role_main_shell_help", row=0)
     async def shell_help_callback(self, button, interaction: discord.Interaction):
-        await interaction.response.send_message(embed=build_shell_help_embed(), ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        await interaction.followup.send(embed=build_shell_help_embed(), ephemeral=True)
 
     @discord.ui.button(label="小蛋换装", style=discord.ButtonStyle.success, emoji="🎨", custom_id="role_main_start", row=1)
     async def start_decor_callback(self, button, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         data = load_role_data()
         claimable_ids = set(data.get("claimable_roles", []))
         lottery_ids = set(data.get("lottery_roles", []))
@@ -1148,7 +1160,7 @@ class RoleClaimView(discord.ui.View):
                 selectable_roles.append(role)
 
         if not selectable_roles:
-            return await interaction.response.send_message("⚠️ 现在好像还没有任何可用的装饰品呢！", ephemeral=True)
+            return await interaction.followup.send("⚠️ 现在好像还没有任何可用的装饰品呢！", ephemeral=True)
 
         # 4. 构建当前状态文本，分别显示
         user_current_claimable = [r.name for r in interaction.user.roles if r.id in claimable_ids]
@@ -1183,22 +1195,30 @@ class RoleClaimView(discord.ui.View):
             color=0xFFB6C1
         )
         # 传入合并后的列表
-        await interaction.response.send_message(embed=embed, view=RoleSelectionView(selectable_roles), ephemeral=True)
+        await interaction.followup.send(embed=embed, view=RoleSelectionView(selectable_roles), ephemeral=True)
 
     @discord.ui.button(label="加速购买", style=discord.ButtonStyle.secondary, emoji="⚡", custom_id="role_main_acceleration", row=1)
     async def acceleration_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         if has_verification_role(interaction.user):
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "你已经通过验证答题啦，不需要再购买加速卡。",
                 ephemeral=True,
             )
         embed = build_acceleration_embed(interaction.user, interaction.guild_id)
-        await interaction.response.send_message(embed=embed, view=AccelerationShopView(interaction.user.id), ephemeral=True)
+        await interaction.followup.send(embed=embed, view=AccelerationShopView(interaction.user.id), ephemeral=True)
     
     @discord.ui.button(label="身份抽奖", style=discord.ButtonStyle.primary, emoji="🎲", custom_id="role_main_lottery", row=1)
     async def lottery_entry_callback(self, button, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         data = load_role_data()
         cfg = get_lottery_config(data)
         single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 1.0)))))
@@ -1243,19 +1263,27 @@ class RoleClaimView(discord.ui.View):
                         f"- 🧵 社区发帖：每帖 +{format_shells(post_reward)}，每日最多 +{format_shells(post_daily_cap)}\n",
             color=discord.Color.purple()
         )
-        await interaction.response.send_message(embed=embed, view=RoleLotteryView(), ephemeral=True)
+        await interaction.followup.send(embed=embed, view=RoleLotteryView(), ephemeral=True)
 
     @discord.ui.button(label="身份兑换", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_redeem", row=1)
     async def redeem_entry_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         embed = build_redeem_shop_embed(interaction.guild, interaction.user.id)
-        await interaction.response.send_message(embed=embed, view=RedeemShopView(interaction.guild), ephemeral=True)
+        await interaction.followup.send(embed=embed, view=RedeemShopView(interaction.guild), ephemeral=True)
 
     @discord.ui.button(label="每日签到", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="role_main_sign_in", row=0)
     async def main_sign_in_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
 
         reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
         result = sign_in_user(interaction.user.id, interaction.guild_id, reward=reward)
@@ -1294,7 +1322,7 @@ class RoleClaimView(discord.ui.View):
                 f"{_rules_text()}"
             )
 
-        await interaction.response.send_message(text, ephemeral=True)
+        await interaction.followup.send(text, ephemeral=True)
 
     @discord.ui.button(label="一键移除", style=discord.ButtonStyle.danger, emoji="🧹", custom_id="role_main_remove_all", row=1)
     async def remove_all_callback(self, button, interaction: discord.Interaction):

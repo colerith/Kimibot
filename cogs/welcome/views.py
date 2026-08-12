@@ -41,7 +41,10 @@ class QuizStartView(discord.ui.View):
 
     @discord.ui.button(label="📝 点击开始答题", style=discord.ButtonStyle.success, custom_id="quiz_entry_start")
     async def start_quiz(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         user_id = interaction.user.id
 
         if has_verification_role(interaction.user):

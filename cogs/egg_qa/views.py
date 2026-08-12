@@ -120,6 +120,26 @@ class EggQAPanelView(discord.ui.View):
         await interaction.response.send_modal(EggQuestionModal())
 
 
+class EggQAEntryView(discord.ui.View):
+    """固定频道中的轻量入口；完整面板仅对点击者可见。"""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="打开提问面板",
+        style=discord.ButtonStyle.primary,
+        emoji="🙋‍♀️",
+        custom_id="egg_qa_entry_open",
+    )
+    async def open_panel(self, button, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            embed=build_panel_embed(),
+            view=EggQAPanelView(),
+            ephemeral=True,
+        )
+
+
 def build_panel_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🥚 小蛋问答站",
@@ -140,43 +160,79 @@ def build_panel_embed() -> discord.Embed:
     return embed
 
 
+def build_entry_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🙋‍♀️ 小蛋问答入口",
+        description="有问题想问大家？点击下方按钮打开提问面板。",
+        color=0xF3B83F,
+    )
+    embed.set_footer(text="完整面板仅你自己可见 · 本入口会自动保持在频道底部")
+    return embed
+
+
+def _is_egg_qa_panel_message(message: discord.Message) -> bool:
+    if not message.embeds:
+        return False
+    return message.embeds[0].title in {"🙋‍♀️ 小蛋问答入口", "🥚 小蛋问答站"}
+
+
 async def deploy_egg_qa_panel(channel) -> discord.Message:
-    """发送或原地更新指定频道的小蛋问答面板。"""
+    """发送或原地更新指定频道的轻量问答入口，并清理重复入口。"""
     panel = get_panel(channel.id)
+    target = None
     if panel and panel.get("message_id"):
         try:
-            message = await channel.fetch_message(int(panel["message_id"]))
-            await message.edit(embed=build_panel_embed(), view=EggQAPanelView())
-            return message
+            target = await channel.fetch_message(int(panel["message_id"]))
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
-    # 兼容升级前已发送但尚未记录的面板，避免升级后重复发送。
+    duplicates = []
     try:
         async for old_message in channel.history(limit=200):
-            if not old_message.embeds or old_message.embeds[0].title != "🥚 小蛋问答站":
+            if not _is_egg_qa_panel_message(old_message):
                 continue
-            await old_message.edit(embed=build_panel_embed(), view=EggQAPanelView())
-            save_panel(channel.id, old_message.id)
-            return old_message
+            if target is None:
+                target = old_message
+            elif old_message.id != target.id:
+                duplicates.append(old_message)
     except (AttributeError, discord.Forbidden, discord.HTTPException):
         pass
 
-    message = await channel.send(embed=build_panel_embed(), view=EggQAPanelView())
-    save_panel(channel.id, message.id)
-    return message
-
-
-async def refresh_bottom_egg_qa_panel(channel) -> discord.Message:
-    """删除旧面板后重发，使问答面板保持在固定频道底部。"""
-    panel = get_panel(channel.id)
-    if panel and panel.get("message_id"):
+    for duplicate in duplicates:
         try:
-            message = await channel.fetch_message(int(panel["message_id"]))
-            await message.delete(reason="刷新置底小蛋问答面板")
+            await duplicate.delete(reason="清理重复小蛋问答入口")
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
-    message = await channel.send(embed=build_panel_embed(), view=EggQAPanelView())
+    if target is None:
+        target = await channel.send(embed=build_entry_embed(), view=EggQAEntryView())
+    else:
+        await target.edit(embed=build_entry_embed(), view=EggQAEntryView())
+    save_panel(channel.id, target.id)
+    return target
+
+
+async def refresh_bottom_egg_qa_panel(channel) -> discord.Message:
+    """清理所有旧入口后只重发一个，确保入口位于频道底部。"""
+    old_messages = []
+    try:
+        async for message in channel.history(limit=200):
+            if _is_egg_qa_panel_message(message):
+                old_messages.append(message)
+    except (AttributeError, discord.Forbidden, discord.HTTPException):
+        panel = get_panel(channel.id)
+        if panel and panel.get("message_id"):
+            try:
+                old_messages.append(await channel.fetch_message(int(panel["message_id"])))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+    for message in old_messages:
+        try:
+            await message.delete(reason="刷新置底小蛋问答入口")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    message = await channel.send(embed=build_entry_embed(), view=EggQAEntryView())
     save_panel(channel.id, message.id)
     return message
