@@ -165,8 +165,8 @@ def build_panel_embed() -> discord.Embed:
         ),
         color=PANEL_COLOR,
     )
-    embed.add_field(name="📦 我要repo", value="提交想 repo 的标题、类型与内容，仅限电波系的作品哦", inline=False)
-    embed.add_field(name="🐞 我要捉虫", value="提交问题对象与详细描述。", inline=False)
+    embed.add_field(name="📦 我要repo", value="提交想 repo 的标题、类型与内容，仅限电波系的作品哦。", inline=False)
+    embed.add_field(name="🐞 我要捉虫", value="提交问题对象与详细描述，仅限电波系的作品哦。", inline=False)
     embed.add_field(name="🌟 我要安利", value="分享好物、书籍、影视、游戏或生活经验。", inline=False)
     embed.add_field(name="🗂️ 管理投稿", value="修改或删除自己发过的投稿。", inline=False)
     embed.set_footer(text="每日投稿次数按北京时间刷新。")
