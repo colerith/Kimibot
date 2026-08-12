@@ -3,6 +3,7 @@ import random
 import discord
 
 from .storage import (
+    DAILY_REPLY_REWARD_CAP,
     DAILY_QUESTION_LIMIT,
     cancel_question,
     create_question,
@@ -124,7 +125,8 @@ def build_panel_embed() -> discord.Embed:
             "**参与回答**　对问题卡片使用 Discord 自带的 **回复** 功能。\n"
             "**领取彩蛋**　首次有效回答可随机获得 **3～15 蛋壳**，大奖更稀有。\n\n"
             "**自问自答**　提问者自己回复问题时，可随机获得 **1～3 蛋壳**。\n\n"
-            f"> 每位用户每天最多发起 **{DAILY_QUESTION_LIMIT} 次**；每题每人只可领取一次奖励。"
+            f"> 每位用户每天最多发起 **{DAILY_QUESTION_LIMIT} 次**；每题每人只可领取一次奖励；"
+            f"每天回答奖励最多 **{DAILY_REPLY_REWARD_CAP} 蛋壳**。"
         ),
         color=0xF3B83F,
     )

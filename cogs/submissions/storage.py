@@ -32,6 +32,7 @@ def _empty_data() -> dict:
     return {
         "version": 1,
         "panel_info": {},
+        "bottom_entry_info": {},
         "submissions": {},
     }
 
@@ -89,6 +90,8 @@ def load_data() -> dict:
         data["submissions"] = {}
     if not isinstance(data.get("panel_info"), dict):
         data["panel_info"] = {}
+    if not isinstance(data.get("bottom_entry_info"), dict):
+        data["bottom_entry_info"] = {}
     return data
 
 
@@ -106,6 +109,16 @@ def set_panel_info(channel_id: int, message_id: int) -> None:
 
 def get_panel_info() -> dict:
     return load_data().get("panel_info", {})
+
+
+def set_bottom_entry_info(channel_id: int, message_id: int) -> None:
+    data = load_data()
+    data["bottom_entry_info"] = {"channel_id": str(channel_id), "message_id": str(message_id)}
+    save_data(data)
+
+
+def get_bottom_entry_info() -> dict:
+    return load_data().get("bottom_entry_info", {})
 
 
 def create_submission(

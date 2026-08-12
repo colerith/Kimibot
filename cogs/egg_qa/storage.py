@@ -7,10 +7,11 @@ from datetime import datetime, timedelta, timezone
 DATA_FILE = "data/egg_qa.json"
 TZ_CN = timezone(timedelta(hours=8))
 DAILY_QUESTION_LIMIT = 3
+DAILY_REPLY_REWARD_CAP = 15
 
-# 低额奖励常见，高额奖励逐渐稀有。
+# 3～5 蛋壳占绝大多数；超过 5 后快速衰减，10～15 为极稀有彩蛋。
 REWARD_AMOUNTS = list(range(3, 16))
-REWARD_WEIGHTS = [60, 50, 42, 34, 26, 20, 16, 12, 8, 6, 4, 2, 1]
+REWARD_WEIGHTS = [6000, 3000, 900, 60, 25, 10, 4, 2, 1, 1, 1, 1, 1]
 SELF_ANSWER_AMOUNTS = [1, 2, 3]
 SELF_ANSWER_WEIGHTS = [6, 3, 1]
 
@@ -132,15 +133,34 @@ def claim_reply_reward(
     if uid in rewards:
         return None
 
+    today = _today()
+    daily_total = 0
+    for question in data["questions"].values():
+        if not isinstance(question, dict) or question.get("guild_id") != record.get("guild_id"):
+            continue
+        for old_reward in question.get("rewards", {}).values():
+            if not isinstance(old_reward, dict) or old_reward.get("user_id") != uid:
+                continue
+            reward_date = str(old_reward.get("date") or old_reward.get("created_at", ""))[:10]
+            if reward_date == today:
+                daily_total += max(0, int(old_reward.get("amount", 0) or 0))
+
+    remaining = max(0, DAILY_REPLY_REWARD_CAP - daily_total)
+    if remaining <= 0:
+        return None
+
     if is_self_answer:
         amount = random.choices(SELF_ANSWER_AMOUNTS, weights=SELF_ANSWER_WEIGHTS, k=1)[0]
     else:
         amount = random.choices(REWARD_AMOUNTS, weights=REWARD_WEIGHTS, k=1)[0]
+    amount = min(amount, remaining)
     reward = {
         "user_id": uid,
         "reply_message_id": str(reply_message_id),
         "amount": amount,
         "self_answer": bool(is_self_answer),
+        "date": today,
+        "daily_total_after": daily_total + amount,
         "created_at": _now_iso(),
     }
     rewards[uid] = reward

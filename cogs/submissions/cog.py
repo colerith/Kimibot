@@ -5,7 +5,16 @@ import io
 import discord
 from discord.ext import commands
 
-from .views import OwnerReplyView, RecommendationActionView, SubmissionPanelView, refresh_all_submission_panels
+import config
+
+from .views import (
+    OwnerReplyView,
+    RecommendationActionView,
+    SubmissionBottomEntryView,
+    SubmissionPanelView,
+    refresh_all_submission_panels,
+    refresh_bottom_submission_entry,
+)
 
 
 class CachedSubmissionAttachment:
@@ -28,6 +37,7 @@ class SubmissionsCog(commands.Cog):
         self.bot = bot
         self.attachment_sessions = {}
         self.submission_panels_refreshed = False
+        self.bottom_entry_refresh_task = None
 
     def _session_key(self, user_id: int, channel_id: int):
         return (user_id, channel_id)
@@ -111,8 +121,50 @@ class SubmissionsCog(commands.Cog):
         self.bot.add_view(SubmissionPanelView())
         self.bot.add_view(OwnerReplyView())
         self.bot.add_view(RecommendationActionView())
+        self.bot.add_view(SubmissionBottomEntryView())
         print("[Submissions] Cog loaded and persistent views registered.")
         self.bot.loop.create_task(self._refresh_submission_panels_on_ready())
+        self.bot.loop.create_task(self._initialize_bottom_entry())
+
+    async def _get_bottom_entry_channel(self):
+        cfg = getattr(config, "SUBMISSIONS", {})
+        channel_id = int(cfg.get("BOTTOM_ENTRY_CHANNEL_ID", 0) or 0) if isinstance(cfg, dict) else 0
+        if not channel_id:
+            return None
+        channel = self.bot.get_channel(channel_id)
+        if channel:
+            return channel
+        try:
+            return await self.bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    async def _initialize_bottom_entry(self):
+        await self.bot.wait_until_ready()
+        channel = await self._get_bottom_entry_channel()
+        if not channel:
+            print("[Submissions] bottom-entry channel not found.")
+            return
+        try:
+            await refresh_bottom_submission_entry(channel)
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"[Submissions] bottom-entry initialization failed: {error}")
+
+    async def _delayed_refresh_bottom_entry(self):
+        try:
+            await asyncio.sleep(1.5)
+            channel = await self._get_bottom_entry_channel()
+            if channel:
+                await refresh_bottom_submission_entry(channel)
+        except asyncio.CancelledError:
+            pass
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"[Submissions] bottom-entry refresh failed: {error}")
+
+    def _schedule_bottom_entry_refresh(self):
+        if self.bottom_entry_refresh_task and not self.bottom_entry_refresh_task.done():
+            self.bottom_entry_refresh_task.cancel()
+        self.bottom_entry_refresh_task = self.bot.loop.create_task(self._delayed_refresh_bottom_entry())
 
     async def _refresh_submission_panels_on_ready(self):
         if self.submission_panels_refreshed:
@@ -128,6 +180,8 @@ class SubmissionsCog(commands.Cog):
             print(f"[Submissions] submission-panel-refresh-failed: {e}")
 
     def cog_unload(self):
+        if self.bottom_entry_refresh_task:
+            self.bottom_entry_refresh_task.cancel()
         for session in self.attachment_sessions.values():
             task = session.get("task")
             if task:
@@ -136,7 +190,15 @@ class SubmissionsCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.attachments:
+        if message.author.bot:
+            return
+
+        cfg = getattr(config, "SUBMISSIONS", {})
+        bottom_channel_id = int(cfg.get("BOTTOM_ENTRY_CHANNEL_ID", 0) or 0) if isinstance(cfg, dict) else 0
+        if message.channel.id == bottom_channel_id:
+            self._schedule_bottom_entry_refresh()
+
+        if not message.attachments:
             return
 
         key = self._session_key(message.author.id, message.channel.id)
