@@ -36,6 +36,28 @@ class PreQuizShortAnswerModal(discord.ui.Modal):
         await self.parent_view.finalize(interaction, str(self.answer_input.value or "").strip())
 
 
+class PreQuizShortAnswerView(discord.ui.View):
+    """第 5 题完成后的简答入口；Modal 打开失败时用户可以重试。"""
+
+    def __init__(self, parent_view: "PreQuizQuestionView"):
+        super().__init__(timeout=600)
+        self.parent_view = parent_view
+
+    @discord.ui.button(label="填写简答题", emoji="✍️", style=discord.ButtonStyle.primary)
+    async def open_short_answer(self, button, interaction: discord.Interaction):
+        if interaction.user.id != self.parent_view.user_id:
+            try:
+                await interaction.response.send_message("这不是你的预答题面板。", ephemeral=True)
+            except discord.NotFound:
+                pass
+            return
+        try:
+            await interaction.response.send_modal(PreQuizShortAnswerModal(self.parent_view))
+        except discord.NotFound:
+            # 交互到达 Bot 时已过期；保留按钮供用户再次点击。
+            return
+
+
 class PreQuizAnswerSelect(discord.ui.Select):
     def __init__(self, parent_view: "PreQuizQuestionView", index: int, question: dict):
         self.parent_view = parent_view
@@ -57,7 +79,15 @@ class PreQuizAnswerSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.parent_view.user_id:
-            return await interaction.response.send_message("这不是你的预答题面板。", ephemeral=True)
+            try:
+                await interaction.response.send_message("这不是你的预答题面板。", ephemeral=True)
+            except discord.NotFound:
+                pass
+            return
+        try:
+            await interaction.response.defer()
+        except discord.NotFound:
+            return
         self.parent_view.answers[self.index] = self.values[0]
         next_index = self.index + 1
         if next_index < len(self.parent_view.questions["multiple_choice"]):
@@ -68,9 +98,21 @@ class PreQuizAnswerSelect(discord.ui.Select):
                 self.parent_view.answers,
                 test_mode=self.parent_view.test_mode,
             )
-            await interaction.response.edit_message(embed=view.build_embed(), view=view)
+            await interaction.edit_original_response(embed=view.build_embed(), view=view)
         else:
-            await interaction.response.send_modal(PreQuizShortAnswerModal(self.parent_view))
+            embed = discord.Embed(
+                title="🥚 小蛋预答题 5/5",
+                description=(
+                    "✅ 5 道客观题已经全部作答。\n\n"
+                    "点击下方按钮填写最后一道简答题并提交结果。"
+                ),
+                color=STYLE["KIMI_YELLOW"],
+            )
+            embed.set_footer(text="如果简答题窗口没有弹出，可以再次点击按钮。")
+            await interaction.edit_original_response(
+                embed=embed,
+                view=PreQuizShortAnswerView(self.parent_view),
+            )
 
 
 class PreQuizQuestionView(discord.ui.View):
@@ -94,8 +136,12 @@ class PreQuizQuestionView(discord.ui.View):
     async def finalize(self, interaction: discord.Interaction, short_answer: str):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         if has_verification_role(interaction.user) and not self.test_mode:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "你已经通过验证答题啦，不需要再参加预答题。",
                 ephemeral=True,
             )
@@ -104,12 +150,12 @@ class PreQuizQuestionView(discord.ui.View):
             access = get_prequiz_access(interaction.user.id, interaction.guild_id)
             if not access["allowed"]:
                 if access["reason"] == "passed":
-                    return await interaction.response.send_message(
+                    return await interaction.followup.send(
                         "你已经全对通过预答题并领取过奖励啦，每个用户只能领取一次。",
                         ephemeral=True,
                     )
                 if access["reason"] == "cooldown":
-                    return await interaction.response.send_message(
+                    return await interaction.followup.send(
                         f"上次没有全对，需要等待 **{_format_cooldown(access['remaining_seconds'])}** 后再试。",
                         ephemeral=True,
                     )
@@ -177,7 +223,7 @@ class PreQuizQuestionView(discord.ui.View):
         else:
             desc.append("没有全对，5 分钟后可以重新答题。")
         embed.description = "\n".join(desc)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     def build_embed(self) -> discord.Embed:
         index = self.index
@@ -208,15 +254,19 @@ class PreQuizPanelView(discord.ui.View):
     async def start_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         if has_verification_role(interaction.user):
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "你已经通过验证答题啦，不需要再参加预答题。",
                 ephemeral=True,
             )
         access = get_prequiz_access(interaction.user.id, interaction.guild_id)
         if not access["allowed"]:
             if access["reason"] == "passed":
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     "你已经全对通过预答题并领取过奖励啦，每个用户只能领取一次。",
                     ephemeral=True,
                 )
@@ -224,17 +274,17 @@ class PreQuizPanelView(discord.ui.View):
                 remaining_text = _format_cooldown(access["remaining_seconds"])
                 attempt = access.get("attempt", {})
                 correct = int(attempt.get("score", 0) or 0) // 20
-                return await interaction.response.send_message(
+                return await interaction.followup.send(
                     f"上次没有全对（客观题 **{correct}/5**），需要等待 **{remaining_text}** 后再试。",
                     ephemeral=True,
                 )
 
         questions = draw_prequiz_questions()
         if not questions:
-            return await interaction.response.send_message("题库数量不足，请联系管理员检查预答题题库。", ephemeral=True)
+            return await interaction.followup.send("题库数量不足，请联系管理员检查预答题题库。", ephemeral=True)
 
         view = PreQuizQuestionView(interaction.user.id, questions)
-        await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
+        await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 def build_prequiz_panel_embed() -> discord.Embed:
