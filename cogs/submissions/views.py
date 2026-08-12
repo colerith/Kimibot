@@ -40,13 +40,17 @@ COMMENTS_PER_PAGE = 10
 CONTENT_COLLAPSE_LIMIT = 350
 
 RECOMMENDATION_DOMAIN_COLORS = {
-    "酒馆好物": 0xE67E22,
-    "书籍安利": 0x8E6E53,
-    "影视安利": 0x9B59B6,
-    "游戏安利": 0x5865F2,
-    "便利生活": 0x2ECC71,
-    "其他类型": 0x95A5A6,
+    # 图一自然系配色
+    "酒馆好物": 0xB66E4A,  # Warm Wood
+    "书籍安利": 0xFFF5E6,  # Sunlit Linen
+    "影视安利": 0xFFCDB0,  # Peach Blossom
+    "游戏安利": 0x87A6BF,  # Harbor Sky
+    "便利生活": 0xB9D4CF,  # Ocean Breeze
+    "其他类型": 0xFFD47F,  # Honeycomb
 }
+
+REPO_SUBMISSION_COLOR = 0x6C8D5D  # 图二 Irish Charm
+BUG_SUBMISSION_COLOR = 0x7359C0   # 图二 Fuchsia Blue
 
 
 def _paragraph_style():
@@ -191,8 +195,10 @@ def build_submission_embed(record: dict) -> discord.Embed:
     if kind == KIND_RECOMMENDATION:
         domain = str(fields.get("domain", "其他类型"))
         embed_color = RECOMMENDATION_DOMAIN_COLORS.get(domain, RECOMMENDATION_DOMAIN_COLORS["其他类型"])
+    elif kind == KIND_BUG:
+        embed_color = BUG_SUBMISSION_COLOR
     else:
-        embed_color = 0xF5C542 if kind != KIND_BUG else 0xFF9E80
+        embed_color = REPO_SUBMISSION_COLOR
     embed = discord.Embed(
         title=f"🥚 {_kind_label(kind)}投稿 · {_spoiler(str(title), is_nsfw)}",
         color=embed_color,
