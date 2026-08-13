@@ -1129,8 +1129,9 @@ def build_shell_help_embed() -> discord.Embed:
 def build_role_panel_embed(
     guild: discord.Guild,
     user_avatar_url: str | None = None,
+    signin_summary: dict | None = None,
 ) -> discord.Embed:
-    summary = get_daily_signin_summary(guild.id)
+    summary = signin_summary if signin_summary is not None else get_daily_signin_summary(guild.id)
     top10 = summary.get("top10", [])
     if top10:
         top_lines = [
@@ -1165,7 +1166,12 @@ def build_role_panel_embed(
 
 
 async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None = None):
-    data = load_role_data()
+    # 面板刷新包含两份 JSON 读取。放到工作线程，避免签到成功后再次阻塞
+    # Discord 事件循环；并把签到汇总直接传给 embed，防止重复读积分文件。
+    data, signin_summary = await asyncio.gather(
+        asyncio.to_thread(load_role_data),
+        asyncio.to_thread(get_daily_signin_summary, guild.id),
+    )
     panel_info = data.get("panel_info", {})
     channel_id = panel_info.get("channel_id")
     message_id = panel_info.get("message_id")
@@ -1179,7 +1185,7 @@ async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None =
     try:
         message = await channel.fetch_message(int(message_id))
         await message.edit(
-            embed=build_role_panel_embed(guild, user_avatar_url),
+            embed=build_role_panel_embed(guild, user_avatar_url, signin_summary),
             view=RoleClaimView(),
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -1392,12 +1398,21 @@ class RoleClaimView(discord.ui.View):
             return
 
         reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
-        result = sign_in_user(interaction.user.id, interaction.guild_id, reward=reward)
-        if result.get("success"):
-            await refresh_role_panel(
-                interaction.guild,
-                interaction.client.user.display_avatar.url if interaction.client.user else None,
+        try:
+            result = await asyncio.to_thread(
+                sign_in_user,
+                interaction.user.id,
+                interaction.guild_id,
+                reward,
             )
+        except Exception as error:
+            print(f"[小蛋报到] 签到结算失败: user={interaction.user.id} error={error}")
+            return await interaction.followup.send(
+                "❌ 报到结算失败，请稍后再试；本次不会重复扣除或发放蛋壳。",
+                ephemeral=True,
+            )
+
+        if result.get("success"):
             event = result.get("event", {})
             event_delta = float(result.get("event_delta", 0))
             event_sign = "+" if event_delta > 0 else ""
@@ -1420,15 +1435,25 @@ class RoleClaimView(discord.ui.View):
                 f"{_rules_text()}"
             )
         else:
-            summary = get_user_summary(interaction.user.id, interaction.guild_id)
             text = (
                 f"🕒 今日已经报到过啦。\n"
-                f"连续报到：**{summary['streak_days']}** 天\n"
+                f"连续报到：**{result['streak_days']}** 天\n"
                 f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳\n\n"
                 f"{_rules_text()}"
             )
 
         await interaction.followup.send(text, ephemeral=True)
+
+        # 先把结算结果回复给用户，再刷新公开榜单。Discord 的消息获取或编辑
+        # 即使偶发变慢，也不会再表现为签到按钮长时间无响应。
+        if result.get("success"):
+            try:
+                await refresh_role_panel(
+                    interaction.guild,
+                    interaction.client.user.display_avatar.url if interaction.client.user else None,
+                )
+            except (discord.HTTPException, OSError, ValueError) as error:
+                print(f"[小蛋报到] 公开面板刷新失败: guild={interaction.guild_id} error={error}")
 
     @discord.ui.button(label="一键移除", style=discord.ButtonStyle.danger, emoji="🧹", custom_id="role_main_remove_all", row=1)
     async def remove_all_callback(self, button, interaction: discord.Interaction):
