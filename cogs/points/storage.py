@@ -4,7 +4,9 @@ import json
 import math
 import os
 import random
+import threading
 from datetime import datetime, timezone, timedelta
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,16 @@ TZ_CN = timezone(timedelta(hours=8))
 
 SHELL_PRECISION = 1
 LEGACY_POINTS_TO_SHELLS = 0.1
+_POINTS_DATA_LOCK = threading.RLock()
+
+
+def _locked_points_data(func):
+    """Serialize complete read/modify/write operations on user_points.json."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with _POINTS_DATA_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 def _empty_points_data() -> dict:
@@ -211,6 +223,7 @@ def save_points_data(data):
         json.dump(normalized, f, indent=4, ensure_ascii=False)
 
 
+@_locked_points_data
 def modify_user_points(
     user_id: int,
     amount: float,
@@ -243,6 +256,7 @@ def modify_user_points(
     return new_shells
 
 
+@_locked_points_data
 def get_user_points(user_id: int, guild_id: int | None = None) -> float:
     """兼容旧入口：获取用户蛋壳余额。"""
     data = load_points_data()
@@ -250,6 +264,7 @@ def get_user_points(user_id: int, guild_id: int | None = None) -> float:
     return _round_shells(record.get("shells", 0))
 
 
+@_locked_points_data
 def get_user_summary(user_id: int, guild_id: int | None = None) -> dict:
     data = load_points_data()
     record, _ = _ensure_user_record(data, user_id, guild_id)
@@ -286,6 +301,7 @@ def get_acceleration_tiers() -> list[dict]:
     ]
 
 
+@_locked_points_data
 def get_acceleration_status(user_id: int, guild_id: int | None = None) -> dict:
     data = load_points_data()
     record, _ = _ensure_user_record(data, user_id, guild_id)
@@ -305,6 +321,7 @@ def get_acceleration_status(user_id: int, guild_id: int | None = None) -> dict:
     }
 
 
+@_locked_points_data
 def purchase_acceleration_card(user_id: int, guild_id: int, tier_id: str) -> dict:
     tiers = {tier["id"]: tier for tier in get_acceleration_tiers()}
     tier = tiers.get(tier_id)
@@ -467,6 +484,7 @@ def _register_daily_rank(data: dict, guild_id: int, user_id: int, today: str) ->
     return signers.index(uid) + 1
 
 
+@_locked_points_data
 def get_daily_signin_summary(guild_id: int) -> dict:
     data = load_points_data()
     today = _today()
@@ -488,6 +506,7 @@ def get_daily_signin_summary(guild_id: int) -> dict:
     }
 
 
+@_locked_points_data
 def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
     """每日报到，返回详细蛋壳结算结果。"""
     data = load_points_data()
@@ -560,6 +579,7 @@ def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
     }
 
 
+@_locked_points_data
 def record_message_activity(user_id: int, guild_id: int) -> int:
     """记录每日有效发言次数，不直接发放蛋壳。"""
     data = load_points_data()
@@ -583,6 +603,7 @@ def add_message_points(
     return record_message_activity(user_id, guild_id)
 
 
+@_locked_points_data
 def add_post_points(
     user_id: int,
     guild_id: int,
@@ -626,6 +647,7 @@ def add_post_points(
     return actual_delta
 
 
+@_locked_points_data
 def reward_daily_forum_post(
     user_id: int,
     guild_id: int,
@@ -693,6 +715,7 @@ def _get_praise_weights() -> list[int]:
     return weights
 
 
+@_locked_points_data
 def reward_daily_kimi_praise(user_id: int, guild_id: int, message_id: int) -> dict:
     """每日一次赞美奇米蛋奖励，奖励 1-9 蛋壳且高额更稀有。"""
     data = load_points_data()

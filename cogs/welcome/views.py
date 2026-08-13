@@ -132,13 +132,19 @@ class QuizQuestionView(discord.ui.View):
         return embed
 
     async def select_callback(self, interaction: discord.Interaction):
-
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("这不是你的考卷！", ephemeral=True)
 
+        # Discord 要求组件交互在约 3 秒内完成首次确认。先确认交互，避免
+        # 事件循环短暂繁忙时，后面的 edit_message 收到 10062。
+        try:
+            await interaction.response.defer()
+        except discord.NotFound:
+            return
+
         session = self.cog.sessions.get(self.user_id)
         if not session:
-             await interaction.response.edit_message(content="❌ 会话已超时或已结束，请重新开始。", view=None, embed=None)
+             await interaction.edit_original_response(content="❌ 会话已超时或已结束，请重新开始。", view=None, embed=None)
              return
 
         session["answers"][self.q_index] = interaction.data['values'][0]
@@ -152,6 +158,6 @@ class QuizQuestionView(discord.ui.View):
             view = QuizQuestionView(self.cog, self.user_id, next_index)
             embed = view.build_embed(next_index, next_q, remaining)
 
-            await interaction.response.edit_message(embed=embed, view=view)
+            await interaction.edit_original_response(embed=embed, view=view)
         else:
             await self.cog.finalize_quiz(interaction, self.user_id, is_timeout=False)

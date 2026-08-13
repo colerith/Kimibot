@@ -2,6 +2,7 @@
 
 import discord
 from discord.ext import commands, tasks
+import asyncio
 import datetime
 import time
 import re
@@ -68,6 +69,7 @@ class PointListener(commands.Cog):
         self.bot = bot
         self.user_cooldowns = {}
         self.praise_scanner_started = False
+        self.activity_write_lock = asyncio.Lock()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -158,13 +160,15 @@ class PointListener(commands.Cog):
             return
 
         self.user_cooldowns[message.author.id] = now
-        count = record_message_activity(
-            user_id=message.author.id,
-            guild_id=message.guild.id,
-        )
-        print(
-            f"🥚 [蛋壳系统] {message.author.name} 今日有效发言 {count} 条 (Guild {message.guild.id})"
-        )
+        # user_points.json 会随用户量增长。整文件读写不能占用 Discord 的
+        # asyncio 事件循环，否则同一时刻到达的按钮交互可能错过首次响应。
+        # 串行化写入也可避免两条并发消息互相覆盖数据。
+        async with self.activity_write_lock:
+            await asyncio.to_thread(
+                record_message_activity,
+                user_id=message.author.id,
+                guild_id=message.guild.id,
+            )
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):

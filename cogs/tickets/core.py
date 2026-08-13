@@ -85,12 +85,20 @@ class Tickets(commands.Cog):
     async def create_ticket_logic(self, interaction: discord.Interaction):
         user = interaction.user
 
+        # 必须在所有资格检查和频道扫描之前确认交互，否则繁忙时会超过
+        # Discord 的首次响应窗口并得到 10062 Unknown interaction。
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
         # [0] 并发锁检查：如果该用户正在创建中，直接阻止
         if user.id in self.creating_lock:
-            return await interaction.response.send_message("🚧 **正在处理中...**\n请不要频繁点击按钮哦，正在为你创建这里！", ephemeral=True)
+            return await interaction.followup.send("🚧 **正在处理中...**\n请不要频繁点击按钮哦，正在为你创建这里！", ephemeral=True)
 
         # 加锁
         self.creating_lock.add(user.id)
+        quota_deducted = False
 
         try:
             # 1. 检查暂停状态 (使用持久化数据)
@@ -133,13 +141,13 @@ class Tickets(commands.Cog):
 
                     # 只要返回，记得解锁
                     self.creating_lock.discard(user.id)
-                    return await interaction.response.send_message(f"🚫 **审核通道已暂时关闭**\n原因：{reason}\n{until_str}", ephemeral=True)
+                    return await interaction.followup.send(f"🚫 **审核通道已暂时关闭**\n原因：{reason}\n{until_str}", ephemeral=True)
 
             # 2. 检查时间
             now = datetime.datetime.now(QUOTA["TIMEZONE"])
             if not (17 <= now.hour < 23):
                 self.creating_lock.discard(user.id)
-                return await interaction.response.send_message(STRINGS["messages"]["err_time_limit"], ephemeral=True)
+                return await interaction.followup.send(STRINGS["messages"]["err_time_limit"], ephemeral=True)
 
             # 3. 检查资格
             user_roles = [r.id for r in interaction.user.roles]
@@ -149,7 +157,7 @@ class Tickets(commands.Cog):
 
             if not has_perm:
                 self.creating_lock.discard(user.id)
-                return await interaction.response.send_message(STRINGS["messages"]["err_perm_create"], ephemeral=True)
+                return await interaction.followup.send(STRINGS["messages"]["err_perm_create"], ephemeral=True)
 
             # 4. 检查重复 & 额度
             # 获取所有相关分类
@@ -159,7 +167,7 @@ class Tickets(commands.Cog):
 
             if not c1:
                 self.creating_lock.discard(user.id)
-                return await interaction.response.send_message("配置错误：找不到一审分类。", ephemeral=True)
+                return await interaction.followup.send("配置错误：找不到一审分类。", ephemeral=True)
 
             # 确定目标分类（处理容量50上限）
             target_category = c1
@@ -168,7 +176,7 @@ class Tickets(commands.Cog):
                     target_category = c1_extra
                 else:
                     self.creating_lock.discard(user.id)
-                    return await interaction.response.send_message("🚫 **无法创建工单**\n所有审核窗口都满员啦（50/50）！请稍后再试。", ephemeral=True)
+                    return await interaction.followup.send("🚫 **无法创建工单**\n所有审核窗口都满员啦（50/50）！请稍后再试。", ephemeral=True)
 
             # 严查是否已有频道：遍历所有可能存在的分类
             check_cats = [c1, c2, interaction.guild.get_channel(IDS["ARCHIVE_CHANNEL_ID"])]
@@ -184,20 +192,18 @@ class Tickets(commands.Cog):
                         # 再次确认不是误判（检查topic格式）
                         if f"创建者ID: {interaction.user.id}" in ch.topic:
                             self.creating_lock.discard(user.id)
-                            return await interaction.response.send_message(STRINGS["messages"]["err_already_has"].format(channel=ch.mention), ephemeral=True)
+                            return await interaction.followup.send(STRINGS["messages"]["err_already_has"].format(channel=ch.mention), ephemeral=True)
 
             # 检查额度
             q_data = load_quota_data()
             if q_data["daily_quota_left"] <= 0:
                 self.creating_lock.discard(user.id)
-                return await interaction.response.send_message(STRINGS["messages"]["err_quota_limit"], ephemeral=True)
-
-            # 5. 执行创建 (正式开始耗时操作，Defer)
-            await interaction.response.defer(ephemeral=True)
+                return await interaction.followup.send(STRINGS["messages"]["err_quota_limit"], ephemeral=True)
 
             # 扣除额度
             q_data["daily_quota_left"] -= 1
             save_quota_data(q_data)
+            quota_deducted = True
             await self.update_panel_message()
 
             tid = random.randint(100000, 999999)
@@ -248,18 +254,16 @@ class Tickets(commands.Cog):
 
         except Exception as e:
             print(f"创建工单逻辑出错: {e}")
-            # 出错回滚额度
-            q_data = load_quota_data() # 重新读一遍防止并发覆盖
-            q_data["daily_quota_left"] += 1
-            save_quota_data(q_data)
-            await self.update_panel_message()
+            # 只有确实扣过额度才回滚，避免 defer/前置检查失败凭空增加名额。
+            if quota_deducted:
+                q_data = load_quota_data() # 重新读一遍防止并发覆盖
+                q_data["daily_quota_left"] += 1
+                save_quota_data(q_data)
+                await self.update_panel_message()
 
             try:
                 # 尝试发送错误信息，如果 interaction 过期可能会失败，所以加 try
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(f"创建失败: {e}", ephemeral=True)
-                else:
-                    await interaction.followup.send(f"创建失败: {e}", ephemeral=True)
+                await interaction.followup.send(f"创建失败: {e}", ephemeral=True)
             except:
                 pass
 

@@ -122,9 +122,12 @@ class WelcomeCog(commands.Cog):
             # 如果是超时，交互对象很旧，只能用 followup 发送新消息
             if is_timeout:
                 await interaction.followup.send(embed=embed, ephemeral=True)
-            # 如果是正常答完，交互对象是新鲜的，直接编辑当前消息
+            # 选择题回调会先 defer，因此正常答完时编辑原消息。
             else:
-                await interaction.response.edit_message(embed=embed, view=None)
+                if interaction.response.is_done():
+                    await interaction.edit_original_response(embed=embed, view=None)
+                else:
+                    await interaction.response.edit_message(embed=embed, view=None)
 
         # 备用方案：如果编辑失败（例如用户关闭了窗口），尝试用followup发送
         except discord.NotFound:
