@@ -106,6 +106,9 @@ def _lottery_kind_label(kind: str) -> str:
 
 
 BEIJING_TZ = timezone(timedelta(hours=8))
+EMPTY_PITY_LIMIT = 5
+ROLE_PITY_LIMIT = 20
+LEGENDARY_PITY_LIMIT = 80
 
 
 def _parse_beijing_time(raw: str) -> datetime | None:
@@ -156,6 +159,52 @@ def _percent(numerator: int | float, denominator: int | float) -> str:
         return "0%"
     value = float(numerator) / float(denominator) * 100
     return f"{value:.1f}%"
+
+
+def _weighted_shell_reward(min_amount: float, max_amount: float) -> float:
+    min_steps = int(round(min_amount * 10))
+    max_steps = int(round(max_amount * 10))
+    if max_steps < min_steps:
+        max_steps = min_steps
+    steps = list(range(min_steps, max_steps + 1))
+    weights = [1 / ((step - min_steps + 1) ** 1.35) for step in steps]
+    return round(random.choices(steps, weights=weights, k=1)[0] / 10, 1)
+
+
+def _pick_available_role(
+    pools_by_kind_rarity: dict,
+    rarity_pool: list[int],
+    weights: list[int],
+    *,
+    forced_rarity: int | None = None,
+) -> tuple[discord.Role | None, int, str | None]:
+    if forced_rarity is not None:
+        candidate_rarities = [forced_rarity]
+    else:
+        candidate_rarities = [
+            rarity for rarity in rarity_pool
+            if any(pools_by_kind_rarity.get(kind, {}).get(rarity, []) for kind in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON))
+        ]
+        if not candidate_rarities:
+            return None, 0, None
+        candidate_weights = [
+            max(0, int(weights[rarity_pool.index(rarity)])) if rarity in rarity_pool else 1
+            for rarity in candidate_rarities
+        ]
+        if sum(candidate_weights) <= 0:
+            candidate_weights = [1 for _ in candidate_rarities]
+        candidate_rarities = [random.choices(candidate_rarities, weights=candidate_weights, k=1)[0]]
+
+    for rarity in candidate_rarities:
+        available_kinds = [
+            kind for kind in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
+            if pools_by_kind_rarity.get(kind, {}).get(rarity, [])
+        ]
+        if not available_kinds:
+            continue
+        picked_kind = random.choice(available_kinds)
+        return random.choice(pools_by_kind_rarity[picked_kind][rarity]), rarity, picked_kind
+    return None, 0, None
 
 
 def _lottery_luck_lines(stats: dict) -> tuple[str, str]:
@@ -258,6 +307,15 @@ def build_lottery_stats_embed(member: discord.Member, guild_id: int) -> discord.
         ),
         inline=False,
     )
+    embed.add_field(
+        name="保底进度",
+        value=(
+            f"连续空抽：**{stats.get('empty_streak', 0)} / {EMPTY_PITY_LIMIT}**\n"
+            f"未出身份：**{stats.get('no_role_streak', 0)} / {ROLE_PITY_LIMIT}**\n"
+            f"未出三星：**{stats.get('no_legendary_streak', 0)} / {LEGENDARY_PITY_LIMIT}**"
+        ),
+        inline=False,
+    )
     if stats.get("last_draw_at"):
         embed.set_footer(text=f"最近抽奖：{stats['last_draw_at']}")
     else:
@@ -326,20 +384,22 @@ def _rules_text() -> str:
     weights = cfg.get("weights", {})
     outcome_weights = cfg.get("outcome_weights", {})
     shell_reward = cfg.get("shell_reward", {})
-    w_junk = int(weights.get(str(RARITY_JUNK), 55))
-    w_normal = int(weights.get(str(RARITY_NORMAL), 37))
-    w_rare = int(weights.get(str(RARITY_RARE), 6))
-    w_legend = int(weights.get(str(RARITY_LEGENDARY), 2))
-    w_role = int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 20))
-    w_shells = int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 30))
-    w_empty = int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 50))
+    w_junk = int(weights.get(str(RARITY_JUNK), 52))
+    w_normal = int(weights.get(str(RARITY_NORMAL), 38))
+    w_rare = int(weights.get(str(RARITY_RARE), 7))
+    w_legend = int(weights.get(str(RARITY_LEGENDARY), 3))
+    w_role = int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 23))
+    w_shells = int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 32))
+    w_empty = int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 45))
 
     return (
         "📌 **当前蛋壳/抽奖规则**\n"
         f"- 🎲 单抽消耗：**{format_shells(single_cost)}** 蛋壳\n"
         f"- 🍀 五抽消耗：**{format_shells(five_cost)}** 蛋壳\n"
         f"- 🎯 十连消耗：**{format_shells(ten_cost)}** 蛋壳\n"
+        f"- 🎁 结果权重(抽空/蛋壳/身份)：**{w_empty}/{w_shells}/{w_role}**\n"
         f"- 🥚 蛋壳结果：随机 **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
+        f"- 🧷 保底：5 空后至少蛋壳，20 抽无身份必出身份，80 抽内必有三星\n"
         f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
         f"- 💬 有效发言：会提升蛋壳获取加成\n"
         f"- 🧵 社区发帖：每帖 **{format_shells(post_reward)}** 蛋壳，每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
@@ -410,8 +470,7 @@ class RoleLotteryView(discord.ui.View):
             for outcome in outcome_pool
         ]
         if sum(outcome_weights) <= 0:
-            outcome_weights = [20, 30, 50]
-        picked_outcomes = random.choices(outcome_pool, weights=outcome_weights, k=draw_count)
+            outcome_weights = [23, 32, 45]
 
         weights_cfg = cfg.get("weights", {})
         rarity_pool = [RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY]
@@ -420,7 +479,7 @@ class RoleLotteryView(discord.ui.View):
             for r in rarity_pool
         ]
         if sum(weights) <= 0:
-            weights = [55, 37, 6, 2]
+            weights = [52, 38, 7, 3]
 
         user_collection_ids = set(get_user_collection(user.id))
         refund_cfg = cfg.get("refund", {})
@@ -432,33 +491,64 @@ class RoleLotteryView(discord.ui.View):
         granted_roles = []
         total_refund = 0
         total_shell_reward = 0.0
+        stats_before = get_lottery_stats(user.id, guild_id)
+        empty_streak = int(stats_before.get("empty_streak", 0))
+        no_role_streak = int(stats_before.get("no_role_streak", 0))
+        no_legendary_streak = int(stats_before.get("no_legendary_streak", 0))
+        guarantee_notes = []
 
-        for outcome in picked_outcomes:
+        for _ in range(draw_count):
+            force_legendary = no_legendary_streak >= LEGENDARY_PITY_LIMIT - 1
+            force_role = force_legendary or no_role_streak >= ROLE_PITY_LIMIT - 1
+            if force_role:
+                outcome = LOTTERY_OUTCOME_ROLE
+                if force_legendary:
+                    guarantee_notes.append("触发 80 抽三星大保底")
+                else:
+                    guarantee_notes.append("触发 20 抽身份组保底")
+            else:
+                outcome = random.choices(outcome_pool, weights=outcome_weights, k=1)[0]
+                if outcome == LOTTERY_OUTCOME_EMPTY and empty_streak >= EMPTY_PITY_LIMIT - 1:
+                    outcome = LOTTERY_OUTCOME_SHELLS
+                    guarantee_notes.append("触发 5 空保护，空抽转蛋壳")
+
             if outcome == LOTTERY_OUTCOME_EMPTY:
                 results.append({"type": "empty", "role": None, "rarity": 0, "dupe": False, "refund": 0, "shell_reward": 0})
+                empty_streak += 1
+                no_role_streak += 1
+                no_legendary_streak += 1
                 continue
 
             if outcome == LOTTERY_OUTCOME_SHELLS:
-                min_steps = int(round(shell_reward_min * 10))
-                max_steps = int(round(shell_reward_max * 10))
-                shell_reward = round(random.randint(min_steps, max_steps) / 10, 1)
+                shell_reward = _weighted_shell_reward(shell_reward_min, shell_reward_max)
                 total_shell_reward += shell_reward
                 results.append({"type": "shells", "role": None, "rarity": 0, "dupe": False, "refund": 0, "shell_reward": shell_reward})
+                empty_streak = 0
+                no_role_streak += 1
+                no_legendary_streak += 1
                 continue
 
-            rarity = random.choices(rarity_pool, weights=weights, k=1)[0]
-            available_kinds = [
-                k for k in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
-                if pools_by_kind_rarity.get(k, {}).get(rarity, [])
-            ]
-            if not available_kinds:
+            forced_rarity = RARITY_LEGENDARY if force_legendary else None
+            won_role, rarity, picked_kind = _pick_available_role(
+                pools_by_kind_rarity,
+                rarity_pool,
+                weights,
+                forced_rarity=forced_rarity,
+            )
+            if not won_role and force_legendary:
+                guarantee_notes.append("三星池为空，三星保底暂退为身份组保底")
+                won_role, rarity, picked_kind = _pick_available_role(
+                    pools_by_kind_rarity,
+                    rarity_pool,
+                    weights,
+                )
+            if not won_role:
                 results.append({"type": "empty", "role": None, "rarity": 0, "dupe": False, "refund": 0, "shell_reward": 0, "reason": "no_role"})
+                empty_streak += 1
+                no_role_streak += 1
+                no_legendary_streak += 1
                 continue
 
-            picked_kind = random.choice(available_kinds)
-            candidates = pools_by_kind_rarity[picked_kind][rarity]
-
-            won_role = random.choice(candidates)
             if won_role.id in user_collection_ids:
                 refund_amt = max(0.0, float(refund_cfg.get(str(rarity), fallback_refund)))
                 total_refund += refund_amt
@@ -468,6 +558,9 @@ class RoleLotteryView(discord.ui.View):
                 user_collection_ids.add(won_role.id)
                 granted_roles.append(won_role)
                 results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": False, "refund": 0, "shell_reward": 0})
+            empty_streak = 0
+            no_role_streak = 0
+            no_legendary_streak = 0 if rarity == RARITY_LEGENDARY else no_legendary_streak + 1
 
         if total_refund > 0:
             modify_user_points(user.id, total_refund, guild_id, source="role_lottery_refund", reason=f"draw_count={draw_count}")
@@ -545,6 +638,9 @@ class RoleLotteryView(discord.ui.View):
             ),
             inline=False,
         )
+        if guarantee_notes:
+            seen_notes = list(dict.fromkeys(guarantee_notes))
+            embed.add_field(name="保底提示", value="\n".join(f"- {note}" for note in seen_notes[:5]), inline=False)
         embed.add_field(name="奇米蛋小声说", value=_lottery_result_message(results), inline=False)
         if equipped_role:
             embed.add_field(name="当前穿戴", value=f"已自动换装为 {equipped_role.mention}", inline=False)
@@ -1248,9 +1344,9 @@ class RoleClaimView(discord.ui.View):
         outcome_cfg = cfg.get("outcome_weights", {})
         shell_reward_cfg = cfg.get("shell_reward", {})
         outcome_line = (
-            f"抽空 {int(outcome_cfg.get(LOTTERY_OUTCOME_EMPTY, 50))} / "
-            f"蛋壳 {int(outcome_cfg.get(LOTTERY_OUTCOME_SHELLS, 30))} / "
-            f"身份 {int(outcome_cfg.get(LOTTERY_OUTCOME_ROLE, 20))}"
+            f"抽空 {int(outcome_cfg.get(LOTTERY_OUTCOME_EMPTY, 45))} / "
+            f"蛋壳 {int(outcome_cfg.get(LOTTERY_OUTCOME_SHELLS, 32))} / "
+            f"身份 {int(outcome_cfg.get(LOTTERY_OUTCOME_ROLE, 23))}"
         )
         shell_reward_line = (
             f"{format_shells(shell_reward_cfg.get('min', 0.1))}-"
@@ -1892,8 +1988,8 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
 
         self.weights_input = ui.InputText(
             label="概率(☆,★,★★,★★★)",
-            placeholder="例如 55,37,6,2",
-            value=f"{int(w.get(str(RARITY_JUNK), 55))},{int(w.get(str(RARITY_NORMAL), 37))},{int(w.get(str(RARITY_RARE), 6))},{int(w.get(str(RARITY_LEGENDARY), 2))}",
+            placeholder="例如 52,38,7,3",
+            value=f"{int(w.get(str(RARITY_JUNK), 52))},{int(w.get(str(RARITY_NORMAL), 38))},{int(w.get(str(RARITY_RARE), 7))},{int(w.get(str(RARITY_LEGENDARY), 3))}",
             required=True,
             max_length=32,
         )
@@ -1906,8 +2002,8 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
         )
         self.outcome_weights_input = ui.InputText(
             label="结果权重(抽空,蛋壳,身份)",
-            placeholder="例如 50,30,20",
-            value=f"{int(ow.get(LOTTERY_OUTCOME_EMPTY, 50))},{int(ow.get(LOTTERY_OUTCOME_SHELLS, 30))},{int(ow.get(LOTTERY_OUTCOME_ROLE, 20))}",
+            placeholder="例如 45,32,23",
+            value=f"{int(ow.get(LOTTERY_OUTCOME_EMPTY, 45))},{int(ow.get(LOTTERY_OUTCOME_SHELLS, 32))},{int(ow.get(LOTTERY_OUTCOME_ROLE, 23))}",
             required=True,
             max_length=32,
         )
@@ -1995,9 +2091,9 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
         shell_reward = cfg.get("shell_reward", {})
         await interaction.followup.send(
             "✅ 概率与重复返还已更新（已保存）\n"
-            f"- 结果(抽空/蛋壳/身份)：{int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 50))}/{int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 30))}/{int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 20))}\n"
+            f"- 结果(抽空/蛋壳/身份)：{int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 45))}/{int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 32))}/{int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 23))}\n"
             f"- 蛋壳结果：{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))} 蛋壳\n"
-            f"- 概率(☆/★/★★/★★★)：{int(weights.get(str(RARITY_JUNK), 55))}/{int(weights.get(str(RARITY_NORMAL), 37))}/{int(weights.get(str(RARITY_RARE), 6))}/{int(weights.get(str(RARITY_LEGENDARY), 2))}\n"
+            f"- 概率(☆/★/★★/★★★)：{int(weights.get(str(RARITY_JUNK), 52))}/{int(weights.get(str(RARITY_NORMAL), 38))}/{int(weights.get(str(RARITY_RARE), 7))}/{int(weights.get(str(RARITY_LEGENDARY), 3))}\n"
             f"- 补偿(☆/★/★★/★★★)：{format_shells(refund.get(str(RARITY_JUNK), 0.5))}/{format_shells(refund.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refund.get(str(RARITY_RARE), 2.0))}/{format_shells(refund.get(str(RARITY_LEGENDARY), 5.0))} 蛋壳",
             ephemeral=True,
         )
@@ -2326,9 +2422,9 @@ class RoleManagerView(discord.ui.View):
                 f"单抽: **{format_shells(cfg.get('cost_single', 1.0))}** 蛋壳 | "
                 f"五抽: **{format_shells(cfg.get('cost_five', 5.0))}** 蛋壳 | "
                 f"十连: **{format_shells(cfg.get('cost_ten', 10.0))}** 蛋壳\n"
-                f"结果(抽空/蛋壳/身份): **{int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 50))}/{int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 30))}/{int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 20))}**\n"
+                f"结果(抽空/蛋壳/身份): **{int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 45))}/{int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 32))}/{int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 23))}**\n"
                 f"蛋壳结果: **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
-                f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 55))}/{int(weights.get(str(RARITY_NORMAL), 37))}/{int(weights.get(str(RARITY_RARE), 6))}/{int(weights.get(str(RARITY_LEGENDARY), 2))}**\n"
+                f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 52))}/{int(weights.get(str(RARITY_NORMAL), 38))}/{int(weights.get(str(RARITY_RARE), 7))}/{int(weights.get(str(RARITY_LEGENDARY), 3))}**\n"
                 f"补偿(☆/★/★★/★★★): **{format_shells(refunds.get(str(RARITY_JUNK), 0.5))}/{format_shells(refunds.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refunds.get(str(RARITY_RARE), 2.0))}/{format_shells(refunds.get(str(RARITY_LEGENDARY), 5.0))}** 蛋壳"
             ),
             inline=False,

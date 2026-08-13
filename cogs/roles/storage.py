@@ -27,19 +27,19 @@ DEFAULT_LOTTERY_CONFIG = {
     "cost_five": 5.0,
     "cost_ten": 10.0,
     "outcome_weights": {
-        LOTTERY_OUTCOME_ROLE: 20,
-        LOTTERY_OUTCOME_SHELLS: 30,
-        LOTTERY_OUTCOME_EMPTY: 50,
+        LOTTERY_OUTCOME_ROLE: 23,
+        LOTTERY_OUTCOME_SHELLS: 32,
+        LOTTERY_OUTCOME_EMPTY: 45,
     },
     "shell_reward": {
         "min": 0.1,
         "max": 1.0,
     },
     "weights": {
-        str(RARITY_JUNK): 55,
-        str(RARITY_NORMAL): 37,
-        str(RARITY_RARE): 6,
-        str(RARITY_LEGENDARY): 2,
+        str(RARITY_JUNK): 52,
+        str(RARITY_NORMAL): 38,
+        str(RARITY_RARE): 7,
+        str(RARITY_LEGENDARY): 3,
     },
     "refund": {
             str(RARITY_JUNK): 0.5,
@@ -99,15 +99,31 @@ def _normalize_lottery_weights(weights: dict) -> dict:
     }
     if normalized == old_default:
         return dict(default_weights)
+    previous_default = {
+        str(RARITY_JUNK): 55,
+        str(RARITY_NORMAL): 37,
+        str(RARITY_RARE): 6,
+        str(RARITY_LEGENDARY): 2,
+    }
+    if normalized == previous_default:
+        return dict(default_weights)
     return normalized
 
 
 def _normalize_outcome_weights(weights: dict) -> dict:
     default_weights = DEFAULT_LOTTERY_CONFIG["outcome_weights"]
-    return {
+    normalized = {
         outcome: max(0, int(weights.get(outcome, default_weights[outcome])))
         for outcome in SUPPORTED_LOTTERY_OUTCOMES
     }
+    previous_default = {
+        LOTTERY_OUTCOME_ROLE: 20,
+        LOTTERY_OUTCOME_SHELLS: 30,
+        LOTTERY_OUTCOME_EMPTY: 50,
+    }
+    if normalized == previous_default:
+        return dict(default_weights)
+    return normalized
 
 
 def _normalize_shell_reward(raw: dict) -> dict:
@@ -476,6 +492,9 @@ def _empty_lottery_stats() -> dict:
         "role_hits": 0,
         "shell_hits": 0,
         "empty_hits": 0,
+        "empty_streak": 0,
+        "no_role_streak": 0,
+        "no_legendary_streak": 0,
         "new_roles": 0,
         "duplicate_roles": 0,
         "spent_shells": 0.0,
@@ -499,7 +518,17 @@ def _normalize_lottery_stats(raw: dict | None = None) -> dict:
     if not isinstance(raw, dict):
         raw = {}
     base = _empty_lottery_stats()
-    for key in ("total_draws", "role_hits", "shell_hits", "empty_hits", "new_roles", "duplicate_roles"):
+    for key in (
+        "total_draws",
+        "role_hits",
+        "shell_hits",
+        "empty_hits",
+        "empty_streak",
+        "no_role_streak",
+        "no_legendary_streak",
+        "new_roles",
+        "duplicate_roles",
+    ):
         try:
             base[key] = max(0, int(raw.get(key, base[key])))
         except (TypeError, ValueError):
@@ -574,12 +603,20 @@ def record_lottery_draw(
         row_type = row.get("type")
         if row_type == LOTTERY_OUTCOME_EMPTY or row_type == "empty":
             stats["empty_hits"] += 1
+            stats["empty_streak"] += 1
+            stats["no_role_streak"] += 1
+            stats["no_legendary_streak"] += 1
             continue
         if row_type == LOTTERY_OUTCOME_SHELLS or row_type == "shells":
             stats["shell_hits"] += 1
+            stats["empty_streak"] = 0
+            stats["no_role_streak"] += 1
+            stats["no_legendary_streak"] += 1
             continue
         if row_type == LOTTERY_OUTCOME_ROLE or row_type == "role":
             stats["role_hits"] += 1
+            stats["empty_streak"] = 0
+            stats["no_role_streak"] = 0
             if row.get("dupe"):
                 stats["duplicate_roles"] += 1
             else:
@@ -588,6 +625,10 @@ def record_lottery_draw(
             rarity = str(row.get("rarity", ""))
             if rarity in stats["rarity_hits"]:
                 stats["rarity_hits"][rarity] += 1
+            if rarity == str(RARITY_LEGENDARY):
+                stats["no_legendary_streak"] = 0
+            else:
+                stats["no_legendary_streak"] += 1
 
             kind = str(row.get("kind", ""))
             if kind in stats["kind_hits"]:
