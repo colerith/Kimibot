@@ -232,7 +232,15 @@ def _collection_reward_text(reward: dict, guild: discord.Guild) -> str:
     return " · ".join(parts) if parts else "纪念成就"
 
 
-def build_collection_embed(guild: discord.Guild, user_id: int, selected_group_id: str = "__all__") -> discord.Embed:
+COLLECTION_CATALOG_PAGE_SIZE = 20
+
+
+def build_collection_embed(
+    guild: discord.Guild,
+    user_id: int,
+    selected_group_id: str = "__all__",
+    page: int = 0,
+) -> discord.Embed:
     data = load_role_data()
     cfg = get_collection_config(data)
     pool_ids = [rid for rid in data.get("lottery_roles", []) if guild.get_role(rid)]
@@ -241,6 +249,10 @@ def build_collection_embed(guild: discord.Guild, user_id: int, selected_group_id
     selected = next((g for g in groups if g.get("id") == selected_group_id), None)
     shown_ids = pool_ids if selected is None else [rid for rid in selected.get("role_ids", []) if rid in pool_ids]
     shown_owned = len(set(shown_ids) & owned)
+    total_pages = max(1, math.ceil(len(shown_ids) / COLLECTION_CATALOG_PAGE_SIZE))
+    page = max(0, min(page, total_pages - 1))
+    page_start = page * COLLECTION_CATALOG_PAGE_SIZE
+    page_ids = shown_ids[page_start:page_start + COLLECTION_CATALOG_PAGE_SIZE]
     completed_group_count = sum(1 for g in groups if set(g.get("role_ids", [])) and set(g.get("role_ids", [])) <= owned)
     full_complete = bool(pool_ids) and set(pool_ids) <= owned
     achievement_count = completed_group_count + int(full_complete)
@@ -248,8 +260,8 @@ def build_collection_embed(guild: discord.Guild, user_id: int, selected_group_id
     embed = discord.Embed(
         title="🌌 奇米身份组册",
         description=(f"*按系列查看收集进度～*\n\n"
-                     f"🐾 总进度：**{len(set(pool_ids) & owned)}/{len(pool_ids)}**　"
-                     f"本册：**{shown_owned}/{len(shown_ids)}**　🏆 成就：**{achievement_count}/{len(groups) + 1}**"),
+                     f"🥚 总进度：**{len(set(pool_ids) & owned)}/{len(pool_ids)}**　"
+                     f"🌸 本类别：**{shown_owned}/{len(shown_ids)}**　🏆 成就：**{achievement_count}/{len(groups) + 1}**"),
         color=0xFFB6C1,
     )
     if selected:
@@ -259,11 +271,15 @@ def build_collection_embed(guild: discord.Guild, user_id: int, selected_group_id
         embed.add_field(name=f"📚 全部身份组 · {shown_owned}/{len(shown_ids)}", value="选择下方系列即可筛选图鉴。", inline=False)
 
     role_lines = []
-    for rid in shown_ids:
+    for rid in page_ids:
         role = guild.get_role(rid)
         if role:
             role_lines.append(f"{'✅' if rid in owned else '❔'} {role.mention} · {'已获得' if rid in owned else '未获得'}")
-    embed.add_field(name="可收集身份组", value=_preview_lines(role_lines) if role_lines else "*本系列暂未配置身份组*", inline=False)
+    embed.add_field(
+        name=f"可收集身份组 · 第 {page + 1}/{total_pages} 页",
+        value="\n".join(role_lines) if role_lines else "*本系列暂未配置身份组*",
+        inline=False,
+    )
 
     achievement_lines = []
     for group in groups:
@@ -276,11 +292,11 @@ def build_collection_embed(guild: discord.Guild, user_id: int, selected_group_id
         )
     full = cfg.get("full_reward", {})
     achievement_lines.append(
-        f"{'✅' if full_complete else '📍'} **{full.get('emoji', '👑')} {full.get('name', '图鉴大师')}** · "
+        f"{'✅' if full_complete else '📍'} **{full.get('emoji', '👑')} {full.get('name', '超级变变变')}** · "
         f"{len(set(pool_ids) & owned)}/{len(pool_ids)}\n{full.get('description') or '全图鉴收集'} → {_collection_reward_text(full, guild)}"
     )
     embed.add_field(name="🏆 收集成就", value=_preview_lines(achievement_lines), inline=False)
-    embed.set_footer(text="达成奖励会自动发放，每项仅可获得一次；奖励身份组会永久加入换装衣柜。")
+    embed.set_footer(text=f"图鉴第 {page + 1}/{total_pages} 页 · 达成奖励自动发放且每项仅一次；奖励身份组永久加入换装衣柜。")
     return embed
 
 
@@ -297,19 +313,66 @@ class CollectionFilterSelect(discord.ui.Select):
         if not isinstance(panel, CollectionCatalogView):
             return await interaction.response.defer()
         panel.selected_group_id = self.values[0]
+        panel.page = 0
         panel.rebuild()
-        await interaction.response.edit_message(embed=build_collection_embed(interaction.guild, interaction.user.id, panel.selected_group_id), view=panel)
+        await interaction.response.edit_message(
+            embed=build_collection_embed(interaction.guild, interaction.user.id, panel.selected_group_id, panel.page),
+            view=panel,
+        )
+
+
+class CollectionPageButton(discord.ui.Button):
+    def __init__(self, direction: int, *, disabled: bool = False):
+        super().__init__(
+            label="上一页" if direction < 0 else "下一页",
+            emoji="⬅️" if direction < 0 else "➡️",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+            disabled=disabled,
+        )
+        self.direction = direction
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, CollectionCatalogView):
+            return await interaction.response.defer()
+        panel.page = max(0, min(panel.page + self.direction, panel.total_pages - 1))
+        panel.rebuild()
+        await interaction.response.edit_message(
+            embed=build_collection_embed(interaction.guild, interaction.user.id, panel.selected_group_id, panel.page),
+            view=panel,
+        )
 
 
 class CollectionCatalogView(discord.ui.View):
-    def __init__(self, selected_group_id: str = "__all__"):
+    def __init__(self, guild: discord.Guild, user_id: int, selected_group_id: str = "__all__", page: int = 0):
         super().__init__(timeout=300)
+        self.guild = guild
+        self.user_id = user_id
         self.selected_group_id = selected_group_id
+        self.page = page
+        self.total_pages = 1
         self.rebuild()
 
     def rebuild(self):
         self.clear_items()
-        self.add_item(CollectionFilterSelect(get_collection_config().get("groups", []), self.selected_group_id))
+        data = load_role_data()
+        cfg = get_collection_config(data)
+        groups = cfg.get("groups", [])
+        pool_ids = [rid for rid in data.get("lottery_roles", []) if self.guild.get_role(rid)]
+        selected = next((group for group in groups if group.get("id") == self.selected_group_id), None)
+        shown_ids = pool_ids if selected is None else [rid for rid in selected.get("role_ids", []) if rid in pool_ids]
+        self.total_pages = max(1, math.ceil(len(shown_ids) / COLLECTION_CATALOG_PAGE_SIZE))
+        self.page = max(0, min(self.page, self.total_pages - 1))
+        self.add_item(CollectionFilterSelect(groups, self.selected_group_id))
+        self.add_item(CollectionPageButton(-1, disabled=self.page <= 0))
+        self.add_item(discord.ui.Button(
+            label=f"第 {self.page + 1}/{self.total_pages} 页",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+            disabled=True,
+        ))
+        self.add_item(CollectionPageButton(1, disabled=self.page >= self.total_pages - 1))
 
 
 def _pick_available_role(
@@ -834,7 +897,11 @@ class RoleLotteryView(discord.ui.View):
             embed.add_field(name="🎁 刚刚自动发放", value=_preview_lines([
                 f"{r.get('emoji', '🏆')} **{r.get('name', '收集成就')}**：{_collection_reward_text(r, interaction.guild)}" for r in rewards
             ]), inline=False)
-        await interaction.followup.send(embed=embed, view=CollectionCatalogView(), ephemeral=True)
+        await interaction.followup.send(
+            embed=embed,
+            view=CollectionCatalogView(interaction.guild, interaction.user.id),
+            ephemeral=True,
+        )
 
 # --- 用户端视图 : 私密选择面板 ---
 class RoleClaimSelect(discord.ui.Select):
