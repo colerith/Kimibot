@@ -81,6 +81,30 @@ def _user_mention(user_id: int, display_name: str) -> str:
     return f"<@{user_id}>"
 
 
+def _boost_footer_text(user_id: int = 0) -> str:
+    text = "奇米蛋感谢你的助力。"
+    return f"{text} · 成员ID: {user_id}" if user_id else text
+
+
+def _extract_user_id_from_embed(embed: discord.Embed) -> int:
+    description = embed.description or ""
+    mention = re.search(r"<@!?(\d+)>", description)
+    if mention:
+        return int(mention.group(1))
+
+    footer_text = getattr(embed.footer, "text", None) or ""
+    footer_id = re.search(r"成员ID[：:]\s*(\d+)", footer_text)
+    if footer_id:
+        return int(footer_id.group(1))
+
+    thumbnail_url = getattr(embed.thumbnail, "url", None) or ""
+    for pattern in (r"/users/(\d+)/avatars/", r"/avatars/(\d+)/"):
+        avatar_id = re.search(pattern, thumbnail_url)
+        if avatar_id:
+            return int(avatar_id.group(1))
+    return 0
+
+
 def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.Guild, thanks_text: str, bot=None) -> discord.Embed:
     tier = int(getattr(guild, "premium_tier", 0) or 0)
     total_boosts = int(getattr(guild, "premium_subscription_count", 0) or 0)
@@ -98,7 +122,7 @@ def _build_boost_embed(member: discord.Member, boost_count: int, guild: discord.
         color=random.choice(BOOST_EMBED_COLORS),
     )
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.set_footer(text="奇米蛋感谢你的助力。")
+    embed.set_footer(text=_boost_footer_text(member.id))
     return embed
 
 
@@ -150,12 +174,14 @@ def _refresh_boost_embed(
     refreshed = discord.Embed.from_dict(embed.to_dict())
     refreshed.description = refreshed_description
     lines = refreshed.description.splitlines()
-    if lines:
+    if lines and user_id:
         lines[0] = _user_mention(user_id, display_name)
         refreshed.description = "\n".join(lines)
     refreshed.color = discord.Color(color)
     if avatar_url:
         refreshed.set_thumbnail(url=avatar_url)
+    if user_id:
+        refreshed.set_footer(text=_boost_footer_text(user_id))
     return refreshed
 
 
@@ -275,12 +301,12 @@ class BoostThanksCog(commands.Cog):
             if isinstance(record, dict) and record.get("thanks_message_id")
         }
         async for message in channel.history(limit=limit):
-            scanned += 1
             if message.author.id != self.bot.user.id or not message.embeds:
                 continue
             embed = message.embeds[0]
             if embed.title != BOOST_THANKS_TITLE:
                 continue
+            scanned += 1
             boost_count = _extract_boost_count_from_embed(embed)
             if boost_count is None:
                 skipped += 1
@@ -289,8 +315,7 @@ class BoostThanksCog(commands.Cog):
             record = records_by_thanks_message.get(str(message.id), {})
             user_id = int(record.get("user_id") or 0)
             if not user_id:
-                old_mention = re.search(r"<@!?(\d+)>", embed.description or "")
-                user_id = int(old_mention.group(1)) if old_mention else 0
+                user_id = _extract_user_id_from_embed(embed)
             user = await self._resolve_boost_user(channel.guild, user_id) if user_id else None
             display_name = (
                 getattr(user, "display_name", None) or getattr(user, "name", None) or "未知成员"
