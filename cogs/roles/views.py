@@ -235,6 +235,18 @@ def _collection_reward_text(reward: dict, guild: discord.Guild) -> str:
 COLLECTION_CATALOG_PAGE_SIZE = 20
 
 
+def _collection_select_emoji(raw, fallback: str = "📚"):
+    """Return a select-compatible Unicode/custom emoji, with a safe fallback."""
+    text = str(raw or "").strip() or fallback
+    try:
+        if text.startswith("<") and text.endswith(">"):
+            custom = discord.PartialEmoji.from_str(text)
+            return custom if getattr(custom, "id", None) else fallback
+        return text
+    except (TypeError, ValueError):
+        return fallback
+
+
 def build_collection_embed(
     guild: discord.Guild,
     user_id: int,
@@ -305,6 +317,7 @@ class CollectionFilterSelect(discord.ui.Select):
         options = [discord.SelectOption(label="全部身份组", value="__all__", emoji="🌌", default=selected == "__all__")]
         for group in groups[:24]:
             options.append(discord.SelectOption(label=str(group.get("name", "未命名"))[:100], value=str(group.get("id")),
+                                                emoji=_collection_select_emoji(group.get("emoji")),
                                                 default=selected == str(group.get("id"))))
         super().__init__(placeholder="选择身份组系列…", options=options, min_values=1, max_values=1)
 
@@ -2566,6 +2579,7 @@ class CollectionAdminTargetSelect(discord.ui.Select):
         options = [discord.SelectOption(label="全图鉴收集奖励", value="__full__", emoji="👑", default=selected_id == "__full__")]
         for group in groups[:24]:
             options.append(discord.SelectOption(label=str(group.get("name", "未命名"))[:100], value=str(group.get("id")),
+                                                emoji=_collection_select_emoji(group.get("emoji")),
                                                 default=selected_id == str(group.get("id"))))
         super().__init__(placeholder="选择要配置的分组…", options=options, row=0)
 
