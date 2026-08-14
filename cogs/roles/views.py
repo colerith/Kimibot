@@ -47,6 +47,8 @@ from cogs.points.storage import (
     get_daily_signin_summary,
     load_points_data,
     load_random_events,
+    load_praise_rules,
+    save_praise_rules,
     purchase_acceleration_card,
 )
 from cogs.shared.utils import get_account_wait_status, has_verification_role
@@ -2858,6 +2860,157 @@ class RoleManagerView(discord.ui.View):
             await interaction.edit_original_response(embed=embed, view=self)
 
 
+def build_praise_rules_admin_embed() -> discord.Embed:
+    rules = load_praise_rules()
+    lines = []
+    for index, rule in enumerate(rules, start=1):
+        mode = "完全一致" if rule.get("match_mode") == "exact" else "包含关键词"
+        time_parts = []
+        if rule.get("start_at"):
+            time_parts.append(f"始 {rule['start_at']}")
+        if rule.get("end_at"):
+            time_parts.append(f"止 {rule['end_at']}")
+        time_text = " ｜ ".join(time_parts) if time_parts else "长期有效"
+        lines.append(
+            f"**{index}. `{rule.get('field', '')}`**\n"
+            f"{mode} ｜ {format_shells(rule.get('min_reward', 1))}-{format_shells(rule.get('max_reward', 1))} 蛋壳 ｜ {time_text}"
+        )
+    return discord.Embed(
+        title="✨ 识别字段奖励管理",
+        description=(
+            "成员在配置的赞美频道发送匹配内容时，每条规则每天可奖励一次。\n"
+            "若一条消息同时匹配多条规则，只采用列表中第一条。时间按北京时间计算。\n\n"
+            + (_preview_lines(lines, 3500) if lines else "*当前没有识别规则。*")
+        ),
+        color=STYLE["KIMI_YELLOW"],
+    )
+
+
+class PraiseRuleSelect(discord.ui.Select):
+    def __init__(self, rules: list[dict], selected_id: str | None):
+        options = [
+            discord.SelectOption(
+                label=str(rule.get("field", ""))[:100],
+                value=str(rule.get("id")),
+                description=("完全一致" if rule.get("match_mode") == "exact" else "包含关键词"),
+                default=str(rule.get("id")) == selected_id,
+            )
+            for rule in rules[:25]
+        ]
+        if not options:
+            options = [discord.SelectOption(label="暂无规则", value="none")]
+        super().__init__(placeholder="选择要编辑的识别规则…", options=options, disabled=not rules, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, PraiseRuleManagerView):
+            return await interaction.response.defer()
+        panel.selected_id = self.values[0]
+        panel.rebuild()
+        await interaction.response.edit_message(embed=build_praise_rules_admin_embed(), view=panel)
+
+
+class PraiseRuleModal(discord.ui.Modal):
+    def __init__(self, panel: "PraiseRuleManagerView", rule: dict | None = None):
+        super().__init__(title="新增识别字段" if rule is None else "编辑识别字段")
+        self.panel = panel
+        self.rule_id = str(rule.get("id")) if rule else None
+        rule = rule or {}
+        self.field_input = ui.InputText(label="识别字段", value=str(rule.get("field", "")), max_length=200)
+        self.mode_input = ui.InputText(label="匹配模式（完全一致/包含关键词）", value="完全一致" if rule.get("match_mode", "exact") == "exact" else "包含关键词", max_length=12)
+        self.reward_input = ui.InputText(label="随机蛋壳范围（最小,最大）", placeholder="例如 1,9", value=f"{format_shells(rule.get('min_reward', 1))},{format_shells(rule.get('max_reward', 9))}", max_length=24)
+        self.start_input = ui.InputText(label="开始时间（北京时间，可留空）", placeholder="YYYY-MM-DD HH:MM", value=str(rule.get("start_at", "")), required=False, max_length=32)
+        self.end_input = ui.InputText(label="结束时间（北京时间，可留空）", placeholder="YYYY-MM-DD HH:MM", value=str(rule.get("end_at", "")), required=False, max_length=32)
+        for item in (self.field_input, self.mode_input, self.reward_input, self.start_input, self.end_input):
+            self.add_item(item)
+
+    async def callback(self, interaction: discord.Interaction):
+        field = (self.field_input.value or "").strip()
+        if not field:
+            return await interaction.response.send_message("❌ 识别字段不能为空。", ephemeral=True)
+        mode_raw = (self.mode_input.value or "").strip().lower()
+        if mode_raw in {"完全一致", "一模一样", "exact"}:
+            match_mode = "exact"
+        elif mode_raw in {"包含关键词", "包含", "contains"}:
+            match_mode = "contains"
+        else:
+            return await interaction.response.send_message("❌ 匹配模式只能填写 `完全一致` 或 `包含关键词`。", ephemeral=True)
+        try:
+            parts = [part.strip() for part in (self.reward_input.value or "").replace("，", ",").split(",")]
+            if len(parts) != 2:
+                raise ValueError
+            minimum, maximum = float(parts[0]), float(parts[1])
+            if minimum < 0.1 or maximum < minimum:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message("❌ 奖励范围格式应为 `最小,最大`，最小值至少 0.1。", ephemeral=True)
+        start, end = (self.start_input.value or "").strip(), (self.end_input.value or "").strip()
+        start_time, end_time = _parse_beijing_time(start), _parse_beijing_time(end)
+        if (start and not start_time) or (end and not end_time) or (start_time and end_time and end_time <= start_time):
+            return await interaction.response.send_message("❌ 时间格式无效，或结束时间没有晚于开始时间。请使用 `YYYY-MM-DD HH:MM`。", ephemeral=True)
+
+        rules = load_praise_rules()
+        target = next((item for item in rules if str(item.get("id")) == self.rule_id), None)
+        if target is None:
+            if len(rules) >= 25:
+                return await interaction.response.send_message("❌ 最多可配置 25 条识别规则。", ephemeral=True)
+            target = {"id": uuid.uuid4().hex[:12]}
+            rules.append(target)
+        target.update({"field": field, "match_mode": match_mode, "min_reward": minimum, "max_reward": maximum, "start_at": start, "end_at": end})
+        saved = save_praise_rules(rules)
+        self.panel.selected_id = str(target["id"])
+        self.panel.rebuild(saved)
+        await interaction.response.edit_message(embed=build_praise_rules_admin_embed(), view=self.panel)
+
+
+class PraiseRuleActionButton(discord.ui.Button):
+    def __init__(self, action: str, label: str, emoji: str, style=discord.ButtonStyle.secondary):
+        super().__init__(label=label, emoji=emoji, style=style, row=1)
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, PraiseRuleManagerView):
+            return await interaction.response.defer()
+        rules = load_praise_rules()
+        selected = next((rule for rule in rules if str(rule.get("id")) == panel.selected_id), None)
+        if self.action == "add":
+            return await interaction.response.send_modal(PraiseRuleModal(panel))
+        if self.action == "edit":
+            if not selected:
+                return await interaction.response.send_message("❌ 请先选择一条规则。", ephemeral=True)
+            return await interaction.response.send_modal(PraiseRuleModal(panel, selected))
+        if self.action == "delete":
+            if not selected:
+                return await interaction.response.send_message("❌ 请先选择一条规则。", ephemeral=True)
+            rules = [rule for rule in rules if str(rule.get("id")) != panel.selected_id]
+            save_praise_rules(rules)
+            panel.selected_id = str(rules[0]["id"]) if rules else None
+            panel.rebuild(rules)
+            return await interaction.response.edit_message(embed=build_praise_rules_admin_embed(), view=panel)
+        panel.rebuild(rules)
+        await interaction.response.edit_message(embed=build_praise_rules_admin_embed(), view=panel)
+
+
+class PraiseRuleManagerView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+        rules = load_praise_rules()
+        self.selected_id = str(rules[0]["id"]) if rules else None
+        self.rebuild(rules)
+
+    def rebuild(self, rules: list[dict] | None = None):
+        rules = rules if rules is not None else load_praise_rules()
+        if self.selected_id and not any(str(rule.get("id")) == self.selected_id for rule in rules):
+            self.selected_id = str(rules[0]["id"]) if rules else None
+        self.clear_items()
+        self.add_item(PraiseRuleSelect(rules, self.selected_id))
+        self.add_item(PraiseRuleActionButton("add", "新增规则", "➕", discord.ButtonStyle.success))
+        self.add_item(PraiseRuleActionButton("edit", "编辑规则", "✏️", discord.ButtonStyle.primary))
+        self.add_item(PraiseRuleActionButton("delete", "删除规则", "🗑️", discord.ButtonStyle.danger))
+        self.add_item(PraiseRuleActionButton("refresh", "刷新", "🔄"))
+
+
 class CommunityPanelManageView(discord.ui.View):
     def __init__(self, ctx, bot):
         super().__init__(timeout=600)
@@ -2892,6 +3045,14 @@ class CommunityPanelManageView(discord.ui.View):
         events = load_random_events()
         await interaction.response.send_message(
             f"✅ 随机事件已读取：**{len(events)}** 条。\n来源：`cogs/points/random_events.json`",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="识别奖励", style=discord.ButtonStyle.secondary, emoji="✨", custom_id="community_admin_praise_rules")
+    async def praise_rules_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            embed=build_praise_rules_admin_embed(),
+            view=PraiseRuleManagerView(),
             ephemeral=True,
         )
 
@@ -2980,7 +3141,8 @@ def build_community_manage_embed(guild: discord.Guild | None):
         title="⚙️ 社区面板管理台",
         description=(
             "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
-            "预答题、投稿、小蛋问答、加速卡、红包与数据追踪入口已统一接入这里。"
+            "预答题、投稿、小蛋问答、识别字段奖励、加速卡、红包与数据追踪入口已统一接入这里。\n"
+            f"当前识别奖励规则：**{len(load_praise_rules())}** 条。"
         ),
         color=0x2B2D31,
     )

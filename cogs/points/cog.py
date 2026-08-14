@@ -13,6 +13,8 @@ from .storage import (
     record_message_activity,
     reward_daily_forum_post,
     reward_daily_kimi_praise,
+    load_praise_rules,
+    match_praise_rule,
 )
 
 FORUM_REWARD_CHANNEL_IDS = set(int(x) for x in getattr(config, "FORUM_REWARD_CHANNEL_IDS", []))
@@ -24,7 +26,6 @@ POINTS_MSG_COOLDOWN = getattr(
     getattr(config, "COOLDOWN_SECONDS", 30),
 )
 PRAISE_KIMI_CHANNEL_ID = int(getattr(config, "PRAISE_KIMI_CHANNEL_ID", 1450480250210484357))
-PRAISE_KIMI_TRIGGER = str(getattr(config, "PRAISE_KIMI_TRIGGER", "赞美奇米蛋！")).strip()
 PRAISE_RESCAN_MINUTES = max(1, int(getattr(config, "PRAISE_KIMI_RESCAN_MINUTES", 5)))
 PRAISE_REWARD_EMOJIS = {
     1: "1️⃣",
@@ -81,21 +82,35 @@ class PointListener(commands.Cog):
     def cog_unload(self):
         self.praise_reward_rescan.cancel()
 
-    async def _reward_praise_message(self, message: discord.Message, *, recovered: bool = False) -> bool:
-        if message.author.bot or not message.guild:
-            return False
-        if message.channel.id != PRAISE_KIMI_CHANNEL_ID or message.content.strip() != PRAISE_KIMI_TRIGGER:
-            return False
+    @staticmethod
+    def _reward_emoji(amount: float) -> str | None:
+        rounded = round(float(amount or 0), 1)
+        if not rounded.is_integer():
+            return None
+        return PRAISE_REWARD_EMOJIS.get(int(rounded))
 
-        reward = reward_daily_kimi_praise(
+    async def _reward_praise_message(self, message: discord.Message, *, recovered: bool = False, rules: list[dict] | None = None) -> bool | None:
+        if message.author.bot or not message.guild:
+            return None
+        if message.channel.id != PRAISE_KIMI_CHANNEL_ID:
+            return None
+        occurred_at = getattr(message, "created_at", None)
+        rule = await asyncio.to_thread(match_praise_rule, message.content, occurred_at, rules)
+        if not rule:
+            return None
+
+        reward = await asyncio.to_thread(
+            reward_daily_kimi_praise,
             user_id=message.author.id,
             guild_id=message.guild.id,
             message_id=message.id,
+            rule_id=rule["id"],
+            min_reward=rule["min_reward"],
+            max_reward=rule["max_reward"],
         )
         if not reward.get("success"):
             if reward.get("reason") == "already_claimed" and reward.get("message_id") == str(message.id):
-                amount = int(float(reward.get("amount", 0) or 0))
-                emoji = PRAISE_REWARD_EMOJIS.get(amount)
+                emoji = self._reward_emoji(reward.get("amount", 0))
                 if emoji and not any(str(reaction.emoji) == emoji for reaction in message.reactions):
                     try:
                         await message.add_reaction(emoji)
@@ -103,8 +118,8 @@ class PointListener(commands.Cog):
                         pass
             return False
 
-        amount = int(float(reward.get("amount", 0) or 0))
-        emoji = PRAISE_REWARD_EMOJIS.get(amount)
+        amount = float(reward.get("amount", 0) or 0)
+        emoji = self._reward_emoji(amount)
         if emoji:
             try:
                 await message.add_reaction(emoji)
@@ -112,8 +127,8 @@ class PointListener(commands.Cog):
                 pass
         marker = "定期扫描补发" if recovered else "即时奖励"
         print(
-            f"🥚 [蛋壳系统] {message.author.name} 赞美奇米蛋{marker} "
-            f"+{format_shells(amount)} 蛋壳 (Message {message.id})"
+            f"🥚 [蛋壳系统] {message.author.name} 触发识别规则{marker} "
+            f"+{format_shells(amount)} 蛋壳 (Rule {rule['id']}, Message {message.id})"
         )
         return True
 
@@ -130,8 +145,9 @@ class PointListener(commands.Cog):
         after_cn = datetime.datetime.combine(today_cn, datetime.time.min, tzinfo=config.TZ_CN)
         after_utc = after_cn.astimezone(datetime.timezone.utc)
         try:
+            rules = await asyncio.to_thread(load_praise_rules)
             async for message in channel.history(limit=None, after=after_utc, oldest_first=True):
-                await self._reward_praise_message(message, recovered=True)
+                await self._reward_praise_message(message, recovered=True, rules=rules)
         except (discord.Forbidden, discord.HTTPException) as error:
             print(f"[蛋壳系统] 赞美奇米蛋补发扫描失败: {error}")
 
@@ -144,12 +160,10 @@ class PointListener(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
-        if (
-            message.channel.id == PRAISE_KIMI_CHANNEL_ID
-            and message.content.strip() == PRAISE_KIMI_TRIGGER
-        ):
-            await self._reward_praise_message(message)
-            return
+        if message.channel.id == PRAISE_KIMI_CHANNEL_ID:
+            matched = await self._reward_praise_message(message)
+            if matched is not None:
+                return
 
         now = time.time()
         last_time = self.user_cooldowns.get(message.author.id, 0)

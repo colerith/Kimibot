@@ -5,6 +5,7 @@ import math
 import os
 import random
 import threading
+import uuid
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from pathlib import Path
@@ -14,11 +15,125 @@ import config
 
 POINTS_DATA_FILE = "data/user_points.json"
 RANDOM_EVENTS_FILE = Path(__file__).with_name("random_events.json")
+PRAISE_RULES_FILE = "data/praise_rules.json"
 TZ_CN = timezone(timedelta(hours=8))
 
 SHELL_PRECISION = 1
 LEGACY_POINTS_TO_SHELLS = 0.1
 _POINTS_DATA_LOCK = threading.RLock()
+_PRAISE_RULES_LOCK = threading.RLock()
+
+
+def _default_praise_rule() -> dict:
+    return {
+        "id": "default_kimi_praise",
+        "field": str(getattr(config, "PRAISE_KIMI_TRIGGER", "赞美奇米蛋！") or "赞美奇米蛋！").strip(),
+        "match_mode": "exact",
+        "min_reward": 1.0,
+        "max_reward": 9.0,
+        "start_at": "",
+        "end_at": "",
+    }
+
+
+def _normalize_praise_rule(raw: dict | None) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    field = str(raw.get("field", "") or "").strip()
+    if not field:
+        return None
+    rule_id = str(raw.get("id", "") or "").strip()[:64] or uuid.uuid4().hex[:12]
+    mode = str(raw.get("match_mode", "exact") or "exact").strip().lower()
+    if mode not in {"exact", "contains"}:
+        mode = "exact"
+    try:
+        minimum = round(max(0.1, float(raw.get("min_reward", 1.0))), 1)
+        maximum = round(max(0.1, float(raw.get("max_reward", minimum))), 1)
+    except (TypeError, ValueError):
+        minimum, maximum = 1.0, 9.0
+    if maximum < minimum:
+        minimum, maximum = maximum, minimum
+    return {
+        "id": rule_id,
+        "field": field[:200],
+        "match_mode": mode,
+        "min_reward": minimum,
+        "max_reward": maximum,
+        "start_at": str(raw.get("start_at", "") or "").strip()[:32],
+        "end_at": str(raw.get("end_at", "") or "").strip()[:32],
+    }
+
+
+def load_praise_rules() -> list[dict]:
+    with _PRAISE_RULES_LOCK:
+        if not os.path.exists(PRAISE_RULES_FILE):
+            return [_default_praise_rule()]
+        try:
+            with open(PRAISE_RULES_FILE, "r", encoding="utf-8") as file:
+                raw = json.load(file)
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
+            return [_default_praise_rule()]
+        items = raw.get("rules", []) if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            return [_default_praise_rule()]
+        rules, seen = [], set()
+        for item in items:
+            rule = _normalize_praise_rule(item)
+            if rule and rule["id"] not in seen:
+                seen.add(rule["id"])
+                rules.append(rule)
+        return rules
+
+
+def save_praise_rules(rules: list[dict]) -> list[dict]:
+    normalized, seen = [], set()
+    for item in rules or []:
+        rule = _normalize_praise_rule(item)
+        if rule and rule["id"] not in seen:
+            seen.add(rule["id"])
+            normalized.append(rule)
+    with _PRAISE_RULES_LOCK:
+        os.makedirs(os.path.dirname(PRAISE_RULES_FILE), exist_ok=True)
+        with open(PRAISE_RULES_FILE, "w", encoding="utf-8") as file:
+            json.dump({"version": 1, "rules": normalized}, file, indent=4, ensure_ascii=False)
+    return normalized
+
+
+def _parse_praise_time(raw: str) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=TZ_CN)
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=TZ_CN) if parsed.tzinfo is None else parsed.astimezone(TZ_CN)
+
+
+def match_praise_rule(content: str, occurred_at: datetime | None = None, rules: list[dict] | None = None) -> dict | None:
+    text = str(content or "").strip()
+    if not text:
+        return None
+    moment = occurred_at or datetime.now(TZ_CN)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=TZ_CN)
+    else:
+        moment = moment.astimezone(TZ_CN)
+    for rule in rules if rules is not None else load_praise_rules():
+        start = _parse_praise_time(rule.get("start_at", ""))
+        end = _parse_praise_time(rule.get("end_at", ""))
+        if (start and moment < start) or (end and moment > end):
+            continue
+        field = str(rule.get("field", "") or "").strip()
+        matched = text == field if rule.get("match_mode") == "exact" else field in text
+        if matched:
+            return rule
+    return None
 
 
 def _locked_points_data(func):
@@ -716,15 +831,27 @@ def _get_praise_weights() -> list[int]:
 
 
 @_locked_points_data
-def reward_daily_kimi_praise(user_id: int, guild_id: int, message_id: int) -> dict:
-    """每日一次赞美奇米蛋奖励，奖励 1-9 蛋壳且高额更稀有。"""
+def reward_daily_kimi_praise(
+    user_id: int,
+    guild_id: int,
+    message_id: int,
+    *,
+    rule_id: str = "default_kimi_praise",
+    min_reward: float = 1.0,
+    max_reward: float = 9.0,
+) -> dict:
+    """Reward each configured recognition rule at most once per user per day."""
     data = load_points_data()
     today = _today()
     reward_key = f"{guild_id}:{today}"
     rows = data.setdefault("daily_praise_rewards", {}).setdefault(reward_key, {})
     uid = str(user_id)
-    if uid in rows:
-        existing = rows.get(uid, {})
+    normalized_rule_id = str(rule_id or "default_kimi_praise")[:64]
+    claim_key = f"{uid}:{normalized_rule_id}"
+    # The former single-trigger format used the bare user ID. Preserve its daily claim.
+    legacy_claimed = normalized_rule_id == "default_kimi_praise" and uid in rows
+    if claim_key in rows or legacy_claimed:
+        existing = rows.get(claim_key, rows.get(uid, {}))
         return {
             "success": False,
             "reason": "already_claimed",
@@ -732,16 +859,21 @@ def reward_daily_kimi_praise(user_id: int, guild_id: int, message_id: int) -> di
             "message_id": str(existing.get("message_id", "")) if isinstance(existing, dict) else "",
         }
 
-    amount = random.choices(list(range(1, 10)), weights=_get_praise_weights(), k=1)[0]
+    minimum = max(1, int(round(float(min_reward) * 10)))
+    maximum = max(1, int(round(float(max_reward) * 10)))
+    if maximum < minimum:
+        minimum, maximum = maximum, minimum
+    amount = random.randint(minimum, maximum) / 10
     record, _ = _ensure_user_record(data, user_id, guild_id)
     before = _round_shells(record.get("shells", 0))
     after = _round_shells(before + amount)
     actual_delta = _round_delta(after - before)
 
-    rows[uid] = {
+    rows[claim_key] = {
         "time": _now_iso(),
         "message_id": str(message_id),
         "amount": actual_delta,
+        "rule_id": normalized_rule_id,
     }
     record["shells"] = after
     record["points"] = after
@@ -752,7 +884,7 @@ def reward_daily_kimi_praise(user_id: int, guild_id: int, message_id: int) -> di
         guild_id=guild_id,
         amount=actual_delta,
         source="kimi_praise",
-        reason=f"message_id={message_id}",
+        reason=f"message_id={message_id};rule={normalized_rule_id}",
     )
     save_points_data(data)
     return {"success": True, "reason": "rewarded", "amount": actual_delta, "balance": after}
