@@ -1043,11 +1043,18 @@ class AccelerationTierButton(discord.ui.Button):
         self.tier = tier
 
     async def callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
         if has_verification_role(interaction.user):
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "你已经通过验证答题啦，不需要再购买加速卡。",
                 ephemeral=True,
             )
+        if not interaction.guild_id:
+            return await interaction.followup.send("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
 
         result = purchase_acceleration_card(interaction.user.id, interaction.guild_id, self.tier["id"])
         if not result.get("success"):
@@ -1062,7 +1069,7 @@ class AccelerationTierButton(discord.ui.Button):
                 msg = "你的加速天数已经达到上限，最快等待期已经压到 5 天啦。"
             else:
                 msg = "购买失败，请稍后再试。"
-            return await interaction.response.send_message(msg, ephemeral=True)
+            return await interaction.followup.send(msg, ephemeral=True)
 
         status = result["status"]
         wait_status = get_account_wait_status(interaction.user, interaction.guild_id)
@@ -1075,7 +1082,7 @@ class AccelerationTierButton(discord.ui.Button):
             f"实际还需等待：**{wait_status['remaining_wait_days']}** 天\n"
             f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳"
         )
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 def build_acceleration_embed(member: discord.Member, guild_id: int) -> discord.Embed:
