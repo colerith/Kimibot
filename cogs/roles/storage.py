@@ -2,12 +2,18 @@
 
 import json
 import os
+import threading
+import uuid
 from typing import Dict, List
 
 ROLES_DATA_FILE = "data/general_roles.json"
 COLLECTIONS_DATA_FILE = "data/user_collections.json"
 LOTTERY_STATS_DATA_FILE = "data/role_lottery_stats.json"
 REDEEM_OWNERSHIP_DATA_FILE = "data/role_redeem_ownership.json"
+COLLECTION_REWARDS_DATA_FILE = "data/role_collection_rewards.json"
+
+_collection_reward_lock = threading.Lock()
+_ownership_lock = threading.RLock()
 
 RARITY_NORMAL = 1
 RARITY_RARE = 2
@@ -51,9 +57,15 @@ DEFAULT_LOTTERY_CONFIG = {
 
 DEFAULT_REDEEM_ROLE_CONFIG = {
     "price": 10.0,
+    "sale_mode": "permanent",
     "discount_price": 0.0,
     "discount_start": "",
     "discount_end": "",
+}
+
+DEFAULT_FULL_COLLECTION_REWARD = {
+    "name": "图鉴大师", "emoji": "👑", "description": "完整收集奖池中的全部身份组",
+    "reward_shells": 0.0, "reward_role_id": 0,
 }
 
 
@@ -140,9 +152,13 @@ def _normalize_shell_reward(raw: dict) -> dict:
 def _normalize_redeem_role_config(raw: dict | None = None) -> dict:
     if not isinstance(raw, dict):
         raw = {}
+    sale_mode = str(raw.get("sale_mode", DEFAULT_REDEEM_ROLE_CONFIG["sale_mode"]) or "permanent").strip().lower()
+    if sale_mode not in {"permanent", "limited"}:
+        sale_mode = "permanent"
     return {
         "price": _normalize_shell_amount(raw.get("price", DEFAULT_REDEEM_ROLE_CONFIG["price"]), DEFAULT_REDEEM_ROLE_CONFIG["price"]),
-        "discount_price": _normalize_shell_amount(raw.get("discount_price", DEFAULT_REDEEM_ROLE_CONFIG["discount_price"]), DEFAULT_REDEEM_ROLE_CONFIG["discount_price"]),
+        "sale_mode": sale_mode,
+        "discount_price": 0.0 if sale_mode == "limited" else _normalize_shell_amount(raw.get("discount_price", DEFAULT_REDEEM_ROLE_CONFIG["discount_price"]), DEFAULT_REDEEM_ROLE_CONFIG["discount_price"]),
         "discount_start": str(raw.get("discount_start", "") or "").strip(),
         "discount_end": str(raw.get("discount_end", "") or "").strip(),
     }
@@ -160,6 +176,40 @@ def _uniq_ids(values) -> list[int]:
             seen.add(iv)
             result.append(iv)
     return result
+
+
+def _normalize_collection_reward(raw: dict | None, defaults: dict | None = None) -> dict:
+    base = dict(defaults or {})
+    raw = raw if isinstance(raw, dict) else {}
+    try:
+        reward_role_id = int(raw.get("reward_role_id", base.get("reward_role_id", 0)) or 0)
+    except (TypeError, ValueError):
+        reward_role_id = 0
+    return {
+        "name": str(raw.get("name", base.get("name", "未命名分组")) or "未命名分组")[:80],
+        "emoji": str(raw.get("emoji", base.get("emoji", "📚")) or "📚")[:20],
+        "description": str(raw.get("description", base.get("description", "")) or "")[:240],
+        "reward_shells": _normalize_shell_amount(raw.get("reward_shells", base.get("reward_shells", 0)), 0.0),
+        "reward_role_id": max(0, reward_role_id),
+    }
+
+
+def _normalize_collection_config(raw: dict | None, lottery_ids: list[int]) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    lottery_set, used_ids, assigned_roles = set(lottery_ids), set(), set()
+    groups = []
+    items = raw.get("groups", []) if isinstance(raw.get("groups", []), list) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        group_id = str(item.get("id", "") or "").strip()[:64] or uuid.uuid4().hex[:12]
+        if group_id in used_ids:
+            continue
+        used_ids.add(group_id)
+        role_ids = [rid for rid in _uniq_ids(item.get("role_ids", [])) if rid in lottery_set and rid not in assigned_roles]
+        assigned_roles.update(role_ids)
+        groups.append({"id": group_id, "role_ids": role_ids, **_normalize_collection_reward(item)})
+    return {"groups": groups, "full_reward": _normalize_collection_reward(raw.get("full_reward"), DEFAULT_FULL_COLLECTION_REWARD)}
 
 
 def _normalize_role_data(data: dict) -> dict:
@@ -232,6 +282,7 @@ def _normalize_role_data(data: dict) -> dict:
     panel_info = data.get("panel_info", {})
     if not isinstance(panel_info, dict):
         panel_info = {}
+    collection_config = _normalize_collection_config(data.get("collection_config"), lottery)
 
     return {
         "claimable_roles": claimable,
@@ -242,6 +293,7 @@ def _normalize_role_data(data: dict) -> dict:
         "lottery_role_meta": role_meta,
         "redeem_role_meta": redeem_meta,
         "lottery_config": lottery_config,
+        "collection_config": collection_config,
     }
 
 # --- 身份组配置数据 ---
@@ -315,6 +367,7 @@ def set_redeem_role_config(
     role_id: int,
     *,
     price: float,
+    sale_mode: str = "permanent",
     discount_price: float = 0.0,
     discount_start: str = "",
     discount_end: str = "",
@@ -326,6 +379,7 @@ def set_redeem_role_config(
     data.setdefault("redeem_role_meta", {})[str(role_id)] = _normalize_redeem_role_config(
         {
             "price": price,
+            "sale_mode": sale_mode,
             "discount_price": discount_price,
             "discount_start": discount_start,
             "discount_end": discount_end,
@@ -413,6 +467,77 @@ def update_lottery_config(
     save_role_data(data)
     return cfg
 
+
+def get_collection_config(role_data: dict | None = None) -> dict:
+    data = role_data if role_data is not None else load_role_data()
+    return _normalize_collection_config(data.get("collection_config"), data.get("lottery_roles", []))
+
+
+def save_collection_config(config_data: dict) -> dict:
+    data = load_role_data()
+    data["collection_config"] = _normalize_collection_config(config_data, data.get("lottery_roles", []))
+    save_role_data(data)
+    return data["collection_config"]
+
+
+def get_collection_reward_role_ids(role_data: dict | None = None) -> list[int]:
+    cfg = get_collection_config(role_data)
+    ids = [g.get("reward_role_id", 0) for g in cfg.get("groups", [])]
+    ids.append(cfg.get("full_reward", {}).get("reward_role_id", 0))
+    return [rid for rid in _uniq_ids(ids) if rid > 0]
+
+
+def load_collection_reward_claims() -> dict:
+    if not os.path.exists(COLLECTION_REWARDS_DATA_FILE):
+        return {}
+    try:
+        with open(COLLECTION_REWARDS_DATA_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(uid): {"groups": [str(v) for v in rec.get("groups", [])], "full": bool(rec.get("full", False))}
+            for uid, rec in raw.items() if isinstance(rec, dict)}
+
+
+def _save_collection_reward_claims(data: dict) -> None:
+    os.makedirs(os.path.dirname(COLLECTION_REWARDS_DATA_FILE), exist_ok=True)
+    with open(COLLECTION_REWARDS_DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def claim_completed_collection_rewards(user_id: int, owned_role_ids, role_data: dict | None = None) -> list[dict]:
+    """Reserve newly completed achievements atomically; each reward is returned once."""
+    data = role_data if role_data is not None else load_role_data()
+    cfg = get_collection_config(data)
+    owned, pool_ids, eligible = set(_uniq_ids(owned_role_ids)), set(data.get("lottery_roles", [])), []
+    with _collection_reward_lock:
+        claims = load_collection_reward_claims()
+        record = claims.setdefault(str(user_id), {"groups": [], "full": False})
+        claimed = set(str(v) for v in record.get("groups", []))
+        for group in cfg.get("groups", []):
+            required = set(group.get("role_ids", [])) & pool_ids
+            group_id = str(group.get("id", ""))
+            has_reward = float(group.get("reward_shells", 0) or 0) > 0 or int(group.get("reward_role_id", 0) or 0) > 0
+            if required and required <= owned and has_reward and group_id not in claimed:
+                eligible.append({"key": f"group:{group_id}", **group})
+                claimed.add(group_id)
+        record["groups"] = sorted(claimed)
+        full_reward = cfg.get("full_reward", {})
+        has_full_reward = float(full_reward.get("reward_shells", 0) or 0) > 0 or int(full_reward.get("reward_role_id", 0) or 0) > 0
+        if pool_ids and pool_ids <= owned and has_full_reward and not record.get("full", False):
+            eligible.append({"key": "full", **full_reward})
+            record["full"] = True
+        if eligible:
+            _save_collection_reward_claims(claims)
+    return eligible
+
+
+def get_collection_reward_claim_status(user_id: int) -> dict:
+    return load_collection_reward_claims().get(str(user_id), {"groups": [], "full": False})
+
+
 def load_collections_data():
     """加载用户藏品数据。"""
     if not os.path.exists(COLLECTIONS_DATA_FILE):
@@ -431,14 +556,15 @@ def save_collections_data(data):
 
 def add_to_collection(user_id: int, role_id: int):
     """将一个稀有身份组添加到用户的永久藏品中。"""
-    uid_str = str(user_id)
-    data = load_collections_data()
-    if uid_str not in data:
-        data[uid_str] = []
+    with _ownership_lock:
+        uid_str = str(user_id)
+        data = load_collections_data()
+        if uid_str not in data:
+            data[uid_str] = []
 
-    if role_id not in data[uid_str]:
-        data[uid_str].append(role_id)
-        save_collections_data(data)
+        if role_id not in data[uid_str]:
+            data[uid_str].append(role_id)
+            save_collections_data(data)
 
 def get_user_collection(user_id: int) -> list:
     """获取一个用户的所有藏品ID列表。"""
@@ -468,16 +594,69 @@ def save_redeem_ownership_data(data):
 
 
 def add_redeem_ownership(user_id: int, role_id: int):
-    uid_str = str(user_id)
-    data = load_redeem_ownership_data()
-    roles = data.setdefault(uid_str, [])
-    if role_id not in roles:
-        roles.append(role_id)
-        save_redeem_ownership_data(data)
+    with _ownership_lock:
+        uid_str = str(user_id)
+        data = load_redeem_ownership_data()
+        roles = data.setdefault(uid_str, [])
+        if role_id not in roles:
+            roles.append(role_id)
+            save_redeem_ownership_data(data)
 
 
 def get_user_redeem_ownership(user_id: int) -> list[int]:
     return load_redeem_ownership_data().get(str(user_id), [])
+
+
+def reconcile_cached_member_ownership(member_role_ids: dict[int, set[int]], role_data: dict | None = None) -> dict:
+    """Bulk-import configured roles already present on cached guild members.
+
+    This function performs only local JSON reads/writes. It never calls Discord.
+    """
+    data = role_data if role_data is not None else load_role_data()
+    collectible_ids = set(data.get("lottery_roles", [])) | set(get_collection_reward_role_ids(data))
+    redeem_ids = set(data.get("redeem_roles", []))
+    collection_added = redeem_added = users_changed = 0
+
+    with _ownership_lock:
+        collections = load_collections_data()
+        redeem_ownership = load_redeem_ownership_data()
+        collections_changed = redeem_changed = False
+
+        for user_id, raw_role_ids in member_role_ids.items():
+            role_ids = set(_uniq_ids(raw_role_ids))
+            found_collection = role_ids & collectible_ids
+            found_redeem = role_ids & redeem_ids
+            user_changed = False
+
+            if found_collection:
+                owned = set(_uniq_ids(collections.get(str(user_id), [])))
+                missing = found_collection - owned
+                if missing:
+                    collections[str(user_id)] = sorted(owned | missing)
+                    collection_added += len(missing)
+                    collections_changed = user_changed = True
+
+            if found_redeem:
+                owned = set(_uniq_ids(redeem_ownership.get(str(user_id), [])))
+                missing = found_redeem - owned
+                if missing:
+                    redeem_ownership[str(user_id)] = sorted(owned | missing)
+                    redeem_added += len(missing)
+                    redeem_changed = user_changed = True
+
+            if user_changed:
+                users_changed += 1
+
+        if collections_changed:
+            save_collections_data(collections)
+        if redeem_changed:
+            save_redeem_ownership_data(redeem_ownership)
+
+    return {
+        "users_changed": users_changed,
+        "collection_roles_added": collection_added,
+        "redeem_roles_added": redeem_added,
+    }
 
 
 def _make_lottery_user_key(user_id: int, guild_id: int | None = None) -> str:

@@ -5,6 +5,7 @@ from discord import ui
 import asyncio
 import random
 import math
+import uuid
 import config
 from datetime import datetime, timezone, timedelta
 
@@ -26,6 +27,10 @@ from .storage import (
     set_lottery_role_kind,
     set_redeem_role_config,
     update_lottery_config,
+    get_collection_config,
+    save_collection_config,
+    get_collection_reward_role_ids,
+    claim_completed_collection_rewards,
     RARITY_NORMAL,
     RARITY_RARE,
     RARITY_LEGENDARY,
@@ -133,6 +138,8 @@ def _parse_beijing_time(raw: str) -> datetime | None:
 def _effective_redeem_price(meta: dict, now: datetime | None = None) -> tuple[float, bool]:
     now = now or datetime.now(BEIJING_TZ)
     price = max(0.0, float(meta.get("price", 10.0)))
+    if meta.get("sale_mode") == "limited":
+        return price, False
     discount_price = max(0.0, float(meta.get("discount_price", 0.0)))
     start = _parse_beijing_time(meta.get("discount_start", ""))
     end = _parse_beijing_time(meta.get("discount_end", ""))
@@ -141,12 +148,32 @@ def _effective_redeem_price(meta: dict, now: datetime | None = None) -> tuple[fl
     return price, False
 
 
+def _redeem_availability(meta: dict, now: datetime | None = None) -> tuple[bool, str]:
+    if meta.get("sale_mode") != "limited":
+        return True, "常驻"
+    now = now or datetime.now(BEIJING_TZ)
+    start = _parse_beijing_time(meta.get("discount_start", ""))
+    end = _parse_beijing_time(meta.get("discount_end", ""))
+    if not start or not end or end <= start:
+        return False, "限时配置异常"
+    if now < start:
+        return False, "待上架"
+    if now > end:
+        return False, "已下架"
+    return True, "限时上架中"
+
+
 def _redeem_price_line(meta: dict) -> str:
     price, active = _effective_redeem_price(meta)
     original = format_shells(meta.get("price", 10.0))
     discount = format_shells(meta.get("discount_price", 0.0))
     start = str(meta.get("discount_start", "") or "").strip()
     end = str(meta.get("discount_end", "") or "").strip()
+    if meta.get("sale_mode") == "limited":
+        available, status = _redeem_availability(meta)
+        if available:
+            return f"⏳ 限时上架 · **{original}** 蛋壳（截至 {end}）"
+        return f"⏳ {status} · **{original}** 蛋壳（{start or '?'} 至 {end or '?'}）"
     if active:
         return f"优惠中 **{format_shells(price)}** 蛋壳（原价 {original}）"
     if float(meta.get("discount_price", 0.0) or 0) > 0 and start and end:
@@ -169,6 +196,118 @@ def _weighted_shell_reward(min_amount: float, max_amount: float) -> float:
     steps = list(range(min_steps, max_steps + 1))
     weights = [1 / ((step - min_steps + 1) ** 1.35) for step in steps]
     return round(random.choices(steps, weights=weights, k=1)[0] / 10, 1)
+
+
+def _settle_collection_rewards(user_id: int, guild_id: int, owned_ids: set[int], role_data: dict) -> list[dict]:
+    all_rewards = []
+    owned = set(owned_ids)
+    # A reward role may itself complete another configured series.
+    for _ in range(len(get_collection_config(role_data).get("groups", [])) + 2):
+        rewards = claim_completed_collection_rewards(user_id, owned, role_data)
+        if not rewards:
+            break
+        all_rewards.extend(rewards)
+        for reward in rewards:
+            shells = float(reward.get("reward_shells", 0) or 0)
+            if shells > 0:
+                modify_user_points(user_id, shells, guild_id, source="role_collection_reward", reason=reward.get("key", "collection"))
+            reward_role_id = int(reward.get("reward_role_id", 0) or 0)
+            if reward_role_id:
+                add_to_collection(user_id, reward_role_id)
+                owned.add(reward_role_id)
+    return all_rewards
+
+
+def _collection_reward_text(reward: dict, guild: discord.Guild) -> str:
+    parts = []
+    shells = float(reward.get("reward_shells", 0) or 0)
+    if shells > 0:
+        parts.append(f"+{format_shells(shells)} 蛋壳")
+    role_id = int(reward.get("reward_role_id", 0) or 0)
+    role = guild.get_role(role_id) if role_id else None
+    if role:
+        parts.append(role.mention)
+    return " · ".join(parts) if parts else "纪念成就"
+
+
+def build_collection_embed(guild: discord.Guild, user_id: int, selected_group_id: str = "__all__") -> discord.Embed:
+    data = load_role_data()
+    cfg = get_collection_config(data)
+    pool_ids = [rid for rid in data.get("lottery_roles", []) if guild.get_role(rid)]
+    owned = set(get_user_collection(user_id))
+    groups = cfg.get("groups", [])
+    selected = next((g for g in groups if g.get("id") == selected_group_id), None)
+    shown_ids = pool_ids if selected is None else [rid for rid in selected.get("role_ids", []) if rid in pool_ids]
+    shown_owned = len(set(shown_ids) & owned)
+    completed_group_count = sum(1 for g in groups if set(g.get("role_ids", [])) and set(g.get("role_ids", [])) <= owned)
+    full_complete = bool(pool_ids) and set(pool_ids) <= owned
+    achievement_count = completed_group_count + int(full_complete)
+
+    embed = discord.Embed(
+        title="🌌 奇米身份组册",
+        description=(f"*按系列查看收集进度～*\n\n"
+                     f"🐾 总进度：**{len(set(pool_ids) & owned)}/{len(pool_ids)}**　"
+                     f"本册：**{shown_owned}/{len(shown_ids)}**　🏆 成就：**{achievement_count}/{len(groups) + 1}**"),
+        color=0xFFB6C1,
+    )
+    if selected:
+        embed.add_field(name=f"{selected.get('emoji', '📚')} {selected.get('name', '未命名')} · {shown_owned}/{len(shown_ids)}",
+                        value=selected.get("description") or "这一册还没有简介。", inline=False)
+    else:
+        embed.add_field(name=f"📚 全部身份组 · {shown_owned}/{len(shown_ids)}", value="选择下方系列即可筛选图鉴。", inline=False)
+
+    role_lines = []
+    for rid in shown_ids:
+        role = guild.get_role(rid)
+        if role:
+            role_lines.append(f"{'✅' if rid in owned else '❔'} {role.mention} · {'已获得' if rid in owned else '未获得'}")
+    embed.add_field(name="可收集身份组", value=_preview_lines(role_lines) if role_lines else "*本系列暂未配置身份组*", inline=False)
+
+    achievement_lines = []
+    for group in groups:
+        required = set(group.get("role_ids", [])) & set(pool_ids)
+        count = len(required & owned)
+        done = bool(required) and required <= owned
+        achievement_lines.append(
+            f"{'✅' if done else '📍'} **{group.get('emoji', '📚')} {group.get('name', '未命名')}** · {count}/{len(required)}\n"
+            f"{group.get('description') or '收集本系列全部身份组'} → {_collection_reward_text(group, guild)}"
+        )
+    full = cfg.get("full_reward", {})
+    achievement_lines.append(
+        f"{'✅' if full_complete else '📍'} **{full.get('emoji', '👑')} {full.get('name', '图鉴大师')}** · "
+        f"{len(set(pool_ids) & owned)}/{len(pool_ids)}\n{full.get('description') or '全图鉴收集'} → {_collection_reward_text(full, guild)}"
+    )
+    embed.add_field(name="🏆 收集成就", value=_preview_lines(achievement_lines), inline=False)
+    embed.set_footer(text="达成奖励会自动发放，每项仅可获得一次；奖励身份组会永久加入换装衣柜。")
+    return embed
+
+
+class CollectionFilterSelect(discord.ui.Select):
+    def __init__(self, groups: list[dict], selected: str):
+        options = [discord.SelectOption(label="全部身份组", value="__all__", emoji="🌌", default=selected == "__all__")]
+        for group in groups[:24]:
+            options.append(discord.SelectOption(label=str(group.get("name", "未命名"))[:100], value=str(group.get("id")),
+                                                default=selected == str(group.get("id"))))
+        super().__init__(placeholder="选择身份组系列…", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, CollectionCatalogView):
+            return await interaction.response.defer()
+        panel.selected_group_id = self.values[0]
+        panel.rebuild()
+        await interaction.response.edit_message(embed=build_collection_embed(interaction.guild, interaction.user.id, panel.selected_group_id), view=panel)
+
+
+class CollectionCatalogView(discord.ui.View):
+    def __init__(self, selected_group_id: str = "__all__"):
+        super().__init__(timeout=300)
+        self.selected_group_id = selected_group_id
+        self.rebuild()
+
+    def rebuild(self):
+        self.clear_items()
+        self.add_item(CollectionFilterSelect(get_collection_config().get("groups", []), self.selected_group_id))
 
 
 def _pick_available_role(
@@ -566,6 +705,7 @@ class RoleLotteryView(discord.ui.View):
             modify_user_points(user.id, total_refund, guild_id, source="role_lottery_refund", reason=f"draw_count={draw_count}")
         if total_shell_reward > 0:
             modify_user_points(user.id, total_shell_reward, guild_id, source="role_lottery_shell_reward", reason=f"draw_count={draw_count}")
+        collection_rewards = _settle_collection_rewards(user.id, guild_id, user_collection_ids, data)
         record_lottery_draw(
             user.id,
             guild_id,
@@ -646,6 +786,12 @@ class RoleLotteryView(discord.ui.View):
             embed.add_field(name="当前穿戴", value=f"已自动换装为 {equipped_role.mention}", inline=False)
         if equip_error:
             embed.add_field(name="提示", value=f"身份组发放时发生权限问题: {equip_error}", inline=False)
+        if collection_rewards:
+            reward_lines = [
+                f"{reward.get('emoji', '🏆')} **{reward.get('name', '收集成就')}**：{_collection_reward_text(reward, interaction.guild)}"
+                for reward in collection_rewards
+            ]
+            embed.add_field(name="🏆 新达成收集成就", value=_preview_lines(reward_lines), inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -676,59 +822,17 @@ class RoleLotteryView(discord.ui.View):
     @discord.ui.button(label="📊 奖池图鉴", style=discord.ButtonStyle.success, emoji="🌌", custom_id="lottery_collection_view")
     async def collection_callback(self, button, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-
         data = load_role_data()
-        pool_ids = set(data.get("lottery_roles", []))
-
-        if not pool_ids:
+        if not data.get("lottery_roles", []):
             return await interaction.followup.send("🌑 这片星域空空如也（奖池未配置）。", ephemeral=True)
-
-        guild = interaction.guild
-
-        # 【✨ 核心修改：从新的藏品数据库读取数据】
-        user_collection_ids = set(get_user_collection(interaction.user.id))
-
-        # 1. 梳理奖池和拥有状态
-        valid_roles_in_pool = [r for r in [guild.get_role(rid) for rid in pool_ids] if r]
-
-        # ✨ 现在通过藏品ID来判断拥有状态
-        owned_lottery_roles = [r for r in valid_roles_in_pool if r.id in user_collection_ids]
-
-        total_count = len(valid_roles_in_pool)
-        owned_count = len(owned_lottery_roles)
-
-        # 2. 构建图鉴描述
-        embed = discord.Embed(title="🌌 命运星图 · 珍藏馆", color=0x9b59b6)
-        embed.description = f"这里记录着所有可能降临的命运。\n你已点亮了 **{owned_count} / {total_count}** 颗星辰。"
-
-        # 显示所有已拥有
-        if owned_lottery_roles:
-            status_text = "\n".join([f"🌟 {r.mention}" for r in owned_lottery_roles])
-        else:
-            status_text = "⚪ 你尚未收集任何稀有装饰。"
-
-        embed.add_field(name="我的收藏", value=status_text, inline=False)
-
-        # 列出所有奖池内容
-        pool_desc_list = []
-        for r in sorted(valid_roles_in_pool, key=lambda role: role.name):
-            rarity = get_lottery_role_rarity(r.id, data)
-            kind = get_lottery_role_kind(r.id, data)
-            rarity_text = _rarity_label(rarity)
-            kind_text = _lottery_kind_label(kind)
-            if r in owned_lottery_roles:
-                pool_desc_list.append(f"✅ **{r.name}** [{kind_text} | {rarity_text}] (已拥有)")
-            else:
-                pool_desc_list.append(f"❔ {r.name} [{kind_text} | {rarity_text}]")
-
-        pool_text = "\n".join(pool_desc_list)
-        if len(pool_text) > 1000:
-            pool_text = pool_text[:950] + "\n... (更多星辰隐藏于深空)"
-
-        embed.add_field(name=f"🏆 完整奖池 ({total_count}种)", value=pool_text, inline=False)
-        embed.set_footer(text="愿命运女神眷顾你的每一次投掷。")
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        owned = set(get_user_collection(interaction.user.id))
+        rewards = _settle_collection_rewards(interaction.user.id, interaction.guild_id or 0, owned, data)
+        embed = build_collection_embed(interaction.guild, interaction.user.id)
+        if rewards:
+            embed.add_field(name="🎁 刚刚自动发放", value=_preview_lines([
+                f"{r.get('emoji', '🏆')} **{r.get('name', '收集成就')}**：{_collection_reward_text(r, interaction.guild)}" for r in rewards
+            ]), inline=False)
+        await interaction.followup.send(embed=embed, view=CollectionCatalogView(), ephemeral=True)
 
 # --- 用户端视图 : 私密选择面板 ---
 class RoleClaimSelect(discord.ui.Select):
@@ -780,6 +884,7 @@ class RoleClaimSelect(discord.ui.Select):
         claimable_ids = data.get("claimable_roles", [])
         lottery_ids = data.get("lottery_roles", [])
         redeem_ids = data.get("redeem_roles", [])
+        collection_reward_ids = get_collection_reward_role_ids(data)
 
         exclusive_type = None
         if target_role.id in claimable_ids:
@@ -789,6 +894,8 @@ class RoleClaimSelect(discord.ui.Select):
             exclusive_type = "lottery_color" if lot_kind == LOTTERY_KIND_COLOR else "lottery_icon"
         elif target_role.id in redeem_ids:
             exclusive_type = "redeem"
+        elif target_role.id in collection_reward_ids:
+            exclusive_type = "collection_reward"
 
         # 2. 根据类型执行互斥移除并添加
         if target_role not in interaction.user.roles:
@@ -902,19 +1009,21 @@ def build_redeem_shop_embed(guild: discord.Guild, user_id: int) -> discord.Embed
         if not role:
             continue
         meta = get_redeem_role_config(rid, data)
+        if not _redeem_availability(meta)[0]:
+            continue
         lines.append(f"{role.mention} - {_redeem_price_line(meta)}")
 
     balance = get_user_points(user_id, guild.id)
     embed = discord.Embed(
         title="🥚 身份兑换",
         description=(
-            "用蛋壳直接兑换常驻身份组。\n"
+            "用蛋壳兑换当前上架的身份组。\n"
             f"你的蛋壳：**{format_shells(balance)}**\n\n"
             + ("\n".join(lines) if lines else "*当前暂无可兑换身份组。*")
         ),
         color=STYLE["KIMI_YELLOW"],
     )
-    embed.set_footer(text="限时优惠按北京时间计算。")
+    embed.set_footer(text="限时优惠与限时上架均按北京时间计算。")
     return embed
 
 
@@ -927,8 +1036,14 @@ class RedeemRoleSelect(discord.ui.Select):
             if not role:
                 continue
             meta = get_redeem_role_config(rid, data)
+            available, availability_label = _redeem_availability(meta)
+            if not available:
+                continue
             price, active = _effective_redeem_price(meta)
-            desc = f"{'限时优惠' if active else '当前价格'}: {format_shells(price)} 蛋壳"
+            if meta.get("sale_mode") == "limited":
+                desc = f"限时上架 · 原价 {format_shells(price)} 蛋壳"
+            else:
+                desc = f"{'限时优惠' if active else '当前价格'}: {format_shells(price)} 蛋壳"
             options.append(
                 discord.SelectOption(
                     label=role.name[:100],
@@ -971,6 +1086,12 @@ class RedeemRoleSelect(discord.ui.Select):
             return await interaction.response.send_message(f"你已经拥有 {role.mention} 啦。", ephemeral=True)
 
         meta = get_redeem_role_config(role_id, data)
+        available, availability_label = _redeem_availability(meta)
+        if not available:
+            return await interaction.response.send_message(
+                f"这个身份组当前不可兑换（{availability_label}）。请重新打开兑换面板查看当前上架内容。",
+                ephemeral=True,
+            )
         price, discount_active = _effective_redeem_price(meta)
         balance = get_user_points(interaction.user.id, interaction.guild_id)
         if balance < price:
@@ -985,7 +1106,7 @@ class RedeemRoleSelect(discord.ui.Select):
             -price,
             interaction.guild_id,
             source="role_redeem",
-            reason=f"role_id={role_id};discount={discount_active}",
+            reason=f"role_id={role_id};mode={meta.get('sale_mode', 'permanent')};discount={discount_active}",
         )
         try:
             await interaction.user.add_roles(role, reason="蛋壳兑换身份组")
@@ -1248,6 +1369,7 @@ class RoleClaimView(discord.ui.View):
         claimable_ids = set(data.get("claimable_roles", []))
         lottery_ids = set(data.get("lottery_roles", []))
         redeem_ids = set(data.get("redeem_roles", []))
+        collection_reward_ids = set(get_collection_reward_role_ids(data))
 
         # 从藏品数据库获取稀有身份组
         user_lottery_collection_ids = set(get_user_collection(interaction.user.id))
@@ -1294,6 +1416,7 @@ class RoleClaimView(discord.ui.View):
         }
         user_current_lottery_color = [r.name for r in interaction.user.roles if r.id in lottery_color_ids]
         user_current_lottery_icon = [r.name for r in interaction.user.roles if r.id in lottery_icon_ids]
+        user_current_collection_reward = [r.name for r in interaction.user.roles if r.id in collection_reward_ids]
 
         status_parts = []
         if user_current_claimable:
@@ -1304,6 +1427,8 @@ class RoleClaimView(discord.ui.View):
             status_parts.append(f"🎰 **稀有颜色**: {', '.join(user_current_lottery_color)}")
         if user_current_lottery_icon:
             status_parts.append(f"🏷️ **稀有图标**: {', '.join(user_current_lottery_icon)}")
+        if user_current_collection_reward:
+            status_parts.append(f"🏆 **收集奖励**: {', '.join(user_current_collection_reward)}")
 
         status_text = "\n".join(status_parts) if status_parts else "你目前还没有佩戴任何装饰哦。"
 
@@ -2141,11 +2266,16 @@ class RedeemConfigSelect(discord.ui.Select):
                 continue
             meta = get_redeem_role_config(rid, data)
             price, active = _effective_redeem_price(meta)
+            available, status = _redeem_availability(meta)
+            if meta.get("sale_mode") == "limited":
+                description = f"限时｜{status}｜原价 {format_shells(price)} 蛋壳"
+            else:
+                description = f"{'优惠中' if active else '常驻'}｜{format_shells(price)} 蛋壳"
             options.append(
                 discord.SelectOption(
                     label=role.name[:100],
                     value=str(rid),
-                    description=f"{'优惠中' if active else '当前'} {format_shells(price)} 蛋壳"[:100],
+                    description=description[:100],
                     emoji="🥚",
                 )
             )
@@ -2177,7 +2307,7 @@ class RedeemConfigSelect(discord.ui.Select):
 
 class RedeemConfigModal(discord.ui.Modal):
     def __init__(self, parent_view: "RedeemManagerView", role_id: int, meta: dict):
-        super().__init__(title="设置兑换价格")
+        super().__init__(title="设置兑换上架与价格")
         self.parent_view = parent_view
         self.role_id = role_id
 
@@ -2189,27 +2319,36 @@ class RedeemConfigModal(discord.ui.Modal):
             max_length=8,
         )
         self.discount_price_input = ui.InputText(
-            label="限时优惠价（0 表示关闭）",
+            label="优惠价（限时上架模式会强制忽略）",
             placeholder="例如 20",
             value=str(format_shells(meta.get("discount_price", 0.0))),
             required=True,
             max_length=8,
         )
         self.discount_start_input = ui.InputText(
-            label="优惠开始（北京时间，可留空）",
+            label="优惠/上架开始（北京时间）",
             placeholder="YYYY-MM-DD HH:MM",
             value=str(meta.get("discount_start", ""))[:32],
             required=False,
             max_length=32,
         )
         self.discount_end_input = ui.InputText(
-            label="优惠结束（北京时间，可留空）",
+            label="优惠/上架结束（北京时间）",
             placeholder="YYYY-MM-DD HH:MM",
             value=str(meta.get("discount_end", ""))[:32],
             required=False,
             max_length=32,
         )
+        mode_value = "限时" if meta.get("sale_mode") == "limited" else "常驻"
+        self.sale_mode_input = ui.InputText(
+            label="上架模式（常驻/限时）",
+            placeholder="填写 常驻 或 限时",
+            value=mode_value,
+            required=True,
+            max_length=8,
+        )
         self.add_item(self.price_input)
+        self.add_item(self.sale_mode_input)
         self.add_item(self.discount_price_input)
         self.add_item(self.discount_start_input)
         self.add_item(self.discount_end_input)
@@ -2223,15 +2362,32 @@ class RedeemConfigModal(discord.ui.Modal):
 
         start = (self.discount_start_input.value or "").strip()
         end = (self.discount_end_input.value or "").strip()
+        mode_raw = (self.sale_mode_input.value or "").strip().lower()
+        if mode_raw in {"常驻", "永久", "permanent"}:
+            sale_mode = "permanent"
+        elif mode_raw in {"限时", "limited"}:
+            sale_mode = "limited"
+        else:
+            return await interaction.response.send_message("❌ 上架模式只能填写 `常驻` 或 `限时`。", ephemeral=True)
         if (start and not _parse_beijing_time(start)) or (end and not _parse_beijing_time(end)):
             return await interaction.response.send_message(
                 "❌ 时间格式无法识别，请使用 `YYYY-MM-DD HH:MM`，或留空关闭时间区间。",
                 ephemeral=True,
             )
+        if sale_mode == "limited":
+            start_time = _parse_beijing_time(start)
+            end_time = _parse_beijing_time(end)
+            if not start_time or not end_time or end_time <= start_time:
+                return await interaction.response.send_message(
+                    "❌ 限时上架必须填写完整且有效的开始、结束时间，结束时间需晚于开始时间。",
+                    ephemeral=True,
+                )
+            discount_price = 0.0
 
         ok = set_redeem_role_config(
             self.role_id,
             price=price,
+            sale_mode=sale_mode,
             discount_price=discount_price,
             discount_start=start,
             discount_end=end,
@@ -2239,7 +2395,8 @@ class RedeemConfigModal(discord.ui.Modal):
         if not ok:
             return await interaction.response.send_message("❌ 该身份组不在兑换池中。", ephemeral=True)
 
-        await interaction.response.send_message("✅ 兑换价格已保存，重新打开兑换配置即可看到最新内容。", ephemeral=True)
+        mode_note = "限时上架（仅显示原价）" if sale_mode == "limited" else "常驻上架"
+        await interaction.response.send_message(f"✅ 兑换配置已保存：{mode_note}。重新打开兑换配置即可看到最新内容。", ephemeral=True)
 
 
 class RedeemBackButton(discord.ui.Button):
@@ -2298,7 +2455,8 @@ class RedeemManagerView(discord.ui.View):
             title="🥚 身份兑换配置",
             description=(
                 "把身份组加入兑换池后，成员可以用蛋壳直接兑换。\n"
-                "优惠时间按北京时间计算，格式建议 `YYYY-MM-DD HH:MM`。\n\n"
+                "可配置常驻或限时上架；限时身份组只显示原价，窗口外无法兑换。\n"
+                "优惠与上架时间均按北京时间计算，格式建议 `YYYY-MM-DD HH:MM`。\n\n"
                 + ("\n".join(lines) if lines else "*当前兑换池为空。*")
             ),
             color=0x2B2D31,
@@ -2314,6 +2472,210 @@ class RedeemManagerView(discord.ui.View):
             await interaction.edit_original_response(embed=embed, view=self)
 
 
+def _collection_admin_embed(guild: discord.Guild, selected_id: str) -> discord.Embed:
+    data, cfg = load_role_data(), get_collection_config()
+    groups = cfg.get("groups", [])
+    target = cfg.get("full_reward", {}) if selected_id == "__full__" else next((g for g in groups if g.get("id") == selected_id), None)
+    embed = discord.Embed(title="📚 图鉴分组与收集奖励", color=0xE6C7FF,
+                          description="选择一个分组后可配置成员、文案、蛋壳与奖励身份组。每个奖池身份组只属于一个分组。")
+    if not target:
+        embed.add_field(name="当前配置", value="暂无分组，请先点击【新增分组】。", inline=False)
+        return embed
+    role_ids = set(target.get("role_ids", [])) if selected_id != "__full__" else set(data.get("lottery_roles", []))
+    valid_roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
+    reward_role = guild.get_role(int(target.get("reward_role_id", 0) or 0))
+    embed.add_field(name=f"{target.get('emoji', '📚')} {target.get('name', '未命名')}",
+                    value=target.get("description") or "*无简介*", inline=False)
+    embed.add_field(name="收集范围", value=("全奖池（自动同步）" if selected_id == "__full__" else _preview_lines([r.mention for r in valid_roles])), inline=False)
+    embed.add_field(name="奖励", value=f"🥚 **{format_shells(target.get('reward_shells', 0))}** 蛋壳\n🏷️ {reward_role.mention if reward_role else '*未设置奖励身份组*'}", inline=False)
+    embed.set_footer(text=f"已配置 {len(groups)} 个分组；奖励身份组会加入用户的永久换装衣柜。")
+    return embed
+
+
+class CollectionAdminTargetSelect(discord.ui.Select):
+    def __init__(self, groups: list[dict], selected_id: str):
+        options = [discord.SelectOption(label="全图鉴收集奖励", value="__full__", emoji="👑", default=selected_id == "__full__")]
+        for group in groups[:24]:
+            options.append(discord.SelectOption(label=str(group.get("name", "未命名"))[:100], value=str(group.get("id")),
+                                                default=selected_id == str(group.get("id"))))
+        super().__init__(placeholder="选择要配置的分组…", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, CollectionAdminView):
+            return await interaction.response.defer()
+        panel.selected_id = self.values[0]
+        panel.page = 0
+        panel.rebuild()
+        await interaction.response.edit_message(embed=_collection_admin_embed(interaction.guild, panel.selected_id), view=panel)
+
+
+class CollectionAdminRoleSelect(discord.ui.Select):
+    def __init__(self, panel: "CollectionAdminView", options: list[discord.SelectOption]):
+        super().__init__(placeholder=f"设置本分组身份组 ({panel.page + 1}/{panel.total_pages})",
+                         options=options, min_values=0, max_values=len(options), row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, CollectionAdminView):
+            return await interaction.response.defer()
+        cfg = get_collection_config()
+        target = next((g for g in cfg.get("groups", []) if g.get("id") == panel.selected_id), None)
+        if not target:
+            return await interaction.response.send_message("❌ 请先选择普通分组。", ephemeral=True)
+        page_ids = set(panel.current_page_ids)
+        selected_ids = {int(v) for v in self.values}
+        for group in cfg.get("groups", []):
+            group["role_ids"] = [rid for rid in group.get("role_ids", []) if rid not in selected_ids]
+        target["role_ids"] = [rid for rid in target.get("role_ids", []) if rid not in page_ids]
+        target["role_ids"].extend(sorted(selected_ids))
+        save_collection_config(cfg)
+        panel.rebuild()
+        await interaction.response.edit_message(embed=_collection_admin_embed(interaction.guild, panel.selected_id), view=panel)
+
+
+class CollectionRewardRoleSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(placeholder="设置奖励身份组（不选即清空）…", min_values=0, max_values=1, row=2,
+                         select_type=discord.ComponentType.role_select)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, CollectionAdminView):
+            return await interaction.response.defer()
+        values = interaction.data.get("values", [])
+        role_id = int(values[0]) if values else 0
+        cfg = get_collection_config()
+        target = cfg.get("full_reward") if panel.selected_id == "__full__" else next((g for g in cfg.get("groups", []) if g.get("id") == panel.selected_id), None)
+        if not target:
+            return await interaction.response.send_message("❌ 请先选择配置项。", ephemeral=True)
+        target["reward_role_id"] = role_id
+        save_collection_config(cfg)
+        await interaction.response.edit_message(embed=_collection_admin_embed(interaction.guild, panel.selected_id), view=panel)
+
+
+class CollectionConfigModal(discord.ui.Modal):
+    def __init__(self, panel: "CollectionAdminView", target: dict | None = None, *, creating: bool = False):
+        super().__init__(title="新增图鉴分组" if creating else "编辑图鉴奖励")
+        self.panel, self.creating = panel, creating
+        target = target or {}
+        self.name_input = ui.InputText(label="名称", value=str(target.get("name", "")), max_length=80)
+        self.emoji_input = ui.InputText(label="图标 Emoji", value=str(target.get("emoji", "📚")), max_length=20)
+        self.description_input = ui.InputText(label="简介", value=str(target.get("description", "")), style=discord.InputTextStyle.long, required=False, max_length=240)
+        self.shell_input = ui.InputText(label="完成奖励蛋壳", value=str(target.get("reward_shells", 0)), max_length=12)
+        for item in (self.name_input, self.emoji_input, self.description_input, self.shell_input):
+            self.add_item(item)
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            shells = round(max(0.0, float(self.shell_input.value or 0)), 1)
+        except ValueError:
+            return await interaction.response.send_message("❌ 蛋壳奖励必须是数字。", ephemeral=True)
+        cfg = get_collection_config()
+        if self.creating:
+            target = {"id": uuid.uuid4().hex[:12], "role_ids": [], "reward_role_id": 0}
+            cfg.setdefault("groups", []).append(target)
+            self.panel.selected_id = target["id"]
+        elif self.panel.selected_id == "__full__":
+            target = cfg.setdefault("full_reward", {})
+        else:
+            target = next((g for g in cfg.get("groups", []) if g.get("id") == self.panel.selected_id), None)
+            if not target:
+                return await interaction.response.send_message("❌ 分组已不存在。", ephemeral=True)
+        target.update({"name": self.name_input.value.strip() or "未命名分组", "emoji": self.emoji_input.value.strip() or "📚",
+                       "description": self.description_input.value.strip(), "reward_shells": shells})
+        save_collection_config(cfg)
+        self.panel.rebuild()
+        await interaction.response.edit_message(embed=_collection_admin_embed(interaction.guild, self.panel.selected_id), view=self.panel)
+
+
+class CollectionAdminButton(discord.ui.Button):
+    def __init__(self, action: str, *, label: str, emoji: str, style=discord.ButtonStyle.secondary):
+        super().__init__(label=label, emoji=emoji, style=style, row=3)
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, CollectionAdminView):
+            return await interaction.response.defer()
+        cfg = get_collection_config()
+        target = cfg.get("full_reward") if panel.selected_id == "__full__" else next((g for g in cfg.get("groups", []) if g.get("id") == panel.selected_id), None)
+        if self.action == "add":
+            if len(cfg.get("groups", [])) >= 24:
+                return await interaction.response.send_message("❌ 最多可配置 24 个图鉴分组。", ephemeral=True)
+            return await interaction.response.send_modal(CollectionConfigModal(panel, creating=True))
+        if self.action == "edit":
+            if not target:
+                return await interaction.response.send_message("❌ 暂无可编辑项。", ephemeral=True)
+            return await interaction.response.send_modal(CollectionConfigModal(panel, target))
+        if self.action == "delete":
+            if panel.selected_id == "__full__":
+                return await interaction.response.send_message("❌ 全图鉴奖励不能删除，可以把奖励设为 0 并清空奖励身份组。", ephemeral=True)
+            cfg["groups"] = [g for g in cfg.get("groups", []) if g.get("id") != panel.selected_id]
+            save_collection_config(cfg)
+            panel.selected_id = "__full__"
+            panel.rebuild()
+            return await interaction.response.edit_message(embed=_collection_admin_embed(interaction.guild, panel.selected_id), view=panel)
+        if self.action == "page":
+            panel.page = (panel.page + 1) % panel.total_pages
+            panel.rebuild()
+            return await interaction.response.edit_message(embed=_collection_admin_embed(interaction.guild, panel.selected_id), view=panel)
+        await panel.parent_view.refresh_content(interaction)
+
+
+class CollectionAdminView(discord.ui.View):
+    def __init__(self, parent_view: "RoleManagerView"):
+        super().__init__(timeout=600)
+        self.parent_view, self.selected_id, self.page, self.total_pages = parent_view, "__full__", 0, 1
+        self.current_page_ids = []
+        self.rebuild()
+
+    def rebuild(self):
+        self.clear_items()
+        data, cfg = load_role_data(), get_collection_config()
+        groups = cfg.get("groups", [])
+        if self.selected_id != "__full__" and not any(g.get("id") == self.selected_id for g in groups):
+            self.selected_id = "__full__"
+        self.add_item(CollectionAdminTargetSelect(groups, self.selected_id))
+        pool_ids = [rid for rid in data.get("lottery_roles", []) if self.parent_view.guild.get_role(rid)]
+        self.total_pages = max(1, math.ceil(len(pool_ids) / 25))
+        self.page = min(self.page, self.total_pages - 1)
+        self.current_page_ids = pool_ids[self.page * 25:(self.page + 1) * 25]
+        if self.selected_id != "__full__" and self.current_page_ids:
+            target = next(g for g in groups if g.get("id") == self.selected_id)
+            assigned = set(target.get("role_ids", []))
+            opts = [discord.SelectOption(label=self.parent_view.guild.get_role(rid).name[:100], value=str(rid),
+                                         emoji="🎟️", default=rid in assigned) for rid in self.current_page_ids]
+            self.add_item(CollectionAdminRoleSelect(self, opts))
+        self.add_item(CollectionRewardRoleSelect())
+        self.add_item(CollectionAdminButton("add", label="新增", emoji="➕", style=discord.ButtonStyle.success))
+        self.add_item(CollectionAdminButton("edit", label="编辑奖励", emoji="✏️", style=discord.ButtonStyle.primary))
+        self.add_item(CollectionAdminButton("delete", label="删除", emoji="🗑️", style=discord.ButtonStyle.danger))
+        if self.total_pages > 1 and self.selected_id != "__full__":
+            self.add_item(CollectionAdminButton("page", label=f"成员翻页 {self.page + 1}/{self.total_pages}", emoji="📄"))
+        self.add_item(CollectionAdminButton("back", label="返回", emoji="↩️"))
+
+
+class LotteryConfigHubView(discord.ui.View):
+    def __init__(self, parent_view: "RoleManagerView"):
+        super().__init__(timeout=300)
+        self.parent_view = parent_view
+
+    @discord.ui.button(label="稀有度与类型", style=discord.ButtonStyle.primary, emoji="⭐")
+    async def rarity(self, button, interaction: discord.Interaction):
+        view = LotteryRarityConfigView(self.parent_view, interaction.guild)
+        await interaction.response.edit_message(embed=discord.Embed(title="⚙️ 抽奖身份组批量配置", description="选择身份组、稀有度与类型后应用。", color=0x2B2D31), view=view)
+
+    @discord.ui.button(label="图鉴与收集奖励", style=discord.ButtonStyle.success, emoji="📚")
+    async def collection(self, button, interaction: discord.Interaction):
+        view = CollectionAdminView(self.parent_view)
+        await interaction.response.edit_message(embed=_collection_admin_embed(interaction.guild, view.selected_id), view=view)
+
+    @discord.ui.button(label="返回管理", style=discord.ButtonStyle.secondary, emoji="↩️")
+    async def back(self, button, interaction: discord.Interaction):
+        await self.parent_view.refresh_content(interaction)
+
+
 class AdminActionButton(discord.ui.Button):
     def __init__(self, parent_view: "RoleManagerView", action: str, *, label: str, emoji: str):
         super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary, row=4)
@@ -2322,6 +2684,11 @@ class AdminActionButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         cfg = get_lottery_config(load_role_data())
+        if self.action == "hub":
+            return await interaction.response.edit_message(
+                embed=discord.Embed(title="🎰 奖池与图鉴配置", description="请选择要管理的内容。", color=0x2B2D31),
+                view=LotteryConfigHubView(self.parent_view),
+            )
         if self.action == "rarity":
             rarity_view = LotteryRarityConfigView(self.parent_view, interaction.guild)
             embed = discord.Embed(
@@ -2383,7 +2750,7 @@ class RoleManagerView(discord.ui.View):
         self.add_item(AdminRemoveSelect(role_map, self, page=self.remove_page, page_size=self.remove_page_size))  # Row 3
 
         # 功能按钮 Row 4
-        self.add_item(AdminActionButton(self, "rarity", label="稀有度", emoji="⭐"))
+        self.add_item(AdminActionButton(self, "hub", label="奖池/图鉴", emoji="📚"))
         self.add_item(AdminActionButton(self, "cost", label="抽奖消耗", emoji="💳"))
         self.add_item(AdminActionButton(self, "weights", label="概率/补偿", emoji="🎚️"))
         self.add_item(AdminActionButton(self, "redeem", label="兑换配置", emoji="🥚"))
@@ -2461,6 +2828,20 @@ class RoleManagerView(discord.ui.View):
             ),
             inline=False,
         )
+
+        collection_cfg = get_collection_config(data)
+        collection_lines = []
+        for group in collection_cfg.get("groups", []):
+            reward_role = self.guild.get_role(int(group.get("reward_role_id", 0) or 0))
+            collection_lines.append(
+                f"{group.get('emoji', '📚')} **{group.get('name', '未命名')}** · {len(group.get('role_ids', []))} 项 · "
+                f"{format_shells(group.get('reward_shells', 0))} 蛋壳" + (f" · {reward_role.mention}" if reward_role else "")
+            )
+        full = collection_cfg.get("full_reward", {})
+        full_role = self.guild.get_role(int(full.get("reward_role_id", 0) or 0))
+        collection_lines.append(f"{full.get('emoji', '👑')} **{full.get('name', '图鉴大师')}** · 全图鉴 · "
+                                f"{format_shells(full.get('reward_shells', 0))} 蛋壳" + (f" · {full_role.mention}" if full_role else ""))
+        embed.add_field(name="📚 图鉴分组 / 收集奖励", value=_preview_lines(collection_lines), inline=False)
 
         embed.description = "⬇️ **使用下方菜单配置你的社区身份组系统**"
         return embed
@@ -2838,7 +3219,7 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
     """
     移除用户身上指定类型的互斥身份组。
     - keep_role_id: 如果提供了这个ID，则在移除时保留这个身份组（适用于换装时保留新装饰）
-    - exclusive_type: "claimable", "redeem", "lottery", "lottery_color", "lottery_icon" 或 None
+    - exclusive_type: "claimable", "redeem", "lottery", "lottery_color", "lottery_icon", "collection_reward" 或 None
     """
     data = load_role_data()
     target_ids = set()
@@ -2860,9 +3241,12 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
             rid for rid in data.get("lottery_roles", [])
             if get_lottery_role_kind(rid, data) == LOTTERY_KIND_ICON
         }
+    elif exclusive_type == "collection_reward":
+        target_ids = set(get_collection_reward_role_ids(data))
     # 如果没有指定类型 (例如“一键移除”按钮)，则清理所有装饰
     else:
         target_ids = set(data.get("claimable_roles", []) + data.get("lottery_roles", []) + data.get("redeem_roles", []))
+        target_ids.update(get_collection_reward_role_ids(data))
 
     to_remove = []
     for role in user.roles:
