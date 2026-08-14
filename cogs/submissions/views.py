@@ -1,6 +1,7 @@
 import discord
 from discord import ui
 import inspect
+import io
 
 import config
 from cogs.points.storage import format_shells, modify_user_points
@@ -62,7 +63,7 @@ def _paragraph_style():
     return discord.InputTextStyle.paragraph
 
 
-def _text_input(label: str, *, value: str = "", style=None, max_length: int | None = None, required: bool = True):
+def _text_input(label: str | None, *, value: str = "", style=None, max_length: int | None = None, required: bool = True):
     input_cls = getattr(ui, "TextInput", None) or getattr(ui, "InputText")
     kwargs = {"label": label, "required": required}
     if style is not None:
@@ -77,6 +78,29 @@ def _text_input(label: str, *, value: str = "", style=None, max_length: int | No
         kwargs["value"] = value
 
     return input_cls(**kwargs)
+
+
+class CachedModalAttachment:
+    """Keep modal uploads available until the user confirms the draft."""
+
+    def __init__(self, attachment: discord.Attachment, data: bytes):
+        self.filename = attachment.filename
+        self.content_type = getattr(attachment, "content_type", None)
+        self.size = getattr(attachment, "size", len(data))
+        self._data = data
+
+    async def to_file(self, *, spoiler: bool = False):
+        return discord.File(io.BytesIO(self._data), filename=self.filename, spoiler=spoiler)
+
+
+async def _cache_modal_attachments(attachments: list[discord.Attachment]) -> list[CachedModalAttachment]:
+    cached = []
+    for attachment in attachments[:9]:
+        try:
+            cached.append(CachedModalAttachment(attachment, await attachment.read()))
+        except (discord.NotFound, discord.HTTPException):
+            continue
+    return cached
 
 
 def _submission_config() -> dict:
@@ -175,7 +199,7 @@ def build_panel_embed() -> discord.Embed:
         description=(
             "📮 想给电波系repo、想捉虫电波系预设的小bug、想安利，都可以投进这里。\n"
             "🥚 奇米蛋会给认真投稿的小饱饱发一点亮晶晶的蛋壳。\n"
-            "📎 填完表后可以开启收图，最多收纳 9 张图片。\n"
+            "📎 投稿表单里可以直接拖入附件，最多上传 9 个。\n"
             "🧺 每类投稿每天最多 5 次，防止小蛋箱被塞爆~"
         ),
         color=SUBMISSION_MAIN_PANEL_COLOR,
@@ -350,23 +374,37 @@ async def refresh_all_submission_panels(client) -> dict:
     return {"refreshed": refreshed, "skipped": skipped}
 
 
+async def refresh_submission_main_panel(client) -> bool:
+    panel_info = get_panel_info()
+    channel_id = int(panel_info.get("channel_id") or 0)
+    message_id = int(panel_info.get("message_id") or 0)
+    if not channel_id or not message_id:
+        return False
+    try:
+        channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+        await message.edit(content=None, embed=None, view=SubmissionPanelView())
+        return True
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return False
+
+
 async def deploy_submission_panel(channel, bot) -> str:
-    embed = build_panel_embed()
     view = SubmissionPanelView()
     panel_info = get_panel_info()
     if str(channel.id) == str(panel_info.get("channel_id", "")) and panel_info.get("message_id"):
         try:
             message = await channel.fetch_message(int(panel_info["message_id"]))
-            await message.edit(embed=embed, view=view)
+            await message.edit(content=None, embed=None, view=view)
             return "updated"
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
-    message = await channel.send(embed=embed, view=view)
+    message = await channel.send(view=view)
     set_panel_info(channel.id, message.id)
     return "sent"
 
 
-class SubmissionModal(discord.ui.Modal):
+class SubmissionModal(ui.DesignerModal):
     def __init__(
         self,
         kind: str,
@@ -384,14 +422,36 @@ class SubmissionModal(discord.ui.Modal):
         super().__init__(title=f"{title} · {_kind_label(kind)}")
 
         if kind == KIND_REPO:
-            self.add_item(_text_input("repo 标题", value=_field(record or {}, "title"), max_length=120, required=True))
-            self.add_item(_text_input("repo 内容", value=_field(record or {}, "content"), style=_paragraph_style(), max_length=2000, required=True))
+            subject_label = "repo 标题"
+            content_label = "repo 内容"
+            subject_value = _field(record or {}, "title")
         elif kind == KIND_BUG:
-            self.add_item(_text_input("捉虫对象", value=_field(record or {}, "target"), max_length=120, required=True))
-            self.add_item(_text_input("捉虫内容", value=_field(record or {}, "content"), style=_paragraph_style(), max_length=2000, required=True))
+            subject_label = "捉虫对象"
+            content_label = "捉虫内容"
+            subject_value = _field(record or {}, "target")
         else:
-            self.add_item(_text_input("安利对象", value=_field(record or {}, "target"), max_length=120, required=True))
-            self.add_item(_text_input("安利内容", value=_field(record or {}, "content"), style=_paragraph_style(), max_length=2000, required=True))
+            subject_label = "安利对象"
+            content_label = "安利内容"
+            subject_value = _field(record or {}, "target")
+
+        self.subject_input = _text_input(None, value=subject_value, max_length=120, required=True)
+        self.content_input = _text_input(
+            None,
+            value=_field(record or {}, "content"),
+            style=_paragraph_style(),
+            max_length=2000,
+            required=True,
+        )
+        self.attachment_upload = ui.FileUpload(required=False, min_values=0, max_values=9)
+        self.add_item(ui.Label(subject_label, self.subject_input))
+        self.add_item(ui.Label(content_label, self.content_input))
+        self.add_item(
+            ui.Label(
+                "投稿附件（可选）",
+                self.attachment_upload,
+                description="可直接拖入或选择文件，最多 9 个；修改投稿时上传新附件会替换原附件。",
+            )
+        )
 
     async def callback(self, interaction: discord.Interaction):
         if not interaction.guild_id:
@@ -400,27 +460,30 @@ class SubmissionModal(discord.ui.Modal):
         if self.kind == KIND_REPO:
             content_type = self.content_type if self.content_type in TYPE_OPTIONS else "sfw"
             fields = {
-                "title": self.children[0].value.strip(),
+                "title": self.subject_input.value.strip(),
                 "content_type": content_type,
-                "content": self.children[1].value.strip(),
+                "content": self.content_input.value.strip(),
             }
         elif self.kind == KIND_BUG:
             fields = {
-                "target": self.children[0].value.strip(),
-                "content": self.children[1].value.strip(),
+                "target": self.subject_input.value.strip(),
+                "content": self.content_input.value.strip(),
             }
         else:
             content_type = self.content_type if self.content_type in TYPE_OPTIONS else "sfw"
             domain = self.domain if self.domain in DOMAIN_OPTIONS else "其他类型"
             fields = {
-                "target": self.children[0].value.strip(),
+                "target": self.subject_input.value.strip(),
                 "content_type": content_type,
                 "domain": domain,
-                "content": self.children[1].value.strip(),
+                "content": self.content_input.value.strip(),
             }
 
         if self.record and str(self.record.get("author_id")) != str(interaction.user.id):
             return await interaction.response.send_message("只能修改自己的投稿。", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        attachments = await _cache_modal_attachments(self.attachment_upload.values or [])
 
         draft_record = {
             "id": self.record.get("id", "draft") if self.record else "draft",
@@ -434,13 +497,16 @@ class SubmissionModal(discord.ui.Modal):
         }
         embed = build_submission_embed(draft_record)
         embed.title = f"投稿预览 · {_kind_label(self.kind)}"
-        embed.set_footer(text="可以直接完成，也可以开启附件收集后再完成。")
-        await interaction.response.send_message(
+        if attachments:
+            embed.add_field(name="待上传附件", value=f"已从表单收纳 **{len(attachments)}/9** 个附件。", inline=False)
+        embed.set_footer(text="确认无误后点击完成投稿。")
+        await interaction.followup.send(
             embed=embed,
             view=SubmissionDraftView(
                 owner_id=interaction.user.id,
                 kind=self.kind,
                 fields=fields,
+                attachments=attachments,
                 record_id=str(self.record["id"]) if self.record else None,
             ),
             ephemeral=True,
@@ -621,12 +687,40 @@ class RecommendationDomainSelectView(discord.ui.View):
         )
 
 
-class SubmissionPanelView(discord.ui.View):
+class SubmissionPanelView(ui.DesignerView):
     def __init__(self):
         super().__init__(timeout=None)
+        repo_button = ui.Button(label="我要repo", emoji="📦", style=discord.ButtonStyle.primary, custom_id="submission_panel_repo")
+        bug_button = ui.Button(label="我要捉虫", emoji="🐞", style=discord.ButtonStyle.danger, custom_id="submission_panel_bug")
+        recommend_button = ui.Button(label="我要安利", emoji="🌟", style=discord.ButtonStyle.success, custom_id="submission_panel_recommend")
+        manage_button = ui.Button(label="管理投稿", emoji="🗂️", style=discord.ButtonStyle.secondary, custom_id="submission_panel_manage")
+        repo_button.callback = self.repo
+        bug_button.callback = self.bug
+        recommend_button.callback = self.recommend
+        manage_button.callback = self.manage
+        self.add_item(
+            ui.Container(
+                ui.TextDisplay(
+                    "# 🥚 奇米蛋投稿箱\n"
+                    "📮 想给电波系 repo、捉虫电波系预设的小 bug，或分享一份安利，都可以投进这里。\n\n"
+                    "🥚 认真投稿会获得亮晶晶的蛋壳奖励。\n"
+                    "📎 投稿表单内可直接拖入附件，最多上传 9 个。\n"
+                    "🧺 每类投稿每天最多 5 次，按北京时间刷新。"
+                ),
+                ui.Separator(),
+                ui.TextDisplay(
+                    "**📦 我要repo**　提交电波系作品相关的 repo 需求。\n"
+                    "**🐞 我要捉虫**　反馈电波系作品的小 bug。\n"
+                    "**🌟 我要安利**　分享好物、书影音、游戏或生活经验。\n"
+                    "**🗂️ 管理投稿**　修改或删除自己发过的投稿。"
+                ),
+                ui.Separator(),
+                ui.ActionRow(repo_button, bug_button, recommend_button, manage_button),
+                color=SUBMISSION_MAIN_PANEL_COLOR,
+            )
+        )
 
-    @discord.ui.button(label="我要repo", emoji="📦", style=discord.ButtonStyle.primary, custom_id="submission_panel_repo")
-    async def repo(self, button, interaction: discord.Interaction):
+    async def repo(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
@@ -637,15 +731,13 @@ class SubmissionPanelView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="我要捉虫", emoji="🐞", style=discord.ButtonStyle.danger, custom_id="submission_panel_bug")
-    async def bug(self, button, interaction: discord.Interaction):
+    async def bug(self, interaction: discord.Interaction):
         try:
             await interaction.response.send_modal(SubmissionModal(KIND_BUG))
         except discord.NotFound:
             return
 
-    @discord.ui.button(label="我要安利", emoji="🌟", style=discord.ButtonStyle.success, custom_id="submission_panel_recommend")
-    async def recommend(self, button, interaction: discord.Interaction):
+    async def recommend(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
@@ -656,8 +748,7 @@ class SubmissionPanelView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="管理投稿", emoji="🗂️", style=discord.ButtonStyle.secondary, custom_id="submission_panel_manage")
-    async def manage(self, button, interaction: discord.Interaction):
+    async def manage(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
@@ -673,13 +764,13 @@ class SubmissionPanelView(discord.ui.View):
 
 
 class SubmissionDraftView(discord.ui.View):
-    def __init__(self, *, owner_id: int, kind: str, fields: dict, record_id: str | None = None):
+    def __init__(self, *, owner_id: int, kind: str, fields: dict, attachments=None, record_id: str | None = None):
         super().__init__(timeout=600)
         self.owner_id = owner_id
         self.kind = kind
         self.fields = fields
+        self.attachments = list(attachments or [])[:9]
         self.record_id = record_id
-        self.collection_started = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -687,16 +778,7 @@ class SubmissionDraftView(discord.ui.View):
             return False
         return True
 
-    @staticmethod
-    def _get_submission_cog(interaction: discord.Interaction):
-        return interaction.client.get_cog("SubmissionsCog") or interaction.client.get_cog("投稿面板")
-
     def _build_status_embed(self, interaction: discord.Interaction, temp_notify: str = "") -> discord.Embed:
-        session = None
-        cog = self._get_submission_cog(interaction)
-        if cog and interaction.channel_id:
-            session = cog.get_attachment_session(interaction.user.id, interaction.channel_id)
-
         draft_record = {
             "id": self.record_id or "draft",
             "author_id": str(interaction.user.id),
@@ -719,32 +801,13 @@ class SubmissionDraftView(discord.ui.View):
 
         embed = build_submission_embed(draft_record)
         embed.title = f"投稿预览 · {_kind_label(self.kind)}"
-        if session:
-            expire_text = discord.utils.format_dt(session["expires_at"], "R")
-            embed.add_field(
-                name="附件收集",
-                value=f"进行中，已收纳 **{len(session['attachments'])}/9** 个，{expire_text} 结束。",
-                inline=False,
-            )
-        else:
-            embed.add_field(name="附件收集", value="未开启。可直接完成，也可以先收图。", inline=False)
+        embed.add_field(
+            name="投稿附件",
+            value=f"已从表单收纳 **{len(self.attachments)}/9** 个附件。",
+            inline=False,
+        )
         embed.set_footer(text=temp_notify or "确认无误后点击完成投稿。")
         return embed
-
-    @discord.ui.button(label="开始收图", style=discord.ButtonStyle.secondary, emoji="📥")
-    async def start_collect(self, button, interaction: discord.Interaction):
-        cog = self._get_submission_cog(interaction)
-        if not cog:
-            return await interaction.response.send_message("找不到投稿模块实例，暂时无法收图。", ephemeral=True)
-        expires_at = cog.start_attachment_session(interaction.user.id, interaction.channel_id, max_attachments=9, duration_seconds=300)
-        self.collection_started = True
-        await interaction.response.edit_message(
-            embed=self._build_status_embed(
-                interaction,
-                temp_notify=f"已开启收图。请在当前频道发送图片附件，最多 9 张，{discord.utils.format_dt(expires_at, 'R')} 结束。",
-            ),
-            view=self,
-        )
 
     @discord.ui.button(label="完成投稿", style=discord.ButtonStyle.success, emoji="✅")
     async def finish(self, button, interaction: discord.Interaction):
@@ -766,15 +829,7 @@ class SubmissionDraftView(discord.ui.View):
                     ephemeral=True,
                 )
 
-        cog = self._get_submission_cog(interaction)
-        result = None
-        if cog and interaction.channel_id:
-            result = await cog.finish_attachment_session(
-                interaction.user.id,
-                interaction.channel_id,
-                cleanup_channel=interaction.channel,
-            )
-        attachments = result["attachments"] if result else []
+        attachments = self.attachments
 
         if self.record_id:
             record = update_submission_fields(self.record_id, self.fields)
@@ -807,10 +862,8 @@ class SubmissionDraftView(discord.ui.View):
             record, status = await publish_or_update_submission(interaction.client, record, attachments=attachments)
             msg = f"✅ 投稿已送到小蛋箱！本次获得 **{format_shells(reward)}** 蛋壳。({status})"
 
-        if result:
-            msg += f"\n📎 已收纳 {len(attachments)} 个附件，清理 {result.get('deleted_messages', 0)} 条原消息。"
-            if result.get("failed_deletions", 0):
-                msg += f" 有 {result['failed_deletions']} 条原消息未能清理。"
+        if attachments:
+            msg += f"\n📎 已随投稿上传 {len(attachments)} 个附件。"
 
         self.clear_items()
         try:
@@ -821,9 +874,6 @@ class SubmissionDraftView(discord.ui.View):
 
     @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, emoji="✖️")
     async def cancel(self, button, interaction: discord.Interaction):
-        cog = self._get_submission_cog(interaction)
-        if cog and interaction.channel_id:
-            cog.cancel_attachment_session(interaction.user.id, interaction.channel_id)
         self.clear_items()
         await interaction.response.edit_message(
             embed=self._build_status_embed(interaction, "已取消本次投稿。"),
