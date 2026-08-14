@@ -3000,8 +3000,22 @@ class PraiseRuleModal(discord.ui.Modal):
         self.field_input = ui.InputText(label="识别字段", value=str(rule.get("field", "")), max_length=200)
         self.mode_input = ui.InputText(label="匹配模式（完全一致/包含关键词）", value="完全一致" if rule.get("match_mode", "exact") == "exact" else "包含关键词", max_length=12)
         self.reward_input = ui.InputText(label="随机蛋壳范围（最小,最大）", placeholder="例如 1,9", value=f"{format_shells(rule.get('min_reward', 1))},{format_shells(rule.get('max_reward', 9))}", max_length=24)
-        self.start_input = ui.InputText(label="开始时间（北京时间，可留空）", placeholder="YYYY-MM-DD HH:MM", value=str(rule.get("start_at", "")), required=False, max_length=32)
-        self.end_input = ui.InputText(label="结束时间（北京时间，可留空）", placeholder="YYYY-MM-DD HH:MM", value=str(rule.get("end_at", "")), required=False, max_length=32)
+        self.start_input = ui.InputText(
+            label="开始时间（可选）",
+            placeholder="YYYY-MM-DD HH:MM；不限制则保留默认值",
+            value=str(rule.get("start_at", "") or "不限制"),
+            required=False,
+            min_length=0,
+            max_length=32,
+        )
+        self.end_input = ui.InputText(
+            label="结束时间（可选）",
+            placeholder="YYYY-MM-DD HH:MM；不限制则保留默认值",
+            value=str(rule.get("end_at", "") or "不限制"),
+            required=False,
+            min_length=0,
+            max_length=32,
+        )
         for item in (self.field_input, self.mode_input, self.reward_input, self.start_input, self.end_input):
             self.add_item(item)
 
@@ -3025,7 +3039,11 @@ class PraiseRuleModal(discord.ui.Modal):
                 raise ValueError
         except ValueError:
             return await interaction.response.send_message("❌ 奖励范围格式应为 `最小,最大`，最小值至少 0.1。", ephemeral=True)
-        start, end = (self.start_input.value or "").strip(), (self.end_input.value or "").strip()
+        def optional_time(value: str) -> str:
+            text = str(value or "").strip()
+            return "" if text.lower() in {"不限制", "不限", "无", "none", "null", "-"} else text
+
+        start, end = optional_time(self.start_input.value), optional_time(self.end_input.value)
         start_time, end_time = _parse_beijing_time(start), _parse_beijing_time(end)
         if (start and not start_time) or (end and not end_time) or (start_time and end_time and end_time <= start_time):
             return await interaction.response.send_message("❌ 时间格式无效，或结束时间没有晚于开始时间。请使用 `YYYY-MM-DD HH:MM`。", ephemeral=True)

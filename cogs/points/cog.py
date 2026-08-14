@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import time
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import config
 from .storage import (
@@ -28,6 +29,7 @@ POINTS_MSG_COOLDOWN = getattr(
 PRAISE_KIMI_CHANNEL_ID = int(getattr(config, "PRAISE_KIMI_CHANNEL_ID", 1450480250210484357))
 PRAISE_RESCAN_MINUTES = max(1, int(getattr(config, "PRAISE_KIMI_RESCAN_MINUTES", 5)))
 PRAISE_REWARD_EMOJIS = {
+    0: "0️⃣",
     1: "1️⃣",
     2: "2️⃣",
     3: "3️⃣",
@@ -37,6 +39,7 @@ PRAISE_REWARD_EMOJIS = {
     7: "7️⃣",
     8: "8️⃣",
     9: "9️⃣",
+    10: "🔟",
 }
 
 def is_valid_comment(content: str) -> bool:
@@ -84,10 +87,14 @@ class PointListener(commands.Cog):
 
     @staticmethod
     def _reward_emoji(amount: float) -> str | None:
-        rounded = round(float(amount or 0), 1)
-        if not rounded.is_integer():
+        try:
+            value = Decimal(str(amount or 0))
+        except (InvalidOperation, ValueError):
             return None
-        return PRAISE_REWARD_EMOJIS.get(int(rounded))
+        if value <= 0:
+            return None
+        rounded = int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        return PRAISE_REWARD_EMOJIS.get(rounded, "🥚")
 
     async def _reward_praise_message(self, message: discord.Message, *, recovered: bool = False, rules: list[dict] | None = None) -> bool | None:
         if message.author.bot or not message.guild:
