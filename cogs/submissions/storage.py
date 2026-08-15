@@ -33,6 +33,7 @@ def _empty_data() -> dict:
         "version": 1,
         "panel_info": {},
         "submissions": {},
+        "comment_rewards": {},
     }
 
 
@@ -73,6 +74,50 @@ def random_reward(kind: str, key: str = "base") -> float:
     return round(random.randint(min_step, max_step) / 10, 1)
 
 
+def random_comment_reward() -> float:
+    cfg = getattr(config, "SUBMISSIONS", {})
+    raw = cfg.get("COMMENT_REWARD_RANGE", (0.1, 1.0)) if isinstance(cfg, dict) else (0.1, 1.0)
+    try:
+        low, high = float(raw[0]), float(raw[1])
+    except (TypeError, ValueError, IndexError):
+        low, high = 0.1, 1.0
+    if high < low:
+        low, high = high, low
+    min_step = int(round(max(0.0, low) * 10))
+    max_step = int(round(max(0.0, high) * 10))
+    if max_step < min_step:
+        max_step = min_step
+    return round(random.randint(min_step, max_step) / 10, 1)
+
+
+def grant_comment_reward(
+    *,
+    guild_id: int,
+    user_id: int,
+    requested_reward: float | None = None,
+) -> dict:
+    cfg = getattr(config, "SUBMISSIONS", {})
+    daily_cap = float(cfg.get("COMMENT_DAILY_CAP", 15.0)) if isinstance(cfg, dict) else 15.0
+    reward = random_comment_reward() if requested_reward is None else _round_shells(requested_reward)
+    data = load_data()
+    key = f"{guild_id}:{user_id}:{_today()}"
+    used = _round_shells(data.setdefault("comment_rewards", {}).get(key, 0.0))
+    if daily_cap <= 0 or used >= daily_cap:
+        return {"awarded": 0.0, "used": used, "cap": daily_cap, "remaining": 0.0, "capped": True}
+
+    remaining = _round_shells(daily_cap - used)
+    awarded = _round_shells(min(reward, remaining))
+    data["comment_rewards"][key] = _round_shells(used + awarded)
+    save_data(data)
+    return {
+        "awarded": awarded,
+        "used": data["comment_rewards"][key],
+        "cap": daily_cap,
+        "remaining": _round_shells(max(0.0, daily_cap - data["comment_rewards"][key])),
+        "capped": awarded < reward or data["comment_rewards"][key] >= daily_cap,
+    }
+
+
 def load_data() -> dict:
     if not os.path.exists(DATA_FILE):
         return _empty_data()
@@ -89,6 +134,8 @@ def load_data() -> dict:
         data["submissions"] = {}
     if not isinstance(data.get("panel_info"), dict):
         data["panel_info"] = {}
+    if not isinstance(data.get("comment_rewards"), dict):
+        data["comment_rewards"] = {}
     return data
 
 

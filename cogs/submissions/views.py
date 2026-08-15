@@ -16,6 +16,7 @@ from .storage import (
     can_create_submission,
     create_submission,
     find_by_message_id,
+    grant_comment_reward,
     get_panel_info,
     get_submission,
     list_submissions,
@@ -200,7 +201,8 @@ def build_panel_embed() -> discord.Embed:
             "📮 想给电波系repo、想捉虫电波系预设的小bug、想安利，都可以投进这里。\n"
             "🥚 奇米蛋会给认真投稿的小饱饱发一点亮晶晶的蛋壳。\n"
             "📎 投稿表单里可以直接拖入附件，最多上传 9 个。\n"
-            "🧺 每类投稿每天最多 5 次，防止小蛋箱被塞爆~"
+            "🧺 每类投稿每天最多 5 次，防止小蛋箱被塞爆~\n"
+            "💬 盖楼回复也会随机掉蛋壳，每日最多 15 蛋壳~"
         ),
         color=SUBMISSION_MAIN_PANEL_COLOR,
     )
@@ -559,7 +561,26 @@ class CommentModal(discord.ui.Modal):
         record["comment_page"] = max(0, (len(comments) - 1) // COMMENTS_PER_PAGE)
         save_submission(record)
         await publish_or_update_submission(interaction.client, record)
-        await interaction.followup.send("✅ 评论已经盖到楼里啦。", ephemeral=True)
+        reward_result = grant_comment_reward(guild_id=interaction.guild_id, user_id=interaction.user.id)
+        awarded = float(reward_result.get("awarded", 0.0))
+        if awarded > 0:
+            modify_user_points(
+                interaction.user.id,
+                awarded,
+                interaction.guild_id,
+                source=f"submission_comment_{record.get('kind', KIND_REPO)}",
+                reason=f"submission_id={record['id']};daily_used={format_shells(reward_result.get('used', 0))}",
+            )
+            msg = (
+                f"✅ 评论已经盖到楼里啦，奇米蛋塞给你 **{format_shells(awarded)}** 蛋壳~\n"
+                f"今日盖楼奖励：**{format_shells(reward_result.get('used', 0))} / {format_shells(reward_result.get('cap', 15.0))}**"
+            )
+        else:
+            msg = (
+                "✅ 评论已经盖到楼里啦。\n"
+                f"今日盖楼奖励已达到 **{format_shells(reward_result.get('cap', 15.0))}** 蛋壳上限~"
+            )
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class SubmissionTypeSelect(discord.ui.Select):

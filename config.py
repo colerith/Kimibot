@@ -98,6 +98,8 @@ SUBMISSIONS = {
         "reply_repo": (0.3, 1.5),
         "reply_bug": (0.5, 2.0),
     },
+    "COMMENT_REWARD_RANGE": (0.1, 1.0),
+    "COMMENT_DAILY_CAP": 15.0,
     "DELETE_PENALTY_RATE": 0.5,
 }
 
