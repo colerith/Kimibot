@@ -124,6 +124,12 @@ class PointListener(commands.Cog):
             print(f"[蛋壳系统][赞美奇米蛋] 移除反应失败 message={message.id} emoji={emoji!r} error={error}")
             return False
 
+    async def _clear_praise_status_reactions(self, message: discord.Message) -> None:
+        await self._remove_own_reaction(message, PRAISE_PENDING_REACTION)
+        for emoji in (PRAISE_INVALID_REACTION, PRAISE_DUPLICATE_REACTION):
+            if any(str(reaction.emoji) == emoji and reaction.me for reaction in message.reactions):
+                await self._remove_own_reaction(message, emoji)
+
     @staticmethod
     def _print_praise_log(row: dict) -> None:
         print(
@@ -253,7 +259,7 @@ class PointListener(commands.Cog):
                 emoji = self._reward_emoji(float(already_recorded.get("amount", 0) or 0))
                 marker_ready = not emoji or await self._add_reaction_once(message, emoji)
                 if marker_ready:
-                    await self._remove_own_reaction(message, PRAISE_PENDING_REACTION)
+                    await self._clear_praise_status_reactions(message)
                 await self._record_praise_log(
                     message,
                     status="skipped",
@@ -273,6 +279,7 @@ class PointListener(commands.Cog):
                 rule_id=rule["id"],
                 min_reward=rule["min_reward"],
                 max_reward=rule["max_reward"],
+                occurred_at=occurred_at,
             )
         except Exception as error:
             await self._mark_praise_pending(
@@ -293,7 +300,7 @@ class PointListener(commands.Cog):
                 emoji = self._reward_emoji(amount)
                 marker_ready = not emoji or await self._add_reaction_once(message, emoji)
                 if marker_ready:
-                    await self._remove_own_reaction(message, PRAISE_PENDING_REACTION)
+                    await self._clear_praise_status_reactions(message)
                 await self._record_praise_log(
                     message,
                     status="rewarded",
@@ -321,7 +328,7 @@ class PointListener(commands.Cog):
         emoji = self._reward_emoji(amount)
         marker_ready = not emoji or await self._add_reaction_once(message, emoji)
         if marker_ready:
-            await self._remove_own_reaction(message, PRAISE_PENDING_REACTION)
+            await self._clear_praise_status_reactions(message)
         await self._record_praise_log(
             message,
             status="rewarded",

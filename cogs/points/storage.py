@@ -208,6 +208,13 @@ def _today() -> str:
     return datetime.now(TZ_CN).date().isoformat()
 
 
+def _date_cn(value: datetime | None = None) -> str:
+    if value is None:
+        return _today()
+    moment = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    return moment.astimezone(TZ_CN).date().isoformat()
+
+
 def _now_iso() -> str:
     return datetime.now(TZ_CN).isoformat(timespec="seconds")
 
@@ -979,6 +986,40 @@ def _praise_scan_key(guild_id: int, message_id: int, rule_id: str | None = None)
     return f"{guild_id}:{message_id}:{rule}"
 
 
+def _discord_snowflake_date_cn(message_id: int | str) -> str | None:
+    try:
+        snowflake = int(message_id)
+        if snowflake <= 0:
+            return None
+        timestamp_ms = (snowflake >> 22) + 1420070400000
+        occurred_at = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
+    return _date_cn(occurred_at)
+
+
+def _repair_praise_reward_dates(data: dict, guild_id: int, reward_date: str) -> int:
+    rewards = data.setdefault("daily_praise_rewards", {})
+    source_key = f"{guild_id}:{reward_date}"
+    source_rows = rewards.setdefault(source_key, {})
+    repaired = 0
+    for claim_key, item in list(source_rows.items()):
+        if not isinstance(item, dict):
+            continue
+        actual_date = _discord_snowflake_date_cn(item.get("message_id", ""))
+        if not actual_date or actual_date == reward_date:
+            continue
+
+        source_rows.pop(claim_key, None)
+        target_rows = rewards.setdefault(f"{guild_id}:{actual_date}", {})
+        target_key = str(claim_key)
+        if target_key in target_rows:
+            target_key = f"{target_key}:recovered:{item.get('message_id', repaired)}"
+        target_rows[target_key] = item
+        repaired += 1
+    return repaired
+
+
 @_locked_points_data
 def get_successful_praise_scan_record(guild_id: int, message_id: int, rule_id: str) -> dict | None:
     data = load_points_data()
@@ -1045,12 +1086,16 @@ def reward_daily_kimi_praise(
     rule_id: str = "default_kimi_praise",
     min_reward: float = 1.0,
     max_reward: float = 9.0,
+    occurred_at: datetime | None = None,
 ) -> dict:
     """Reward each configured recognition rule at most once per user per day."""
     data = load_points_data()
-    today = _today()
+    today = _date_cn(occurred_at)
     reward_key = f"{guild_id}:{today}"
     rows = data.setdefault("daily_praise_rewards", {}).setdefault(reward_key, {})
+    repaired = _repair_praise_reward_dates(data, guild_id, today)
+    if repaired:
+        save_points_data(data)
     uid = str(user_id)
     message_id_str = str(message_id)
     normalized_rule_id = str(rule_id or "default_kimi_praise")[:64]
@@ -1109,4 +1154,11 @@ def reward_daily_kimi_praise(
         reason=f"message_id={message_id};rule={normalized_rule_id}",
     )
     save_points_data(data)
-    return {"success": True, "reason": "rewarded", "amount": actual_delta, "balance": after}
+    return {
+        "success": True,
+        "reason": "rewarded",
+        "amount": actual_delta,
+        "balance": after,
+        "reward_date": today,
+        "repaired_records": repaired,
+    }
