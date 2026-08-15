@@ -43,6 +43,7 @@ from .storage import (
 )
 from cogs.points.storage import format_shells, get_user_points, get_user_summary, modify_user_points, sign_in_user
 from cogs.points.storage import (
+    claim_daily_task_bonus,
     get_acceleration_tiers,
     get_daily_signin_summary,
     load_points_data,
@@ -51,6 +52,8 @@ from cogs.points.storage import (
     save_praise_rules,
     purchase_acceleration_card,
 )
+from cogs.submissions.storage import KIND_BUG, KIND_RECOMMENDATION, KIND_REPO, count_daily_submissions
+from cogs.egg_qa.storage import get_daily_usage as get_egg_qa_daily_usage
 from cogs.shared.utils import get_account_wait_status, has_verification_role
 from config import STYLE
 from discord.ui import Select
@@ -1336,6 +1339,190 @@ def build_shell_help_embed() -> discord.Embed:
     return embed
 
 
+def _today_cn() -> str:
+    return datetime.now(BEIJING_TZ).date().isoformat()
+
+
+def _user_points_record(points_data: dict, user_id: int, guild_id: int) -> dict:
+    users = points_data.get("users", {}) if isinstance(points_data.get("users", {}), dict) else {}
+    record = users.get(f"{guild_id}:{user_id}", {})
+    return record if isinstance(record, dict) else {}
+
+
+def _today_user_transactions(points_data: dict, user_id: int, guild_id: int) -> list[dict]:
+    today = _today_cn()
+    rows = []
+    seen = set()
+    record = _user_points_record(points_data, user_id, guild_id)
+    sources = []
+    if isinstance(record.get("transactions", []), list):
+        sources.extend(record.get("transactions", []))
+    if isinstance(points_data.get("transactions", []), list):
+        sources.extend(points_data.get("transactions", []))
+    for tx in sources:
+        if not isinstance(tx, dict):
+            continue
+        if str(tx.get("user_id", "")) != str(user_id):
+            continue
+        if str(tx.get("guild_id", "")) != str(guild_id):
+            continue
+        if not str(tx.get("time", "")).startswith(today):
+            continue
+        marker = (
+            str(tx.get("time", "")),
+            str(tx.get("source", "")),
+            str(tx.get("reason", "")),
+            str(tx.get("amount", "")),
+        )
+        if marker in seen:
+            continue
+        seen.add(marker)
+        rows.append(tx)
+    return rows
+
+
+def _sum_tx(rows: list[dict], *, sources: set[str] | None = None, prefixes: tuple[str, ...] = ()) -> float:
+    total = 0.0
+    for tx in rows:
+        source = str(tx.get("source", ""))
+        if sources is not None and source not in sources:
+            continue
+        if prefixes and not any(source.startswith(prefix) for prefix in prefixes):
+            continue
+        try:
+            total += float(tx.get("amount", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _has_today_tx(rows: list[dict], *, source: str, reason_contains: str | None = None) -> bool:
+    for tx in rows:
+        if str(tx.get("source", "")) != source:
+            continue
+        if reason_contains and reason_contains not in str(tx.get("reason", "")):
+            continue
+        return True
+    return False
+
+
+def _today_praise_amount(points_data: dict, user_id: int, guild_id: int) -> tuple[bool, float]:
+    today = _today_cn()
+    rows = points_data.get("daily_praise_rewards", {}).get(f"{guild_id}:{today}", {})
+    if not isinstance(rows, dict):
+        return False, 0.0
+    total = 0.0
+    matched = False
+    for key, row in rows.items():
+        if key == str(user_id) or str(key).startswith(f"{user_id}:"):
+            matched = True
+            if isinstance(row, dict):
+                try:
+                    total += float(row.get("amount", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+    return matched, total
+
+
+def _today_egg_qa_status(user_id: int, guild_id: int, tx_rows: list[dict]) -> tuple[bool, int, float]:
+    usage = get_egg_qa_daily_usage(user_id, guild_id)
+    reward = _sum_tx(tx_rows, prefixes=("egg_qa_",))
+    return usage > 0 or reward > 0, usage, reward
+
+
+def _task_line(done: bool, label: str, detail: str) -> str:
+    mark = "✅" if done else "⬜"
+    return f"{mark} **{label}**　{detail}"
+
+
+async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id: int) -> discord.Embed:
+    points_data = await asyncio.to_thread(load_points_data)
+    tx_rows = _today_user_transactions(points_data, user.id, guild_id)
+    record = _user_points_record(points_data, user.id, guild_id)
+    today = _today_cn()
+
+    signed = str(record.get("last_sign_date", "")) == today
+    sign_amount = _sum_tx(tx_rows, sources={"sign_in"})
+    praised, praise_amount = _today_praise_amount(points_data, user.id, guild_id)
+    rec_count = await asyncio.to_thread(
+        count_daily_submissions,
+        guild_id=guild_id,
+        author_id=user.id,
+        kind=KIND_RECOMMENDATION,
+    )
+    rec_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_RECOMMENDATION}"})
+    egg_done, egg_usage, egg_amount = await asyncio.to_thread(_today_egg_qa_status, user.id, guild_id, tx_rows)
+
+    repo_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_REPO)
+    bug_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_BUG)
+    repo_bug_done = repo_count >= 5 or bug_count >= 5
+    repo_bug_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_REPO}", f"submission_{KIND_BUG}"})
+    forum_amount = _sum_tx(tx_rows, sources={"daily_forum_post", "forum_post"})
+    forum_done = forum_amount > 0
+    ten_draw_done = _has_today_tx(tx_rows, source="role_lottery", reason_contains="draw_count=10")
+    msg_count = int(record.get("daily_msg_count", 0)) if str(record.get("daily_msg_date", "")) == today else 0
+    msg_done = msg_count >= 20
+
+    basic_tasks = [
+        signed,
+        praised,
+        rec_count > 0,
+        egg_done,
+    ]
+    extra_tasks = [
+        repo_bug_done,
+        forum_done,
+        ten_draw_done,
+        msg_done,
+    ]
+
+    bonus_lines = []
+    if all(basic_tasks):
+        result = await asyncio.to_thread(claim_daily_task_bonus, user.id, guild_id, "basic", 10.0)
+        if result.get("success"):
+            bonus_lines.append(f"基础任务全清：+{format_shells(result.get('amount', 0))} 蛋壳")
+    if sum(1 for done in extra_tasks if done) >= 3:
+        result = await asyncio.to_thread(claim_daily_task_bonus, user.id, guild_id, "extra", 10.0)
+        if result.get("success"):
+            bonus_lines.append(f"额外任务达成：+{format_shells(result.get('amount', 0))} 蛋壳")
+
+    basic_lines = [
+        _task_line(signed, "小蛋报到", f"{format_shells(sign_amount)} 蛋壳"),
+        _task_line(praised, "赞美奇米蛋", f"{format_shells(praise_amount)} 蛋壳"),
+        _task_line(rec_count > 0, "安利投稿", f"{rec_count}/1 次 · {format_shells(rec_amount)} 蛋壳"),
+        _task_line(egg_done, "小蛋问答", f"提问 {egg_usage} 次 · {format_shells(egg_amount)} 蛋壳"),
+    ]
+    extra_lines = [
+        _task_line(repo_bug_done, "repo/bug 投稿拿满", f"repo {repo_count}/5 · bug {bug_count}/5 · {format_shells(repo_bug_amount)} 蛋壳"),
+        _task_line(forum_done, "社区发帖", f"{format_shells(forum_amount)} 蛋壳"),
+        _task_line(ten_draw_done, "至少一次十连", "今日已十连" if ten_draw_done else "今日未十连"),
+        _task_line(msg_done, "有效发言 20 条", f"{msg_count}/20 条"),
+    ]
+
+    embed = discord.Embed(
+        title="🥚 小蛋每日任务",
+        description=(
+            f"今天是 `{today}`，奇米蛋把你的任务小本本翻开惹~\n"
+            f"基础任务：**{sum(1 for done in basic_tasks if done)} / {len(basic_tasks)}**　"
+            f"额外任务：**{sum(1 for done in extra_tasks if done)} / {len(extra_tasks)}**"
+        ),
+        color=STYLE["KIMI_YELLOW"],
+    )
+    embed.set_author(name=getattr(user, "display_name", str(user)), icon_url=user.display_avatar.url)
+    embed.add_field(name="基础任务", value="\n".join(basic_lines), inline=False)
+    embed.add_field(name="额外任务", value="\n".join(extra_lines), inline=False)
+    if bonus_lines:
+        embed.add_field(name="今日额外奖励", value="\n".join(bonus_lines), inline=False)
+    else:
+        embed.add_field(
+            name="任务奖励",
+            value="基础 4 项全完成：+10 蛋壳\n额外任务完成任意 3 项：+10 蛋壳",
+            inline=False,
+        )
+    embed.set_footer(text="任务状态按北京时间刷新；奖励每天每档只能领取一次。")
+    return embed
+
+
 def build_role_panel_embed(
     guild: discord.Guild,
     user_avatar_url: str | None = None,
@@ -1668,6 +1855,17 @@ class RoleClaimView(discord.ui.View):
                 )
             except (discord.HTTPException, OSError, ValueError) as error:
                 print(f"[小蛋报到] 公开面板刷新失败: guild={interaction.guild_id} error={error}")
+
+    @discord.ui.button(label="每日任务", style=discord.ButtonStyle.secondary, emoji="📒", custom_id="role_main_daily_tasks", row=0)
+    async def daily_tasks_callback(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        embed = await build_daily_tasks_embed(interaction.user, interaction.guild_id)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="一键移除", style=discord.ButtonStyle.danger, emoji="🧹", custom_id="role_main_remove_all", row=1)
     async def remove_all_callback(self, button, interaction: discord.Interaction):

@@ -164,6 +164,7 @@ def _empty_points_data() -> dict:
         "daily_signins": {},
         "daily_forum_rewards": {},
         "daily_praise_rewards": {},
+        "daily_task_rewards": {},
         "transactions": [],
         "acceleration_purchases": [],
     }
@@ -278,6 +279,7 @@ def _normalize_points_data(raw_data: dict) -> dict:
             "daily_signins": raw_data.get("daily_signins", {}),
             "daily_forum_rewards": raw_data.get("daily_forum_rewards", {}),
             "daily_praise_rewards": raw_data.get("daily_praise_rewards", {}),
+            "daily_task_rewards": raw_data.get("daily_task_rewards", {}),
             "transactions": raw_data.get("transactions", []),
             "acceleration_purchases": raw_data.get("acceleration_purchases", []),
         }
@@ -381,6 +383,53 @@ def modify_user_points(
     )
     save_points_data(data)
     return new_shells
+
+
+@_locked_points_data
+def claim_daily_task_bonus(
+    user_id: int,
+    guild_id: int,
+    bonus_key: str,
+    amount: float = 10.0,
+) -> dict:
+    data = load_points_data()
+    today = _today()
+    reward_key = f"{guild_id}:{today}"
+    rows = data.setdefault("daily_task_rewards", {}).setdefault(reward_key, {})
+    uid = str(user_id)
+    normalized_key = str(bonus_key or "bonus")[:32]
+    claim_key = f"{uid}:{normalized_key}"
+    if claim_key in rows:
+        existing = rows[claim_key] if isinstance(rows[claim_key], dict) else {}
+        return {
+            "success": False,
+            "reason": "already_claimed",
+            "amount": _round_delta(existing.get("amount", 0)) if isinstance(existing, dict) else 0.0,
+        }
+
+    record, _ = _ensure_user_record(data, user_id, guild_id)
+    before = _round_shells(record.get("shells", 0))
+    delta = _round_delta(amount)
+    after = _round_shells(before + delta)
+    actual_delta = _round_delta(after - before)
+    rows[claim_key] = {
+        "time": _now_iso(),
+        "amount": actual_delta,
+        "bonus_key": normalized_key,
+    }
+    record["shells"] = after
+    record["points"] = after
+    _append_transaction(
+        data,
+        record,
+        user_id=user_id,
+        guild_id=guild_id,
+        amount=actual_delta,
+        source="daily_task_bonus",
+        reason=f"bonus={normalized_key}",
+    )
+    save_points_data(data)
+    return {"success": True, "reason": "rewarded", "amount": actual_delta, "balance": after}
 
 
 @_locked_points_data
