@@ -5,6 +5,7 @@ import math
 import os
 import random
 import threading
+import unicodedata
 import uuid
 from datetime import datetime, timezone, timedelta
 from functools import wraps
@@ -115,8 +116,17 @@ def _parse_praise_time(raw: str) -> datetime | None:
     return parsed.replace(tzinfo=TZ_CN) if parsed.tzinfo is None else parsed.astimezone(TZ_CN)
 
 
+def _normalize_praise_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    text = "".join(text.split())
+    text = text.replace("！", "!")
+    return text
+
+
 def match_praise_rule(content: str, occurred_at: datetime | None = None, rules: list[dict] | None = None) -> dict | None:
-    text = str(content or "").strip()
+    raw_text = str(content or "").strip()
+    text = _normalize_praise_text(raw_text)
     if not text:
         return None
     moment = occurred_at or datetime.now(TZ_CN)
@@ -129,7 +139,9 @@ def match_praise_rule(content: str, occurred_at: datetime | None = None, rules: 
         end = _parse_praise_time(rule.get("end_at", ""))
         if (start and moment < start) or (end and moment > end):
             continue
-        field = str(rule.get("field", "") or "").strip()
+        field = _normalize_praise_text(rule.get("field", ""))
+        if not field:
+            continue
         matched = text == field if rule.get("match_mode") == "exact" else field in text
         if matched:
             return rule
@@ -846,8 +858,20 @@ def reward_daily_kimi_praise(
     reward_key = f"{guild_id}:{today}"
     rows = data.setdefault("daily_praise_rewards", {}).setdefault(reward_key, {})
     uid = str(user_id)
+    message_id_str = str(message_id)
     normalized_rule_id = str(rule_id or "default_kimi_praise")[:64]
     claim_key = f"{uid}:{normalized_rule_id}"
+
+    for existing_key, existing in rows.items():
+        if isinstance(existing, dict) and str(existing.get("message_id", "")) == message_id_str:
+            return {
+                "success": False,
+                "reason": "duplicate_message",
+                "amount": _round_delta(existing.get("amount", 0)),
+                "message_id": message_id_str,
+                "claim_key": str(existing_key),
+            }
+
     # The former single-trigger format used the bare user ID. Preserve its daily claim.
     legacy_claimed = normalized_rule_id == "default_kimi_praise" and uid in rows
     if claim_key in rows or legacy_claimed:
@@ -871,7 +895,7 @@ def reward_daily_kimi_praise(
 
     rows[claim_key] = {
         "time": _now_iso(),
-        "message_id": str(message_id),
+        "message_id": message_id_str,
         "amount": actual_delta,
         "rule_id": normalized_rule_id,
     }

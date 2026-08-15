@@ -116,7 +116,7 @@ class PointListener(commands.Cog):
             max_reward=rule["max_reward"],
         )
         if not reward.get("success"):
-            if reward.get("reason") == "already_claimed" and reward.get("message_id") == str(message.id):
+            if reward.get("reason") in {"already_claimed", "duplicate_message"} and reward.get("message_id") == str(message.id):
                 emoji = self._reward_emoji(reward.get("amount", 0))
                 if emoji and not any(str(reaction.emoji) == emoji for reaction in message.reactions):
                     try:
