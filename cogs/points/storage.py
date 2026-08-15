@@ -164,6 +164,7 @@ def _empty_points_data() -> dict:
         "daily_signins": {},
         "daily_forum_rewards": {},
         "daily_praise_rewards": {},
+        "daily_praise_scan_records": {},
         "daily_task_rewards": {},
         "transactions": [],
         "acceleration_purchases": [],
@@ -209,6 +210,14 @@ def _today() -> str:
 
 def _now_iso() -> str:
     return datetime.now(TZ_CN).isoformat(timespec="seconds")
+
+
+def _prune_daily_only(rows: Any) -> dict:
+    if not isinstance(rows, dict):
+        return {}
+    today = _today()
+    value = rows.get(today, {})
+    return {today: value if isinstance(value, dict) else {}}
 
 
 def _make_user_key(user_id: int, guild_id: int | None = None) -> str:
@@ -279,6 +288,7 @@ def _normalize_points_data(raw_data: dict) -> dict:
             "daily_signins": raw_data.get("daily_signins", {}),
             "daily_forum_rewards": raw_data.get("daily_forum_rewards", {}),
             "daily_praise_rewards": raw_data.get("daily_praise_rewards", {}),
+            "daily_praise_scan_records": _prune_daily_only(raw_data.get("daily_praise_scan_records", {})),
             "daily_task_rewards": raw_data.get("daily_task_rewards", {}),
             "transactions": raw_data.get("transactions", []),
             "acceleration_purchases": raw_data.get("acceleration_purchases", []),
@@ -430,6 +440,79 @@ def claim_daily_task_bonus(
     )
     save_points_data(data)
     return {"success": True, "reason": "rewarded", "amount": actual_delta, "balance": after}
+
+
+@_locked_points_data
+def reconcile_daily_task_bonus(
+    user_id: int,
+    guild_id: int,
+    bonus_key: str,
+    qualified: bool,
+    amount: float = 10.0,
+) -> dict:
+    data = load_points_data()
+    today = _today()
+    reward_key = f"{guild_id}:{today}"
+    rows = data.setdefault("daily_task_rewards", {}).setdefault(reward_key, {})
+    uid = str(user_id)
+    normalized_key = str(bonus_key or "bonus")[:32]
+    claim_key = f"{uid}:{normalized_key}"
+    existing = rows.get(claim_key)
+
+    if qualified and existing:
+        return {
+            "success": False,
+            "reason": "already_claimed",
+            "amount": _round_delta(existing.get("amount", 0)) if isinstance(existing, dict) else 0.0,
+        }
+
+    record, _ = _ensure_user_record(data, user_id, guild_id)
+
+    if qualified:
+        before = _round_shells(record.get("shells", 0))
+        delta = _round_delta(amount)
+        after = _round_shells(before + delta)
+        actual_delta = _round_delta(after - before)
+        rows[claim_key] = {
+            "time": _now_iso(),
+            "amount": actual_delta,
+            "bonus_key": normalized_key,
+        }
+        record["shells"] = after
+        record["points"] = after
+        _append_transaction(
+            data,
+            record,
+            user_id=user_id,
+            guild_id=guild_id,
+            amount=actual_delta,
+            source="daily_task_bonus",
+            reason=f"bonus={normalized_key}",
+        )
+        save_points_data(data)
+        return {"success": True, "reason": "rewarded", "amount": actual_delta, "balance": after}
+
+    if not existing:
+        return {"success": False, "reason": "not_qualified", "amount": 0.0}
+
+    revoke_amount = _round_delta(existing.get("amount", amount)) if isinstance(existing, dict) else _round_delta(amount)
+    before = _round_shells(record.get("shells", 0))
+    after = _round_shells(before - revoke_amount)
+    actual_delta = _round_delta(after - before)
+    rows.pop(claim_key, None)
+    record["shells"] = after
+    record["points"] = after
+    _append_transaction(
+        data,
+        record,
+        user_id=user_id,
+        guild_id=guild_id,
+        amount=actual_delta,
+        source="daily_task_bonus_revoke",
+        reason=f"bonus={normalized_key};recheck=not_qualified",
+    )
+    save_points_data(data)
+    return {"success": True, "reason": "revoked", "amount": abs(actual_delta), "balance": after}
 
 
 @_locked_points_data
@@ -891,6 +974,68 @@ def _get_praise_weights() -> list[int]:
     return weights
 
 
+def _praise_scan_key(guild_id: int, message_id: int, rule_id: str | None = None) -> str:
+    rule = str(rule_id or "no_rule")[:64]
+    return f"{guild_id}:{message_id}:{rule}"
+
+
+@_locked_points_data
+def get_successful_praise_scan_record(guild_id: int, message_id: int, rule_id: str) -> dict | None:
+    data = load_points_data()
+    today = _today()
+    rows = data.setdefault("daily_praise_scan_records", {}).setdefault(today, {})
+    item = rows.get(_praise_scan_key(guild_id, message_id, rule_id))
+    return dict(item) if isinstance(item, dict) and item.get("status") == "rewarded" else None
+
+
+def has_successful_praise_scan_record(guild_id: int, message_id: int, rule_id: str) -> bool:
+    return get_successful_praise_scan_record(guild_id, message_id, rule_id) is not None
+
+
+@_locked_points_data
+def record_praise_scan_log(
+    *,
+    guild_id: int,
+    channel_id: int,
+    message_id: int,
+    author_id: int,
+    author_name: str,
+    content: str,
+    status: str,
+    reason: str,
+    rule_id: str = "",
+    rule_field: str = "",
+    amount: float = 0.0,
+    recovered: bool = False,
+    message_created_at: str = "",
+) -> dict:
+    data = load_points_data()
+    today = _today()
+    rows = data.setdefault("daily_praise_scan_records", {}).setdefault(today, {})
+    normalized_rule = str(rule_id or "")[:64]
+    key_rule = normalized_rule if status == "rewarded" and normalized_rule else f"{normalized_rule or 'no_rule'}:{status}"
+    key = _praise_scan_key(guild_id, message_id, key_rule)
+    row = {
+        "time": _now_iso(),
+        "guild_id": str(guild_id),
+        "channel_id": str(channel_id),
+        "message_id": str(message_id),
+        "author_id": str(author_id),
+        "author_name": str(author_name or "")[:100],
+        "content": str(content or ""),
+        "status": str(status or "unknown")[:32],
+        "reason": str(reason or "")[:200],
+        "rule_id": str(rule_id or "")[:64],
+        "rule_field": str(rule_field or "")[:200],
+        "amount": _round_delta(amount),
+        "recovered": bool(recovered),
+        "message_created_at": str(message_created_at or "")[:40],
+    }
+    rows[key] = row
+    save_points_data(data)
+    return row
+
+
 @_locked_points_data
 def reward_daily_kimi_praise(
     user_id: int,
@@ -912,7 +1057,11 @@ def reward_daily_kimi_praise(
     claim_key = f"{uid}:{normalized_rule_id}"
 
     for existing_key, existing in rows.items():
-        if isinstance(existing, dict) and str(existing.get("message_id", "")) == message_id_str:
+        if (
+            isinstance(existing, dict)
+            and str(existing.get("message_id", "")) == message_id_str
+            and str(existing.get("rule_id", "default_kimi_praise")) == normalized_rule_id
+        ):
             return {
                 "success": False,
                 "reason": "duplicate_message",

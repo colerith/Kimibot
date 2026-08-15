@@ -43,7 +43,6 @@ from .storage import (
 )
 from cogs.points.storage import format_shells, get_user_points, get_user_summary, modify_user_points, sign_in_user
 from cogs.points.storage import (
-    claim_daily_task_bonus,
     get_acceleration_tiers,
     get_daily_signin_summary,
     load_points_data,
@@ -51,6 +50,7 @@ from cogs.points.storage import (
     load_praise_rules,
     save_praise_rules,
     purchase_acceleration_card,
+    reconcile_daily_task_bonus,
 )
 from cogs.submissions.storage import KIND_BUG, KIND_RECOMMENDATION, KIND_REPO, count_daily_submissions
 from cogs.egg_qa.storage import get_daily_usage as get_egg_qa_daily_usage
@@ -1452,8 +1452,11 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     )
     rec_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_RECOMMENDATION}"})
     comment_amount = _sum_tx(tx_rows, prefixes=("submission_comment_",))
-    comment_done = comment_amount > 0
-    egg_done, egg_usage, egg_amount = await asyncio.to_thread(_today_egg_qa_status, user.id, guild_id, tx_rows)
+    comment_done = comment_amount >= 15
+    _, egg_usage, _ = await asyncio.to_thread(_today_egg_qa_status, user.id, guild_id, tx_rows)
+    egg_reply_amount = _sum_tx(tx_rows, sources={"egg_qa_reply", "egg_qa_self_reply"})
+    egg_question_done = egg_usage >= 3
+    egg_reply_done = egg_reply_amount >= 15
 
     repo_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_REPO)
     bug_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_BUG)
@@ -1468,9 +1471,10 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     basic_tasks = [
         signed,
         praised,
-        rec_count > 0,
+        rec_count >= 5,
         comment_done,
-        egg_done,
+        egg_question_done,
+        egg_reply_done,
     ]
     extra_tasks = [
         repo_bug_done,
@@ -1480,21 +1484,24 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     ]
 
     bonus_lines = []
-    if all(basic_tasks):
-        result = await asyncio.to_thread(claim_daily_task_bonus, user.id, guild_id, "basic", 10.0)
-        if result.get("success"):
-            bonus_lines.append(f"基础任务全清：+{format_shells(result.get('amount', 0))} 蛋壳")
-    if sum(1 for done in extra_tasks if done) >= 3:
-        result = await asyncio.to_thread(claim_daily_task_bonus, user.id, guild_id, "extra", 10.0)
-        if result.get("success"):
-            bonus_lines.append(f"额外任务达成：+{format_shells(result.get('amount', 0))} 蛋壳")
+    basic_result = await asyncio.to_thread(reconcile_daily_task_bonus, user.id, guild_id, "basic", all(basic_tasks), 10.0)
+    if basic_result.get("reason") == "rewarded":
+        bonus_lines.append(f"基础任务全清：+{format_shells(basic_result.get('amount', 0))} 蛋壳")
+    elif basic_result.get("reason") == "revoked":
+        bonus_lines.append(f"基础任务未达成，已扣回：-{format_shells(basic_result.get('amount', 0))} 蛋壳")
+    extra_result = await asyncio.to_thread(reconcile_daily_task_bonus, user.id, guild_id, "extra", sum(1 for done in extra_tasks if done) >= 3, 10.0)
+    if extra_result.get("reason") == "rewarded":
+        bonus_lines.append(f"额外任务达成：+{format_shells(extra_result.get('amount', 0))} 蛋壳")
+    elif extra_result.get("reason") == "revoked":
+        bonus_lines.append(f"额外任务未达成，已扣回：-{format_shells(extra_result.get('amount', 0))} 蛋壳")
 
     basic_lines = [
         _task_line(signed, "小蛋报到", f"{format_shells(sign_amount)} 蛋壳"),
         _task_line(praised, "赞美奇米蛋", f"{format_shells(praise_amount)} 蛋壳"),
-        _task_line(rec_count > 0, "安利投稿", f"{rec_count}/1 次 · {format_shells(rec_amount)} 蛋壳"),
-        _task_line(comment_done, "安利盖楼回复", f"{format_shells(comment_amount)} 蛋壳"),
-        _task_line(egg_done, "小蛋问答", f"提问 {egg_usage} 次 · {format_shells(egg_amount)} 蛋壳"),
+        _task_line(rec_count >= 5, "安利投稿", f"{rec_count}/5 次 · {format_shells(rec_amount)} 蛋壳"),
+        _task_line(comment_done, "安利盖楼回复", f"{format_shells(comment_amount)}/15 蛋壳"),
+        _task_line(egg_question_done, "小蛋问答提问", f"{egg_usage}/3 次"),
+        _task_line(egg_reply_done, "小蛋问答回复", f"{format_shells(egg_reply_amount)}/15 蛋壳"),
     ]
     extra_lines = [
         _task_line(repo_bug_done, "repo/bug 投稿拿满", f"repo {repo_count}/5 · bug {bug_count}/5 · {format_shells(repo_bug_amount)} 蛋壳"),
