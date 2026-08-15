@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 import config
-from cogs.points.storage import modify_user_points
+from cogs.points.storage import grant_monthly_eligible_reward
 
 from .storage import claim_reply_reward, find_question_by_message, list_panels, remove_panel, revoke_reply_reward
 from .views import EggQAEntryView, EggQAPanelView, deploy_egg_qa_panel, refresh_bottom_egg_qa_panel
@@ -152,16 +152,22 @@ class EggQACog(commands.Cog, name="小蛋问答"):
 
         amount = int(reward["amount"])
         try:
-            modify_user_points(
+            credited = grant_monthly_eligible_reward(
                 message.author.id,
-                amount,
                 message.guild.id,
+                amount,
                 source="egg_qa_self_reply" if is_self_answer else "egg_qa_reply",
                 reason=(
                     f"question_id={question['id']};reply_message_id={message.id};"
                     f"self_answer={str(is_self_answer).lower()}"
                 ),
             )
+            monthly_bonus = float(credited.get("monthly_bonus", 0) or 0)
+            if monthly_bonus > 0:
+                print(
+                    f"[EggQA] monthly card bonus: user={message.author.id} reply={message.id} "
+                    f"base={amount} bonus={monthly_bonus} total={credited.get('amount')}"
+                )
         except Exception as error:
             revoke_reply_reward(
                 question_id=question["id"],

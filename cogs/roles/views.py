@@ -51,6 +51,11 @@ from cogs.points.storage import (
     save_praise_rules,
     purchase_acceleration_card,
     reconcile_daily_task_bonus,
+    claim_monthly_card_first_role,
+    get_monthly_card_config,
+    get_monthly_card_status,
+    purchase_monthly_card,
+    update_monthly_card_config,
 )
 from cogs.submissions.storage import KIND_BUG, KIND_RECOMMENDATION, KIND_REPO, count_daily_submissions
 from cogs.egg_qa.storage import get_daily_usage as get_egg_qa_daily_usage
@@ -184,6 +189,28 @@ def _redeem_price_line(meta: dict) -> str:
     if float(meta.get("discount_price", 0.0) or 0) > 0 and start and end:
         return f"原价 **{original}** 蛋壳，限时价 {discount}（{start} 至 {end}）"
     return f"原价 **{original}** 蛋壳"
+
+
+def _format_monthly_remaining(status: dict) -> str:
+    seconds = max(0, int(status.get("remaining_seconds", 0) or 0))
+    if seconds <= 0:
+        return "未启用"
+    days, remainder = divmod(seconds, 86400)
+    hours = remainder // 3600
+    if days > 0:
+        return f"{days} 天 {hours} 小时"
+    minutes = max(1, remainder // 60)
+    return f"{hours} 小时 {minutes % 60} 分钟"
+
+
+def _monthly_legendary_roles(guild: discord.Guild) -> list[discord.Role]:
+    data = load_role_data()
+    roles = [
+        guild.get_role(role_id)
+        for role_id in data.get("lottery_roles", [])
+        if get_lottery_role_rarity(role_id, data) == RARITY_LEGENDARY
+    ]
+    return sorted((role for role in roles if role), key=lambda role: role.position, reverse=True)
 
 
 def _percent(numerator: int | float, denominator: int | float) -> str:
@@ -1099,11 +1126,23 @@ def build_redeem_shop_embed(guild: discord.Guild, user_id: int) -> discord.Embed
         lines.append(f"{role.mention} - {_redeem_price_line(meta)}")
 
     balance = get_user_points(user_id, guild.id)
+    monthly = get_monthly_card_status(user_id, guild.id)
+    monthly_state = (
+        f"启用中，剩余 **{_format_monthly_remaining(monthly)}**，已叠加 **{monthly['stacked_cards']} / {monthly['max_cards']}** 张"
+        if monthly["active"]
+        else "当前未启用"
+    )
+    sale_state = "销售中" if monthly["enabled"] else "暂停销售"
+    gift_state = "首次三星身份组待选择" if monthly["first_role_pending"] else "首次购买可自选一个三星身份组"
     embed = discord.Embed(
-        title="🥚 身份兑换",
+        title="🥚 兑换商城",
         description=(
-            "用蛋壳兑换当前上架的身份组。\n"
             f"你的蛋壳：**{format_shells(balance)}**\n\n"
+            "### 蛋壳月卡\n"
+            f"售价 **{format_shells(monthly['price'])}** 蛋壳，购买后立即启用 **{monthly['duration_days']}** 天。\n"
+            f"每日固定 +**{format_shells(monthly['daily_reward'])}** 蛋壳，活动收益 **{monthly['reward_multiplier']} 倍**。\n"
+            f"{sale_state} · {monthly_state} · {gift_state}\n\n"
+            "### 身份兑换\n"
             + ("\n".join(lines) if lines else "*当前暂无可兑换身份组。*")
         ),
         color=STYLE["KIMI_YELLOW"],
@@ -1219,9 +1258,155 @@ class RedeemRoleSelect(discord.ui.Select):
 
 
 class RedeemShopView(discord.ui.View):
-    def __init__(self, guild: discord.Guild):
+    def __init__(self, guild: discord.Guild, user_id: int):
         super().__init__(timeout=300)
+        self.user_id = user_id
         self.add_item(RedeemRoleSelect(guild))
+        self.add_item(MonthlyCardPurchaseButton(guild))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("这不是你的兑换商城。", ephemeral=True)
+            return False
+        return True
+
+
+def _monthly_purchase_result_text(result: dict) -> str:
+    status = result.get("status", {})
+    return (
+        "✅ **蛋壳月卡已经启用啦！**\n"
+        f"本次消耗：**{format_shells(result.get('cost', 0))}** 蛋壳\n"
+        f"本次固定结算：+**{format_shells(result.get('daily_reward', 0))}** 蛋壳\n"
+        f"当前叠加：**{status.get('stacked_cards', 0)} / {status.get('max_cards', 3)}** 张\n"
+        f"剩余时间：**{_format_monthly_remaining(status)}**\n"
+        f"当前余额：**{format_shells(result.get('balance', 0))}** 蛋壳"
+    )
+
+
+class MonthlyFirstRoleSelect(discord.ui.Select):
+    def __init__(self, roles: list[discord.Role]):
+        options = [discord.SelectOption(label=role.name[:100], value=str(role.id), emoji="⭐") for role in roles]
+        super().__init__(placeholder="选择首次赠送的三星身份组...", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, MonthlyFirstRoleView) or not interaction.guild_id:
+            return await interaction.response.send_message("这个月卡选择面板已经失效。", ephemeral=True)
+        role_id = int(self.values[0])
+        role = interaction.guild.get_role(role_id)
+        data = load_role_data()
+        if not role or role_id not in data.get("lottery_roles", []) or get_lottery_role_rarity(role_id, data) != RARITY_LEGENDARY:
+            return await interaction.response.send_message("这个三星身份组已经失效，请重新打开商城选择。", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        status = get_monthly_card_status(interaction.user.id, interaction.guild_id)
+        purchase_result = None
+        if not status["ever_purchased"]:
+            purchase_result = purchase_monthly_card(interaction.user.id, interaction.guild_id)
+            if not purchase_result.get("success"):
+                return await interaction.followup.send(MonthlyCardPurchaseButton.failure_text(purchase_result), ephemeral=True)
+        elif not status["first_role_pending"]:
+            return await interaction.followup.send("首次三星身份组已经领取过啦。", ephemeral=True)
+
+        add_to_collection(interaction.user.id, role.id)
+        claim_result = claim_monthly_card_first_role(interaction.user.id, interaction.guild_id, role.id)
+        if not claim_result.get("success"):
+            return await interaction.followup.send("首次三星身份组已经领取过啦。", ephemeral=True)
+
+        role_warning = ""
+        try:
+            await interaction.user.add_roles(role, reason="蛋壳月卡首次购买三星自选")
+        except (discord.Forbidden, discord.HTTPException):
+            role_warning = "\n身份组已加入永久换装收藏，但机器人暂时无法直接佩戴，请检查身份组层级。"
+        purchase_text = _monthly_purchase_result_text(purchase_result) + "\n" if purchase_result else ""
+        await interaction.followup.send(
+            f"{purchase_text}⭐ 首次赠送已选择：{role.mention}{role_warning}",
+            ephemeral=True,
+        )
+
+
+class MonthlyFirstRoleView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, user_id: int, page: int = 0):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.user_id = user_id
+        self.roles = _monthly_legendary_roles(guild)
+        self.total_pages = max(1, math.ceil(len(self.roles) / 25))
+        self.page = page % self.total_pages
+        self.rebuild()
+
+    def rebuild(self):
+        self.clear_items()
+        page_roles = self.roles[self.page * 25:(self.page + 1) * 25]
+        if page_roles:
+            self.add_item(MonthlyFirstRoleSelect(page_roles))
+        if self.total_pages > 1:
+            previous = discord.ui.Button(label="上一页", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
+            following = discord.ui.Button(label="下一页", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
+            previous.callback = self.previous_page
+            following.callback = self.next_page
+            self.add_item(previous)
+            self.add_item(following)
+
+    async def previous_page(self, interaction: discord.Interaction):
+        self.page = (self.page - 1) % self.total_pages
+        self.rebuild()
+        await interaction.response.edit_message(view=self)
+
+    async def next_page(self, interaction: discord.Interaction):
+        self.page = (self.page + 1) % self.total_pages
+        self.rebuild()
+        await interaction.response.edit_message(view=self)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("这不是你的三星自选面板。", ephemeral=True)
+            return False
+        return True
+
+
+class MonthlyCardPurchaseButton(discord.ui.Button):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(label="蛋壳月卡", emoji="📅", style=discord.ButtonStyle.success, row=1)
+        self.guild = guild
+
+    @staticmethod
+    def failure_text(result: dict) -> str:
+        reason = result.get("reason")
+        if reason == "insufficient_shells":
+            return (
+                f"蛋壳不足，购买月卡需要 **{format_shells(result.get('cost', 30))}** 蛋壳，"
+                f"你当前只有 **{format_shells(result.get('balance', 0))}**。"
+            )
+        if reason == "max_cards_reached":
+            return "同时最多叠加三张月卡，当前已经排到约 90 天啦。"
+        if reason == "disabled":
+            return "蛋壳月卡暂时停止销售，请稍后再来看看。"
+        return "月卡购买失败，请稍后再试。"
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("该功能仅支持在服务器中使用。", ephemeral=True)
+        status = get_monthly_card_status(interaction.user.id, interaction.guild_id)
+        legendary_roles = _monthly_legendary_roles(interaction.guild)
+        if (not status["ever_purchased"] or status["first_role_pending"]) and legendary_roles:
+            embed = discord.Embed(
+                title="⭐ 月卡三星自选",
+                description="首次购买月卡可以自选一个三星身份组。确认选择后才会扣除月卡费用并立即启用。",
+                color=STYLE["KIMI_YELLOW"],
+            )
+            return await interaction.response.send_message(
+                embed=embed,
+                view=MonthlyFirstRoleView(interaction.guild, interaction.user.id),
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True)
+        result = purchase_monthly_card(interaction.user.id, interaction.guild_id)
+        if not result.get("success"):
+            return await interaction.followup.send(self.failure_text(result), ephemeral=True)
+        suffix = "\n⭐ 当前没有可选的三星身份组，首次自选资格已经保留。" if result.get("first_purchase") else ""
+        await interaction.followup.send(_monthly_purchase_result_text(result) + suffix, ephemeral=True)
 
 
 class AccelerationShopView(discord.ui.View):
@@ -1318,6 +1503,7 @@ def build_shell_help_embed() -> discord.Embed:
     forum_reward = float(getattr(config, "FORUM_REWARD_AMOUNT", 5.0))
     boost_reward = float(getattr(config, "BOOST_REWARD_AMOUNT", 10.0))
     prequiz_reward = float(getattr(config, "PRE_QUIZ_REWARD", 5.0))
+    monthly = get_monthly_card_config()
     embed = discord.Embed(
         title="🥚 蛋壳帮助",
         description=(
@@ -1330,8 +1516,9 @@ def build_shell_help_embed() -> discord.Embed:
             f"**发帖奖励**：指定论坛频道每天前 3 帖，每帖 +{format_shells(forum_reward)} 蛋壳。\n"
             f"**预备答题**：未验证成员通过后固定 +{format_shells(prequiz_reward)} 蛋壳，每人一次。\n"
             f"**服务器助力**：每次助力 +{format_shells(boost_reward)} 蛋壳。\n"
+            f"**蛋壳月卡**：售价 {format_shells(monthly['price'])} 蛋壳，启用后每天固定 +{format_shells(monthly['daily_reward'])}，活动收益提高到 {monthly['reward_multiplier']} 倍。\n"
             "**蛋壳红包**：使用 `/发红包` 把蛋壳发给大家抢，普通成员扣除红包总额，管理员福利红包不扣除。\n\n"
-            "**蛋壳用途**：身份抽奖、换装/商店相关兑换；加速卡仅未验证成员可购买。"
+            "**蛋壳用途**：身份抽奖、兑换商城与换装；加速卡仅未验证成员可购买。"
         ),
         color=STYLE["KIMI_YELLOW"],
     )
@@ -1396,6 +1583,26 @@ def _sum_tx(rows: list[dict], *, sources: set[str] | None = None, prefixes: tupl
     return total
 
 
+def _sum_tx_base(rows: list[dict], *, sources: set[str] | None = None, prefixes: tuple[str, ...] = ()) -> float:
+    total = 0.0
+    for tx in rows:
+        source = str(tx.get("source", ""))
+        if sources is not None and source not in sources:
+            continue
+        if prefixes and not any(source.startswith(prefix) for prefix in prefixes):
+            continue
+        amount = tx.get("amount", 0)
+        for part in str(tx.get("reason", "")).split(";"):
+            if part.startswith("base="):
+                amount = part.split("=", 1)[1]
+                break
+        try:
+            total += float(amount or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def _has_today_tx(rows: list[dict], *, source: str, reason_contains: str | None = None) -> bool:
     for tx in rows:
         if str(tx.get("source", "")) != source:
@@ -1452,11 +1659,13 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     )
     rec_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_RECOMMENDATION}"})
     comment_amount = _sum_tx(tx_rows, prefixes=("submission_comment_",))
-    comment_done = comment_amount >= 15
+    comment_base_amount = _sum_tx_base(tx_rows, prefixes=("submission_comment_",))
+    comment_done = comment_base_amount >= 15
     _, egg_usage, _ = await asyncio.to_thread(_today_egg_qa_status, user.id, guild_id, tx_rows)
     egg_reply_amount = _sum_tx(tx_rows, sources={"egg_qa_reply", "egg_qa_self_reply"})
+    egg_reply_base_amount = _sum_tx_base(tx_rows, sources={"egg_qa_reply", "egg_qa_self_reply"})
     egg_question_done = egg_usage >= 3
-    egg_reply_done = egg_reply_amount >= 15
+    egg_reply_done = egg_reply_base_amount >= 15
 
     repo_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_REPO)
     bug_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_BUG)
@@ -1499,9 +1708,9 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         _task_line(signed, "小蛋报到", f"{format_shells(sign_amount)} 蛋壳"),
         _task_line(praised, "赞美奇米蛋", f"{format_shells(praise_amount)} 蛋壳"),
         _task_line(rec_count >= 5, "安利投稿", f"{rec_count}/5 次 · {format_shells(rec_amount)} 蛋壳"),
-        _task_line(comment_done, "安利盖楼回复", f"{format_shells(comment_amount)}/15 蛋壳"),
+        _task_line(comment_done, "安利盖楼回复", f"{format_shells(comment_base_amount)}/15 · 实得 {format_shells(comment_amount)} 蛋壳"),
         _task_line(egg_question_done, "小蛋问答提问", f"{egg_usage}/3 次"),
-        _task_line(egg_reply_done, "小蛋问答回复", f"{format_shells(egg_reply_amount)}/15 蛋壳"),
+        _task_line(egg_reply_done, "小蛋问答回复", f"{format_shells(egg_reply_base_amount)}/15 · 实得 {format_shells(egg_reply_amount)} 蛋壳"),
     ]
     extra_lines = [
         _task_line(repo_bug_done, "repo/bug 投稿拿满", f"repo {repo_count}/5 · bug {bug_count}/5 · {format_shells(repo_bug_amount)} 蛋壳"),
@@ -1560,7 +1769,7 @@ def build_role_panel_embed(
                     f"日期：`{summary['date']}`\n\n"
                     f"🏆 **今日前十**\n{top_text}\n\n"
                     "🥚 **蛋壳用途**\n"
-                    "蛋壳可以用于身份抽奖、加速卡、换装相关兑换，以及后续的小蛋商店功能。\n\n"
+                    "蛋壳可以用于身份抽奖、加速卡、兑换商城、蛋壳月卡和换装相关功能。\n\n"
                     "🎲 **随机事件**\n"
                     "报到时会触发小蛋事件，可能获得或扣掉 `0.1 - 1.9` 蛋壳。",
         color=STYLE["KIMI_YELLOW"]
@@ -1623,8 +1832,15 @@ class RoleClaimView(discord.ui.View):
             return
 
         summary = get_user_summary(interaction.user.id, interaction.guild_id)
+        monthly = summary.get("monthly_card", {})
+        monthly_text = (
+            f"蛋壳月卡：**启用中** · 剩余 **{_format_monthly_remaining(monthly)}** · 收益 **{monthly.get('reward_multiplier', 1.5)} 倍**\n"
+            if monthly.get("active")
+            else "蛋壳月卡：**未启用**\n"
+        )
         text = (
             f"🥚 **你的蛋壳余额：{format_shells(summary['shells'])}**\n"
+            f"{monthly_text}"
             f"连续报到：**{summary['streak_days']}** 天\n"
             f"今日有效发言：**{summary['daily_msg_count']}** 条\n\n"
             f"{_rules_text()}"
@@ -1789,7 +2005,7 @@ class RoleClaimView(discord.ui.View):
         )
         await interaction.followup.send(embed=embed, view=RoleLotteryView(), ephemeral=True)
 
-    @discord.ui.button(label="身份兑换", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_redeem", row=1)
+    @discord.ui.button(label="兑换商城", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_redeem", row=1)
     async def redeem_entry_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
@@ -1798,7 +2014,7 @@ class RoleClaimView(discord.ui.View):
         except discord.NotFound:
             return
         embed = build_redeem_shop_embed(interaction.guild, interaction.user.id)
-        await interaction.followup.send(embed=embed, view=RedeemShopView(interaction.guild), ephemeral=True)
+        await interaction.followup.send(embed=embed, view=RedeemShopView(interaction.guild, interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label="每日签到", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="role_main_sign_in", row=0)
     async def main_sign_in_callback(self, button, interaction: discord.Interaction):
@@ -1833,6 +2049,8 @@ class RoleClaimView(discord.ui.View):
                 bonus_lines.append(f"连续/活跃加成：+{format_shells(result['bonus_amount'])} 蛋壳")
             if result.get("rank_bonus", 0) > 0:
                 bonus_lines.append(f"前十报到奖励：+{format_shells(result['rank_bonus'])} 蛋壳")
+            if result.get("monthly_card_bonus", 0) > 0:
+                bonus_lines.append(f"月卡收益加成：+{format_shells(result['monthly_card_bonus'])} 蛋壳")
             bonus_text = "\n".join(bonus_lines) if bonus_lines else "今日暂无额外加成"
             text = (
                 f"✅ **小蛋报到成功！**\n"
@@ -3319,6 +3537,92 @@ class PraiseRuleManagerView(discord.ui.View):
         self.add_item(PraiseRuleActionButton("refresh", "刷新", "🔄"))
 
 
+def build_monthly_card_admin_embed() -> discord.Embed:
+    config_data = get_monthly_card_config()
+    points_data = load_points_data()
+    purchases = points_data.get("monthly_card_purchases", [])
+    users = points_data.get("users", {})
+    pending_gifts = sum(
+        1
+        for record in users.values()
+        if isinstance(record, dict) and record.get("monthly_card_first_role_pending", False)
+    )
+    embed = discord.Embed(
+        title="📅 蛋壳月卡配置",
+        description=(
+            f"销售状态：**{'启用' if config_data['enabled'] else '暂停'}**\n"
+            f"单张售价：**{format_shells(config_data['price'])}** 蛋壳\n"
+            f"单张时长：**{config_data['duration_days']}** 天\n"
+            f"每日固定奖励：**{format_shells(config_data['daily_reward'])}** 蛋壳\n"
+            f"活动收益倍率：**{config_data['reward_multiplier']} 倍**\n"
+            f"同时叠加上限：**{config_data['max_cards']}** 张\n\n"
+            "月卡购买后立即启用；首次购买可自选一个三星身份组。"
+        ),
+        color=STYLE["KIMI_YELLOW"],
+    )
+    embed.add_field(
+        name="追踪数据",
+        value=f"累计购买记录：**{len(purchases) if isinstance(purchases, list) else 0}**\n待领取三星：**{pending_gifts}**",
+        inline=False,
+    )
+    embed.set_footer(text="每日固定奖励按北京时间结算，销售暂停不会终止已启用月卡。")
+    return embed
+
+
+class MonthlyCardConfigModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="编辑蛋壳月卡")
+        config_data = get_monthly_card_config()
+        self.price_input = ui.InputText(label="单张售价（蛋壳）", value=str(config_data["price"]), max_length=12)
+        self.duration_input = ui.InputText(label="单张时长（天）", value=str(config_data["duration_days"]), max_length=4)
+        self.daily_input = ui.InputText(label="每日固定奖励", value=str(config_data["daily_reward"]), max_length=12)
+        self.multiplier_input = ui.InputText(label="活动收益倍率", value=str(config_data["reward_multiplier"]), max_length=8)
+        for item in (self.price_input, self.duration_input, self.daily_input, self.multiplier_input):
+            self.add_item(item)
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            price = float(self.price_input.value)
+            duration_days = int(self.duration_input.value)
+            daily_reward = float(self.daily_input.value)
+            multiplier = float(self.multiplier_input.value)
+            if price < 0.1 or not 1 <= duration_days <= 365 or daily_reward < 0 or not 1 <= multiplier <= 5:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message(
+                "配置格式不正确：售价至少 0.1，时长 1-365 天，每日奖励不能为负，倍率范围 1-5。",
+                ephemeral=True,
+            )
+        update_monthly_card_config(
+            price=price,
+            duration_days=duration_days,
+            daily_reward=daily_reward,
+            reward_multiplier=multiplier,
+        )
+        await interaction.response.edit_message(embed=build_monthly_card_admin_embed(), view=MonthlyCardAdminView())
+
+
+class MonthlyCardAdminView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+
+    @discord.ui.button(label="修改配置", style=discord.ButtonStyle.primary, emoji="✏️")
+    async def edit_config(self, button, interaction: discord.Interaction):
+        await interaction.response.send_modal(MonthlyCardConfigModal())
+
+    @discord.ui.button(label="切换销售", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def toggle_enabled(self, button, interaction: discord.Interaction):
+        config_data = get_monthly_card_config()
+        update_monthly_card_config(
+            price=config_data["price"],
+            duration_days=config_data["duration_days"],
+            daily_reward=config_data["daily_reward"],
+            reward_multiplier=config_data["reward_multiplier"],
+            enabled=not config_data["enabled"],
+        )
+        await interaction.response.edit_message(embed=build_monthly_card_admin_embed(), view=self)
+
+
 class CommunityPanelManageView(discord.ui.View):
     def __init__(self, ctx, bot):
         super().__init__(timeout=600)
@@ -3435,6 +3739,14 @@ class CommunityPanelManageView(discord.ui.View):
     async def acceleration_admin_callback(self, button, interaction: discord.Interaction):
         await interaction.response.send_message(embed=build_acceleration_admin_embed(), ephemeral=True)
 
+    @discord.ui.button(label="月卡配置", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="community_admin_monthly_card")
+    async def monthly_card_admin_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            embed=build_monthly_card_admin_embed(),
+            view=MonthlyCardAdminView(),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="红包统计", style=discord.ButtonStyle.secondary, emoji="🧧", custom_id="community_admin_red_packets")
     async def red_packet_admin_callback(self, button, interaction: discord.Interaction):
         await interaction.response.send_message(embed=build_red_packet_admin_embed(), ephemeral=True)
@@ -3449,7 +3761,7 @@ def build_community_manage_embed(guild: discord.Guild | None):
         title="⚙️ 社区面板管理台",
         description=(
             "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
-            "预答题、投稿、小蛋问答、识别字段奖励、加速卡、红包与数据追踪入口已统一接入这里。\n"
+            "预答题、投稿、小蛋问答、识别字段奖励、加速卡、蛋壳月卡、红包与数据追踪入口已统一接入这里。\n"
             f"当前识别奖励规则：**{len(load_praise_rules())}** 条。"
         ),
         color=0x2B2D31,
@@ -3600,13 +3912,24 @@ def build_data_overview_embed() -> discord.Embed:
     users = points.get("users", {})
     transactions = points.get("transactions", [])
     accel_purchases = points.get("acceleration_purchases", [])
+    monthly_purchases = points.get("monthly_card_purchases", [])
 
-    point_keys = {"users", "daily_signins", "daily_forum_rewards", "transactions", "acceleration_purchases"}
+    point_keys = {"users", "daily_signins", "daily_forum_rewards", "transactions", "acceleration_purchases", "monthly_card_config", "monthly_card_purchases"}
     point_ok = point_keys.issubset(points.keys()) and isinstance(users, dict) and isinstance(transactions, list)
     user_rows = len(users) if isinstance(users, dict) else 0
     accel_users = sum(
         1 for record in users.values()
         if isinstance(record, dict) and int(record.get("acceleration_days", 0) or 0) > 0
+    ) if isinstance(users, dict) else 0
+    now_cn = datetime.now(BEIJING_TZ)
+    monthly_users = sum(
+        1
+        for record in users.values()
+        if isinstance(record, dict) and any(
+            (expires_at := _parse_beijing_time(period.get("expires_at", ""))) and expires_at > now_cn
+            for period in record.get("monthly_card_periods", [])
+            if isinstance(period, dict)
+        )
     ) if isinstance(users, dict) else 0
 
     attempts = load_attempts()
@@ -3632,6 +3955,7 @@ def build_data_overview_embed() -> discord.Embed:
         value="\n".join([
             _schema_line("user_points", point_ok, f"`data/user_points.json`，用户 **{user_rows}**，流水 **{len(transactions) if isinstance(transactions, list) else 0}**"),
             _schema_line("acceleration", isinstance(accel_purchases, list), f"已加速用户 **{accel_users}**，顶层购卡流水 **{len(accel_purchases) if isinstance(accel_purchases, list) else 0}**"),
+            _schema_line("monthly_card", isinstance(monthly_purchases, list), f"启用/叠加用户 **{monthly_users}**，月卡购买流水 **{len(monthly_purchases) if isinstance(monthly_purchases, list) else 0}**"),
             _schema_line("daily_signins", isinstance(points.get("daily_signins", {}), dict), f"签到日表 **{len(points.get('daily_signins', {})) if isinstance(points.get('daily_signins', {}), dict) else 0}**"),
         ]),
         inline=False,

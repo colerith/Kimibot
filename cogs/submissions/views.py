@@ -4,7 +4,7 @@ import inspect
 import io
 
 import config
-from cogs.points.storage import format_shells, modify_user_points
+from cogs.points.storage import format_shells, grant_monthly_eligible_reward, modify_user_points
 
 from .storage import (
     KIND_BUG,
@@ -526,17 +526,23 @@ class OwnerReplyModal(discord.ui.Modal):
         record = get_submission(self.record["id"])
         if not record:
             return await interaction.followup.send("投稿记录不存在。", ephemeral=True)
-        reward = random_reward(record.get("kind", KIND_REPO), "reply")
-        record = add_owner_reply(record["id"], interaction.user.id, interaction.user.display_name, self.children[0].value.strip(), reward)
+        base_reward = random_reward(record.get("kind", KIND_REPO), "reply")
+        record = add_owner_reply(record["id"], interaction.user.id, interaction.user.display_name, self.children[0].value.strip(), base_reward)
         if not record:
             return await interaction.followup.send("投稿已删除，不能回复。", ephemeral=True)
-        modify_user_points(
+        reward_result = grant_monthly_eligible_reward(
             int(record["author_id"]),
-            reward,
             interaction.guild_id,
+            base_reward,
             source=f"submission_reply_{record.get('kind')}",
             reason=f"submission_id={record['id']}",
         )
+        reward = float(reward_result["amount"])
+        monthly_bonus = float(reward_result.get("monthly_bonus", 0) or 0)
+        if monthly_bonus > 0:
+            record["replies"][-1]["reward"] = reward
+            record["extra_reward"] = round(float(record.get("extra_reward", 0) or 0) + monthly_bonus, 1)
+            record = save_submission(record)
         await publish_or_update_submission(interaction.client, record)
         await _notify_user(
             interaction.client,
@@ -564,16 +570,19 @@ class CommentModal(discord.ui.Modal):
         reward_result = grant_comment_reward(guild_id=interaction.guild_id, user_id=interaction.user.id)
         awarded = float(reward_result.get("awarded", 0.0))
         if awarded > 0:
-            modify_user_points(
+            credited = grant_monthly_eligible_reward(
                 interaction.user.id,
-                awarded,
                 interaction.guild_id,
+                awarded,
                 source=f"submission_comment_{record.get('kind', KIND_REPO)}",
                 reason=f"submission_id={record['id']};daily_used={format_shells(reward_result.get('used', 0))}",
             )
+            total_awarded = float(credited.get("amount", awarded))
+            monthly_bonus = float(credited.get("monthly_bonus", 0))
             msg = (
-                f"✅ 评论已经盖到楼里啦，奇米蛋塞给你 **{format_shells(awarded)}** 蛋壳~\n"
-                f"今日盖楼奖励：**{format_shells(reward_result.get('used', 0))} / {format_shells(reward_result.get('cap', 15.0))}**"
+                f"✅ 评论已经盖到楼里啦，奇米蛋塞给你 **{format_shells(total_awarded)}** 蛋壳~\n"
+                + (f"月卡加成：+**{format_shells(monthly_bonus)}** 蛋壳\n" if monthly_bonus > 0 else "")
+                + f"今日盖楼奖励：**{format_shells(reward_result.get('used', 0))} / {format_shells(reward_result.get('cap', 15.0))}**"
             )
         else:
             msg = (
@@ -864,7 +873,15 @@ class SubmissionDraftView(discord.ui.View):
             )
             msg = f"✅ 投稿已更新。({status})"
         else:
-            reward = random_reward(self.kind, "base")
+            base_reward = random_reward(self.kind, "base")
+            reward_result = grant_monthly_eligible_reward(
+                interaction.user.id,
+                interaction.guild_id,
+                base_reward,
+                source=f"submission_{self.kind}",
+                reason="submission_pending_id",
+            )
+            reward = float(reward_result["amount"])
             record = create_submission(
                 guild_id=interaction.guild_id,
                 author_id=interaction.user.id,
@@ -872,13 +889,6 @@ class SubmissionDraftView(discord.ui.View):
                 kind=self.kind,
                 fields=self.fields,
                 base_reward=reward,
-            )
-            modify_user_points(
-                interaction.user.id,
-                reward,
-                interaction.guild_id,
-                source=f"submission_{self.kind}",
-                reason=f"submission_id={record['id']}",
             )
             record, status = await publish_or_update_submission(interaction.client, record, attachments=attachments)
             msg = f"✅ 投稿已送到小蛋箱！本次获得 **{format_shells(reward)}** 蛋壳。({status})"
@@ -985,17 +995,18 @@ class RecommendationActionView(discord.ui.View):
         if not result:
             return await interaction.followup.send("投稿不存在或已经删除。", ephemeral=True)
         record = result["record"]
+        credited_rewards = []
         for tier in result["new_tier_rewards"]:
-            modify_user_points(
+            credited_rewards.append(grant_monthly_eligible_reward(
                 int(record["author_id"]),
-                tier["reward"],
                 interaction.guild_id,
+                tier["reward"],
                 source="submission_useful_tier",
                 reason=f"submission_id={record['id']};useful_count={tier['count']}",
-            )
+            ))
         await publish_or_update_submission(interaction.client, record)
         if result["new_tier_rewards"]:
-            reward_text = format_shells(sum(x["reward"] for x in result["new_tier_rewards"]))
+            reward_text = format_shells(sum(float(x.get("amount", 0)) for x in credited_rewards))
             await _notify_user(interaction.client, record, f"🥚 你的安利被大家觉得有用，追加 **{reward_text}** 蛋壳！")
         status = "已计入" if result["added"] else "已取消"
         await interaction.followup.send(f"✅ {status}觉得有用。", ephemeral=True)

@@ -24,6 +24,15 @@ LEGACY_POINTS_TO_SHELLS = 0.1
 _POINTS_DATA_LOCK = threading.RLock()
 _PRAISE_RULES_LOCK = threading.RLock()
 
+DEFAULT_MONTHLY_CARD_CONFIG = {
+    "enabled": True,
+    "price": 30.0,
+    "duration_days": 30,
+    "daily_reward": 10.0,
+    "reward_multiplier": 1.5,
+    "max_cards": 3,
+}
+
 
 def _default_praise_rule() -> dict:
     return {
@@ -168,6 +177,8 @@ def _empty_points_data() -> dict:
         "daily_task_rewards": {},
         "transactions": [],
         "acceleration_purchases": [],
+        "monthly_card_config": dict(DEFAULT_MONTHLY_CARD_CONFIG),
+        "monthly_card_purchases": [],
     }
 
 DEFAULT_RANDOM_EVENTS = {
@@ -256,6 +267,64 @@ def format_shells(value: float | int | str) -> str:
     return f"{amount:.1f}"
 
 
+def _normalize_monthly_card_config(raw: dict | None) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    try:
+        price = max(0.1, float(raw.get("price", DEFAULT_MONTHLY_CARD_CONFIG["price"])))
+        duration_days = max(1, int(raw.get("duration_days", DEFAULT_MONTHLY_CARD_CONFIG["duration_days"])))
+        daily_reward = max(0.0, float(raw.get("daily_reward", DEFAULT_MONTHLY_CARD_CONFIG["daily_reward"])))
+        multiplier = max(1.0, float(raw.get("reward_multiplier", DEFAULT_MONTHLY_CARD_CONFIG["reward_multiplier"])))
+    except (TypeError, ValueError):
+        return dict(DEFAULT_MONTHLY_CARD_CONFIG)
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "price": _round_delta(price),
+        "duration_days": min(365, duration_days),
+        "daily_reward": _round_delta(daily_reward),
+        "reward_multiplier": round(min(5.0, multiplier), 2),
+        "max_cards": 3,
+    }
+
+
+def _parse_iso_datetime(raw: Any) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=TZ_CN) if parsed.tzinfo is None else parsed.astimezone(TZ_CN)
+
+
+def _normalize_monthly_periods(raw: Any) -> list[dict]:
+    periods = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        starts_at = _parse_iso_datetime(item.get("starts_at"))
+        expires_at = _parse_iso_datetime(item.get("expires_at"))
+        if not starts_at or not expires_at or expires_at <= starts_at:
+            continue
+        try:
+            reward_days = max(1, int(item.get("reward_days", round((expires_at - starts_at).total_seconds() / 86400)) or 1))
+            daily_rewards_granted = max(0, int(item.get("daily_rewards_granted", 0) or 0))
+        except (TypeError, ValueError):
+            reward_days = max(1, round((expires_at - starts_at).total_seconds() / 86400))
+            daily_rewards_granted = 0
+        periods.append({
+            "purchase_id": str(item.get("purchase_id", "") or uuid.uuid4().hex[:16]),
+            "purchased_at": str(item.get("purchased_at", "") or starts_at.isoformat(timespec="seconds")),
+            "starts_at": starts_at.isoformat(timespec="seconds"),
+            "expires_at": expires_at.isoformat(timespec="seconds"),
+            "cost": _round_delta(item.get("cost", DEFAULT_MONTHLY_CARD_CONFIG["price"])),
+            "reward_days": reward_days,
+            "daily_rewards_granted": min(reward_days, daily_rewards_granted),
+        })
+    periods.sort(key=lambda item: item["starts_at"])
+    return periods
+
+
 def _normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(record, dict):
         record = {}
@@ -276,6 +345,18 @@ def _normalize_record(record: dict[str, Any]) -> dict[str, Any]:
     record.setdefault("transactions", [])
     record.setdefault("acceleration_days", 0)
     record.setdefault("acceleration_cards", [])
+    record["monthly_card_periods"] = _normalize_monthly_periods(record.get("monthly_card_periods", []))
+    record["monthly_card_ever_purchased"] = bool(
+        record.get("monthly_card_ever_purchased", False) or record["monthly_card_periods"]
+    )
+    record["monthly_card_first_role_pending"] = bool(record.get("monthly_card_first_role_pending", False))
+    try:
+        record["monthly_card_first_role_id"] = int(record.get("monthly_card_first_role_id", 0) or 0)
+    except (TypeError, ValueError):
+        record["monthly_card_first_role_id"] = 0
+    record.setdefault("monthly_card_last_daily_reward_date", "")
+    if not isinstance(record.get("monthly_card_purchases"), list):
+        record["monthly_card_purchases"] = []
     return record
 
 
@@ -299,6 +380,8 @@ def _normalize_points_data(raw_data: dict) -> dict:
             "daily_task_rewards": raw_data.get("daily_task_rewards", {}),
             "transactions": raw_data.get("transactions", []),
             "acceleration_purchases": raw_data.get("acceleration_purchases", []),
+            "monthly_card_config": _normalize_monthly_card_config(raw_data.get("monthly_card_config")),
+            "monthly_card_purchases": raw_data.get("monthly_card_purchases", []) if isinstance(raw_data.get("monthly_card_purchases", []), list) else [],
         }
 
     users = {}
@@ -534,12 +617,338 @@ def get_user_points(user_id: int, guild_id: int | None = None) -> float:
 def get_user_summary(user_id: int, guild_id: int | None = None) -> dict:
     data = load_points_data()
     record, _ = _ensure_user_record(data, user_id, guild_id)
+    monthly_card = _monthly_card_status(record, data.get("monthly_card_config"))
     return {
         "shells": _round_shells(record.get("shells", 0)),
         "last_sign_date": record.get("last_sign_date", ""),
         "streak_days": int(record.get("streak_days", 0)),
         "daily_msg_count": int(record.get("daily_msg_count", 0)),
         "acceleration_days": int(record.get("acceleration_days", 0)),
+        "monthly_card": monthly_card,
+    }
+
+
+def _monthly_card_status(record: dict, raw_config: dict | None = None, now: datetime | None = None) -> dict:
+    config_data = _normalize_monthly_card_config(raw_config)
+    now = (now or datetime.now(TZ_CN)).astimezone(TZ_CN)
+    periods = []
+    for item in _normalize_monthly_periods(record.get("monthly_card_periods", [])):
+        starts_at = _parse_iso_datetime(item.get("starts_at"))
+        expires_at = _parse_iso_datetime(item.get("expires_at"))
+        if starts_at and expires_at and expires_at > now:
+            periods.append((item, starts_at, expires_at))
+
+    active = any(starts_at <= now < expires_at for _, starts_at, expires_at in periods)
+    expires_at = max((end for _, _, end in periods), default=None)
+    remaining_seconds = max(0.0, (expires_at - now).total_seconds()) if expires_at else 0.0
+    return {
+        "enabled": bool(config_data["enabled"]),
+        "active": active,
+        "stacked_cards": len(periods),
+        "max_cards": int(config_data["max_cards"]),
+        "remaining_days": round(remaining_seconds / 86400, 2),
+        "remaining_seconds": int(remaining_seconds),
+        "expires_at": expires_at.isoformat(timespec="seconds") if expires_at else "",
+        "price": config_data["price"],
+        "duration_days": config_data["duration_days"],
+        "daily_reward": config_data["daily_reward"],
+        "reward_multiplier": config_data["reward_multiplier"],
+        "ever_purchased": bool(record.get("monthly_card_ever_purchased", False)),
+        "first_role_pending": bool(record.get("monthly_card_first_role_pending", False)),
+        "first_role_id": int(record.get("monthly_card_first_role_id", 0) or 0),
+        "last_daily_reward_date": str(record.get("monthly_card_last_daily_reward_date", "") or ""),
+    }
+
+
+def _monthly_reward_amount(record: dict, raw_config: dict | None, base_amount: float) -> tuple[float, float, float]:
+    base = _round_delta(base_amount)
+    status = _monthly_card_status(record, raw_config)
+    multiplier = float(status["reward_multiplier"]) if status["active"] else 1.0
+    total = _round_delta(base * multiplier) if base > 0 else base
+    return total, _round_delta(max(0.0, total - base)), multiplier
+
+
+def _grant_monthly_daily_reward(
+    data: dict,
+    record: dict,
+    *,
+    user_id: int,
+    guild_id: int,
+    now: datetime | None = None,
+) -> float:
+    now = (now or datetime.now(TZ_CN)).astimezone(TZ_CN)
+    config_data = _normalize_monthly_card_config(data.get("monthly_card_config"))
+    today = now.date().isoformat()
+    periods = _normalize_monthly_periods(record.get("monthly_card_periods", []))
+    missing_rewards = 0
+    for item in periods:
+        starts_at = _parse_iso_datetime(item.get("starts_at"))
+        expires_at = _parse_iso_datetime(item.get("expires_at"))
+        if not starts_at or not expires_at or now < starts_at:
+            continue
+        reward_days = max(1, int(item.get("reward_days", 1) or 1))
+        effective_now = min(now, expires_at - timedelta(microseconds=1))
+        elapsed_dates = max(0, (effective_now.date() - starts_at.date()).days + 1)
+        eligible_rewards = min(reward_days, elapsed_dates)
+        granted = min(reward_days, max(0, int(item.get("daily_rewards_granted", 0) or 0)))
+        missing = max(0, eligible_rewards - granted)
+        if missing:
+            item["daily_rewards_granted"] = granted + missing
+            missing_rewards += missing
+    record["monthly_card_periods"] = periods
+    if missing_rewards <= 0:
+        return 0.0
+
+    reward = _round_delta(config_data["daily_reward"] * missing_rewards)
+    record["monthly_card_last_daily_reward_date"] = today
+    if reward <= 0:
+        return 0.0
+    before = _round_shells(record.get("shells", 0))
+    after = _round_shells(before + reward)
+    actual_delta = _round_delta(after - before)
+    record["shells"] = after
+    record["points"] = after
+    _append_transaction(
+        data,
+        record,
+        user_id=user_id,
+        guild_id=guild_id,
+        amount=actual_delta,
+        source="monthly_card_daily",
+        reason=f"date={today};settled_days={missing_rewards}",
+    )
+    return actual_delta
+
+
+@_locked_points_data
+def get_monthly_card_config() -> dict:
+    data = load_points_data()
+    return _normalize_monthly_card_config(data.get("monthly_card_config"))
+
+
+@_locked_points_data
+def update_monthly_card_config(
+    *,
+    price: float,
+    duration_days: int,
+    daily_reward: float,
+    reward_multiplier: float,
+    enabled: bool | None = None,
+) -> dict:
+    data = load_points_data()
+    current = _normalize_monthly_card_config(data.get("monthly_card_config"))
+    current.update({
+        "price": price,
+        "duration_days": duration_days,
+        "daily_reward": daily_reward,
+        "reward_multiplier": reward_multiplier,
+    })
+    if enabled is not None:
+        current["enabled"] = bool(enabled)
+    saved = _normalize_monthly_card_config(current)
+    data["monthly_card_config"] = saved
+    save_points_data(data)
+    return saved
+
+
+@_locked_points_data
+def get_monthly_card_status(user_id: int, guild_id: int) -> dict:
+    data = load_points_data()
+    record, _ = _ensure_user_record(data, user_id, guild_id)
+    status = _monthly_card_status(record, data.get("monthly_card_config"))
+    status["balance"] = _round_shells(record.get("shells", 0))
+    return status
+
+
+@_locked_points_data
+def purchase_monthly_card(user_id: int, guild_id: int) -> dict:
+    data = load_points_data()
+    config_data = _normalize_monthly_card_config(data.get("monthly_card_config"))
+    record, _ = _ensure_user_record(data, user_id, guild_id)
+    if not config_data["enabled"]:
+        return {"success": False, "reason": "disabled", "status": _monthly_card_status(record, config_data)}
+
+    now = datetime.now(TZ_CN)
+    catch_up_reward = _grant_monthly_daily_reward(
+        data,
+        record,
+        user_id=user_id,
+        guild_id=guild_id,
+        now=now,
+    )
+    if catch_up_reward > 0:
+        save_points_data(data)
+    all_periods = _normalize_monthly_periods(record.get("monthly_card_periods", []))
+    active_periods = []
+    for item in all_periods:
+        expires_at = _parse_iso_datetime(item.get("expires_at"))
+        if expires_at and expires_at > now:
+            active_periods.append(item)
+    record["monthly_card_periods"] = all_periods
+    if len(active_periods) >= config_data["max_cards"]:
+        return {
+            "success": False,
+            "reason": "max_cards_reached",
+            "status": _monthly_card_status(record, config_data, now),
+        }
+
+    price = _round_delta(config_data["price"])
+    balance = _round_shells(record.get("shells", 0))
+    if balance < price:
+        return {
+            "success": False,
+            "reason": "insufficient_shells",
+            "cost": price,
+            "balance": balance,
+            "status": _monthly_card_status(record, config_data, now),
+        }
+
+    last_expiry = max(
+        (_parse_iso_datetime(item.get("expires_at")) for item in active_periods),
+        default=None,
+    )
+    starts_at = max(now, last_expiry) if last_expiry else now
+    expires_at = starts_at + timedelta(days=config_data["duration_days"])
+    purchase_id = uuid.uuid4().hex[:16]
+    purchase = {
+        "purchase_id": purchase_id,
+        "purchased_at": now.isoformat(timespec="seconds"),
+        "starts_at": starts_at.isoformat(timespec="seconds"),
+        "expires_at": expires_at.isoformat(timespec="seconds"),
+        "cost": price,
+        "reward_days": int(config_data["duration_days"]),
+        "daily_rewards_granted": 0,
+    }
+    all_periods.append(purchase)
+    record["monthly_card_periods"] = all_periods[-24:]
+
+    first_purchase = not bool(record.get("monthly_card_ever_purchased", False))
+    record["monthly_card_ever_purchased"] = True
+    if first_purchase and not int(record.get("monthly_card_first_role_id", 0) or 0):
+        record["monthly_card_first_role_pending"] = True
+
+    before = balance
+    after_purchase = _round_shells(before - price)
+    actual_cost = _round_delta(after_purchase - before)
+    record["shells"] = after_purchase
+    record["points"] = after_purchase
+    _append_transaction(
+        data,
+        record,
+        user_id=user_id,
+        guild_id=guild_id,
+        amount=actual_cost,
+        source="monthly_card_purchase",
+        reason=f"purchase_id={purchase_id};expires_at={expires_at.isoformat(timespec='seconds')}",
+    )
+    record.setdefault("monthly_card_purchases", []).append(dict(purchase))
+    record["monthly_card_purchases"] = record["monthly_card_purchases"][-20:]
+    top_purchase = dict(purchase)
+    top_purchase.update({"user_id": str(user_id), "guild_id": str(guild_id)})
+    data.setdefault("monthly_card_purchases", []).append(top_purchase)
+    data["monthly_card_purchases"] = data["monthly_card_purchases"][-500:]
+
+    current_reward = _grant_monthly_daily_reward(
+        data,
+        record,
+        user_id=user_id,
+        guild_id=guild_id,
+        now=now,
+    )
+    daily_reward = _round_delta(catch_up_reward + current_reward)
+    save_points_data(data)
+    return {
+        "success": True,
+        "reason": "purchased",
+        "cost": price,
+        "daily_reward": daily_reward,
+        "first_purchase": first_purchase,
+        "balance": _round_shells(record.get("shells", 0)),
+        "status": _monthly_card_status(record, config_data, now),
+    }
+
+
+@_locked_points_data
+def claim_monthly_card_first_role(user_id: int, guild_id: int, role_id: int) -> dict:
+    data = load_points_data()
+    record, _ = _ensure_user_record(data, user_id, guild_id)
+    if not record.get("monthly_card_ever_purchased", False):
+        return {"success": False, "reason": "not_purchased"}
+    if not record.get("monthly_card_first_role_pending", False):
+        return {"success": False, "reason": "already_claimed", "role_id": int(record.get("monthly_card_first_role_id", 0) or 0)}
+    record["monthly_card_first_role_pending"] = False
+    record["monthly_card_first_role_id"] = int(role_id)
+    save_points_data(data)
+    return {"success": True, "reason": "claimed", "role_id": int(role_id)}
+
+
+@_locked_points_data
+def settle_monthly_card_daily_rewards() -> dict:
+    data = load_points_data()
+    now = datetime.now(TZ_CN)
+    rewarded_users = 0
+    total_reward = 0.0
+    for key, record in data.get("users", {}).items():
+        if not isinstance(record, dict) or ":" not in str(key):
+            continue
+        guild_raw, user_raw = str(key).split(":", 1)
+        try:
+            guild_id, user_id = int(guild_raw), int(user_raw)
+        except ValueError:
+            continue
+        reward = _grant_monthly_daily_reward(
+            data,
+            record,
+            user_id=user_id,
+            guild_id=guild_id,
+            now=now,
+        )
+        if reward > 0:
+            rewarded_users += 1
+            total_reward = _round_delta(total_reward + reward)
+    if rewarded_users:
+        save_points_data(data)
+    return {"date": now.date().isoformat(), "rewarded_users": rewarded_users, "total_reward": total_reward}
+
+
+@_locked_points_data
+def grant_monthly_eligible_reward(
+    user_id: int,
+    guild_id: int,
+    amount: float,
+    *,
+    source: str,
+    reason: str = "",
+) -> dict:
+    data = load_points_data()
+    record, _ = _ensure_user_record(data, user_id, guild_id)
+    base = _round_delta(amount)
+    total, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), base)
+    before = _round_shells(record.get("shells", 0))
+    after = _round_shells(before + total)
+    actual_delta = _round_delta(after - before)
+    record["shells"] = after
+    record["points"] = after
+    detail = reason
+    if monthly_bonus > 0:
+        detail = f"{reason};monthly_card={multiplier}x;base={format_shells(base)}".strip(";")
+    _append_transaction(
+        data,
+        record,
+        user_id=user_id,
+        guild_id=guild_id,
+        amount=actual_delta,
+        source=source,
+        reason=detail,
+    )
+    save_points_data(data)
+    return {
+        "success": True,
+        "base_amount": base,
+        "monthly_bonus": monthly_bonus,
+        "amount": actual_delta,
+        "multiplier": multiplier,
+        "balance": after,
     }
 
 
@@ -808,7 +1217,13 @@ def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
     event_delta = _round_delta(event.get("delta", 0))
 
     before = _round_shells(record.get("shells", 0))
-    total_delta = _round_delta(base_reward + bonus_amount + rank_bonus + event_delta)
+    positive_rewards = _round_delta(base_reward + bonus_amount + rank_bonus + max(0.0, event_delta))
+    _, monthly_card_bonus, monthly_multiplier = _monthly_reward_amount(
+        record,
+        data.get("monthly_card_config"),
+        positive_rewards,
+    )
+    total_delta = _round_delta(base_reward + bonus_amount + rank_bonus + event_delta + monthly_card_bonus)
     after = _round_shells(before + total_delta)
     actual_delta = _round_delta(after - before)
 
@@ -824,7 +1239,7 @@ def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
         guild_id=guild_id,
         amount=actual_delta,
         source="sign_in",
-        reason=f"rank={rank};event={event['id']}",
+        reason=f"rank={rank};event={event['id']};monthly_card={monthly_multiplier}x",
     )
     save_points_data(data)
 
@@ -841,6 +1256,8 @@ def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
         "rank_bonus": rank_bonus,
         "event": event,
         "event_delta": event_delta,
+        "monthly_card_bonus": monthly_card_bonus,
+        "monthly_card_multiplier": monthly_multiplier,
         "total_delta": actual_delta,
     }
 
@@ -893,11 +1310,12 @@ def add_post_points(
         return 0.0
 
     can_add = _round_delta(min(amount, daily_cap - today_pts))
+    credited, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), can_add)
     before = _round_shells(record.get("shells", 0))
-    after = _round_shells(before + can_add)
+    after = _round_shells(before + credited)
     actual_delta = _round_delta(after - before)
 
-    record["daily_post_pts"] = _round_delta(today_pts + actual_delta)
+    record["daily_post_pts"] = _round_delta(today_pts + can_add)
     record["shells"] = after
     record["points"] = after
     _append_transaction(
@@ -907,7 +1325,7 @@ def add_post_points(
         guild_id=guild_id,
         amount=actual_delta,
         source="forum_post",
-        reason="legacy_forum_post_reward",
+        reason=f"legacy_forum_post_reward;monthly_card={multiplier}x;base={format_shells(can_add)}",
     )
     save_points_data(data)
     return actual_delta
@@ -938,7 +1356,8 @@ def reward_daily_forum_post(
 
     record, _ = _ensure_user_record(data, user_id, guild_id)
     before = _round_shells(record.get("shells", 0))
-    delta = _round_delta(amount)
+    base_amount = _round_delta(amount)
+    delta, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), base_amount)
     after = _round_shells(before + delta)
     actual_delta = _round_delta(after - before)
 
@@ -947,6 +1366,8 @@ def reward_daily_forum_post(
         "user_id": str(user_id),
         "time": _now_iso(),
         "amount": actual_delta,
+        "base_amount": base_amount,
+        "monthly_bonus": monthly_bonus,
         "rank": len(rewards) + 1,
     }
     rewards.append(row)
@@ -960,7 +1381,7 @@ def reward_daily_forum_post(
         guild_id=guild_id,
         amount=actual_delta,
         source="daily_forum_post",
-        reason=f"channel={channel_id};thread={thread_id};rank={row['rank']}",
+        reason=f"channel={channel_id};thread={thread_id};rank={row['rank']};monthly_card={multiplier}x",
     )
     save_points_data(data)
     return {"success": True, "reason": "rewarded", "rank": row["rank"], "amount": actual_delta}
@@ -1130,8 +1551,9 @@ def reward_daily_kimi_praise(
     maximum = max(1, int(round(float(max_reward) * 10)))
     if maximum < minimum:
         minimum, maximum = maximum, minimum
-    amount = random.randint(minimum, maximum) / 10
+    base_amount = random.randint(minimum, maximum) / 10
     record, _ = _ensure_user_record(data, user_id, guild_id)
+    amount, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), base_amount)
     before = _round_shells(record.get("shells", 0))
     after = _round_shells(before + amount)
     actual_delta = _round_delta(after - before)
@@ -1140,6 +1562,8 @@ def reward_daily_kimi_praise(
         "time": _now_iso(),
         "message_id": message_id_str,
         "amount": actual_delta,
+        "base_amount": _round_delta(base_amount),
+        "monthly_bonus": monthly_bonus,
         "rule_id": normalized_rule_id,
     }
     record["shells"] = after
@@ -1151,7 +1575,7 @@ def reward_daily_kimi_praise(
         guild_id=guild_id,
         amount=actual_delta,
         source="kimi_praise",
-        reason=f"message_id={message_id};rule={normalized_rule_id}",
+        reason=f"message_id={message_id};rule={normalized_rule_id};monthly_card={multiplier}x",
     )
     save_points_data(data)
     return {

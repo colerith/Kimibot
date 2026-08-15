@@ -16,6 +16,7 @@ from .storage import (
     record_praise_scan_log,
     reward_daily_forum_post,
     reward_daily_kimi_praise,
+    settle_monthly_card_daily_rewards,
     load_praise_rules,
     match_praise_rule,
 )
@@ -78,6 +79,7 @@ class PointListener(commands.Cog):
         self.bot = bot
         self.user_cooldowns = {}
         self.praise_scanner_started = False
+        self.monthly_card_settlement_started = False
         self.activity_write_lock = asyncio.Lock()
 
     @commands.Cog.listener()
@@ -86,9 +88,30 @@ class PointListener(commands.Cog):
             self.praise_scanner_started = True
             self.praise_reward_rescan.change_interval(minutes=PRAISE_RESCAN_MINUTES)
             self.praise_reward_rescan.start()
+        if not self.monthly_card_settlement_started:
+            self.monthly_card_settlement_started = True
+            self.monthly_card_daily_settlement.start()
 
     def cog_unload(self):
         self.praise_reward_rescan.cancel()
+        self.monthly_card_daily_settlement.cancel()
+
+    @tasks.loop(minutes=10)
+    async def monthly_card_daily_settlement(self):
+        try:
+            result = await asyncio.to_thread(settle_monthly_card_daily_rewards)
+        except Exception as error:
+            print(f"[蛋壳月卡] 每日奖励结算失败 error={error!r}")
+            return
+        if result.get("rewarded_users", 0):
+            print(
+                f"[蛋壳月卡] 每日奖励结算 date={result.get('date')} "
+                f"users={result.get('rewarded_users')} total={format_shells(result.get('total_reward', 0))}"
+            )
+
+    @monthly_card_daily_settlement.before_loop
+    async def before_monthly_card_daily_settlement(self):
+        await self.bot.wait_until_ready()
 
     @staticmethod
     def _reward_emoji(amount: float) -> str | None:
