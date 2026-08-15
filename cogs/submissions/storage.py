@@ -76,11 +76,11 @@ def random_reward(kind: str, key: str = "base") -> float:
 
 def random_comment_reward() -> float:
     cfg = getattr(config, "SUBMISSIONS", {})
-    raw = cfg.get("COMMENT_REWARD_RANGE", (0.1, 1.0)) if isinstance(cfg, dict) else (0.1, 1.0)
+    raw = cfg.get("COMMENT_REWARD_RANGE", (1.0, 5.0)) if isinstance(cfg, dict) else (1.0, 5.0)
     try:
         low, high = float(raw[0]), float(raw[1])
     except (TypeError, ValueError, IndexError):
-        low, high = 0.1, 1.0
+        low, high = 1.0, 5.0
     if high < low:
         low, high = high, low
     min_step = int(round(max(0.0, low) * 10))
