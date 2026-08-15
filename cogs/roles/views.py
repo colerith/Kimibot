@@ -1451,6 +1451,8 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         kind=KIND_RECOMMENDATION,
     )
     rec_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_RECOMMENDATION}"})
+    comment_amount = _sum_tx(tx_rows, prefixes=("submission_comment_",))
+    comment_done = comment_amount > 0
     egg_done, egg_usage, egg_amount = await asyncio.to_thread(_today_egg_qa_status, user.id, guild_id, tx_rows)
 
     repo_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_REPO)
@@ -1467,6 +1469,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         signed,
         praised,
         rec_count > 0,
+        comment_done,
         egg_done,
     ]
     extra_tasks = [
@@ -1490,6 +1493,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         _task_line(signed, "小蛋报到", f"{format_shells(sign_amount)} 蛋壳"),
         _task_line(praised, "赞美奇米蛋", f"{format_shells(praise_amount)} 蛋壳"),
         _task_line(rec_count > 0, "安利投稿", f"{rec_count}/1 次 · {format_shells(rec_amount)} 蛋壳"),
+        _task_line(comment_done, "安利盖楼回复", f"{format_shells(comment_amount)} 蛋壳"),
         _task_line(egg_done, "小蛋问答", f"提问 {egg_usage} 次 · {format_shells(egg_amount)} 蛋壳"),
     ]
     extra_lines = [
@@ -1516,7 +1520,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     else:
         embed.add_field(
             name="任务奖励",
-            value="基础 4 项全完成：+10 蛋壳\n额外任务完成任意 3 项：+10 蛋壳",
+            value="基础任务全完成：+10 蛋壳\n额外任务完成任意 3 项：+10 蛋壳",
             inline=False,
         )
     embed.set_footer(text="任务状态按北京时间刷新；奖励每天每档只能领取一次。")
