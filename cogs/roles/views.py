@@ -65,6 +65,7 @@ from discord.ui import Select
 
 
 EMBED_FIELD_VALUE_LIMIT = 1024
+MONTHLY_ROLE_PAGE_SIZE = 10
 
 
 def _preview_lines(lines: list[str], limit: int = EMBED_FIELD_VALUE_LIMIT) -> str:
@@ -1283,20 +1284,151 @@ def _monthly_purchase_result_text(result: dict) -> str:
     )
 
 
+def _monthly_role_icon_text(role: discord.Role) -> str:
+    unicode_emoji = getattr(role, "unicode_emoji", None)
+    if unicode_emoji:
+        return str(unicode_emoji)
+    icon = getattr(role, "icon", None)
+    if icon:
+        return f"[查看图标]({icon.url})"
+    return "▫️"
+
+
+def _monthly_role_color_text(role: discord.Role) -> str:
+    color_value = getattr(role.colour, "value", 0)
+    return f"#{color_value:06X}" if color_value else "默认颜色"
+
+
+def build_monthly_first_role_embed(
+    status: dict,
+    selected_role: discord.Role | None = None,
+    preview_roles: list[discord.Role] | None = None,
+    *,
+    page: int = 0,
+    total_pages: int = 1,
+) -> discord.Embed:
+    action_text = (
+        "你的首次三星自选资格已经保留，确认身份组时不会再次扣费~"
+        if status.get("ever_purchased")
+        else f"确认身份组后才会扣除 **{format_shells(status.get('price', 30))}** 蛋壳并立即启用月卡~"
+    )
+    selected_text = selected_role.mention if selected_role else "*尚未选择*"
+    selected_color = getattr(getattr(selected_role, "colour", None), "value", 0)
+    embed = discord.Embed(
+        title="⭐ 月卡三星自选",
+        description=(
+            "首次购买月卡可以自选一个三星身份组~\n"
+            f"{action_text}\n\n"
+            f"当前选择：{selected_text}\n"
+            "选好后请点击下方【确认选择】！"
+        ),
+        color=selected_color or STYLE["KIMI_YELLOW"],
+    )
+    roles = preview_roles or []
+    preview_lines = [
+        f"`{index:02d}` {_monthly_role_icon_text(role)} {role.mention} · `{_monthly_role_color_text(role)}`"
+        for index, role in enumerate(roles, start=page * MONTHLY_ROLE_PAGE_SIZE + 1)
+    ]
+    embed.add_field(
+        name=f"🎨 三星预览 · 第 {page + 1}/{total_pages} 页",
+        value=_preview_lines(preview_lines) if preview_lines else "*当前没有可选择的三星身份组*",
+        inline=False,
+    )
+    selected_icon = getattr(selected_role, "icon", None) if selected_role else None
+    if selected_icon:
+        embed.set_thumbnail(url=selected_icon.url)
+    return embed
+
+
 class MonthlyFirstRoleSelect(discord.ui.Select):
-    def __init__(self, roles: list[discord.Role]):
-        options = [discord.SelectOption(label=role.name[:100], value=str(role.id), emoji="⭐") for role in roles]
+    def __init__(self, roles: list[discord.Role], selected_role_id: int | None = None):
+        options = [
+            discord.SelectOption(
+                label=role.name[:100],
+                value=str(role.id),
+                emoji=getattr(role, "unicode_emoji", None) or "⭐",
+                description=f"颜色 {_monthly_role_color_text(role)}"[:100],
+                default=role.id == selected_role_id,
+            )
+            for role in roles
+        ]
         super().__init__(placeholder="选择首次赠送的三星身份组...", options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         panel = self.view
         if not isinstance(panel, MonthlyFirstRoleView) or not interaction.guild_id:
             return await interaction.response.send_message("这个月卡选择面板已经失效。", ephemeral=True)
-        role_id = int(self.values[0])
-        role = interaction.guild.get_role(role_id)
+        selected_role_id = int(self.values[0])
+        role = interaction.guild.get_role(selected_role_id)
         data = load_role_data()
-        if not role or role_id not in data.get("lottery_roles", []) or get_lottery_role_rarity(role_id, data) != RARITY_LEGENDARY:
+        if not role or selected_role_id not in data.get("lottery_roles", []) or get_lottery_role_rarity(selected_role_id, data) != RARITY_LEGENDARY:
             return await interaction.response.send_message("这个三星身份组已经失效，请重新打开商城选择。", ephemeral=True)
+        panel.selected_role_id = selected_role_id
+        panel.rebuild()
+        await interaction.response.edit_message(
+            embed=panel.build_embed(),
+            view=panel,
+        )
+
+
+class MonthlyFirstRoleView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, user_id: int, page: int = 0):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.user_id = user_id
+        self.roles = _monthly_legendary_roles(guild)
+        self.total_pages = max(1, math.ceil(len(self.roles) / MONTHLY_ROLE_PAGE_SIZE))
+        self.page = page % self.total_pages
+        self.selected_role_id: int | None = None
+        self.rebuild()
+
+    def rebuild(self):
+        self.clear_items()
+        page_roles = self.current_page_roles()
+        if page_roles:
+            self.add_item(MonthlyFirstRoleSelect(page_roles, self.selected_role_id))
+        confirm = discord.ui.Button(
+            label="确认选择",
+            emoji="✅",
+            style=discord.ButtonStyle.success,
+            row=1,
+            disabled=self.selected_role_id is None,
+        )
+        cancel = discord.ui.Button(label="取消选择", emoji="✖️", style=discord.ButtonStyle.secondary, row=1)
+        confirm.callback = self.confirm_selection
+        cancel.callback = self.cancel_selection
+        self.add_item(confirm)
+        self.add_item(cancel)
+        if self.total_pages > 1:
+            previous = discord.ui.Button(label="上一页", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
+            following = discord.ui.Button(label="下一页", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
+            previous.callback = self.previous_page
+            following.callback = self.next_page
+            self.add_item(previous)
+            self.add_item(following)
+
+    def current_page_roles(self) -> list[discord.Role]:
+        start = self.page * MONTHLY_ROLE_PAGE_SIZE
+        return self.roles[start:start + MONTHLY_ROLE_PAGE_SIZE]
+
+    def build_embed(self) -> discord.Embed:
+        selected_role = self.guild.get_role(self.selected_role_id) if self.selected_role_id else None
+        status = get_monthly_card_status(self.user_id, self.guild.id)
+        return build_monthly_first_role_embed(
+            status,
+            selected_role,
+            self.current_page_roles(),
+            page=self.page,
+            total_pages=self.total_pages,
+        )
+
+    async def confirm_selection(self, interaction: discord.Interaction):
+        if not interaction.guild_id or self.selected_role_id is None:
+            return await interaction.response.send_message("请先选择一个三星身份组。", ephemeral=True)
+        role = interaction.guild.get_role(self.selected_role_id)
+        data = load_role_data()
+        if not role or role.id not in data.get("lottery_roles", []) or get_lottery_role_rarity(role.id, data) != RARITY_LEGENDARY:
+            return await interaction.response.send_message("这个三星身份组已经失效，请重新选择。", ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
         status = get_monthly_card_status(interaction.user.id, interaction.guild_id)
@@ -1308,10 +1440,10 @@ class MonthlyFirstRoleSelect(discord.ui.Select):
         elif not status["first_role_pending"]:
             return await interaction.followup.send("首次三星身份组已经领取过啦。", ephemeral=True)
 
-        add_to_collection(interaction.user.id, role.id)
         claim_result = claim_monthly_card_first_role(interaction.user.id, interaction.guild_id, role.id)
         if not claim_result.get("success"):
             return await interaction.followup.send("首次三星身份组已经领取过啦。", ephemeral=True)
+        add_to_collection(interaction.user.id, role.id)
 
         role_warning = ""
         try:
@@ -1319,44 +1451,27 @@ class MonthlyFirstRoleSelect(discord.ui.Select):
         except (discord.Forbidden, discord.HTTPException):
             role_warning = "\n身份组已加入永久换装收藏，但机器人暂时无法直接佩戴，请检查身份组层级。"
         purchase_text = _monthly_purchase_result_text(purchase_result) + "\n" if purchase_result else ""
-        await interaction.followup.send(
-            f"{purchase_text}⭐ 首次赠送已选择：{role.mention}{role_warning}",
-            ephemeral=True,
+        success_embed = discord.Embed(
+            title="✅ 月卡自选完成",
+            description=f"{purchase_text}⭐ 首次赠送已选择：{role.mention}{role_warning}",
+            color=STYLE["KIMI_YELLOW"],
         )
+        await interaction.edit_original_response(embed=success_embed, view=None)
 
-
-class MonthlyFirstRoleView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, user_id: int, page: int = 0):
-        super().__init__(timeout=300)
-        self.guild = guild
-        self.user_id = user_id
-        self.roles = _monthly_legendary_roles(guild)
-        self.total_pages = max(1, math.ceil(len(self.roles) / 25))
-        self.page = page % self.total_pages
+    async def cancel_selection(self, interaction: discord.Interaction):
+        self.selected_role_id = None
         self.rebuild()
-
-    def rebuild(self):
-        self.clear_items()
-        page_roles = self.roles[self.page * 25:(self.page + 1) * 25]
-        if page_roles:
-            self.add_item(MonthlyFirstRoleSelect(page_roles))
-        if self.total_pages > 1:
-            previous = discord.ui.Button(label="上一页", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
-            following = discord.ui.Button(label="下一页", emoji="➡️", style=discord.ButtonStyle.secondary, row=1)
-            previous.callback = self.previous_page
-            following.callback = self.next_page
-            self.add_item(previous)
-            self.add_item(following)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def previous_page(self, interaction: discord.Interaction):
         self.page = (self.page - 1) % self.total_pages
         self.rebuild()
-        await interaction.response.edit_message(view=self)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def next_page(self, interaction: discord.Interaction):
         self.page = (self.page + 1) % self.total_pages
         self.rebuild()
-        await interaction.response.edit_message(view=self)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -1390,14 +1505,10 @@ class MonthlyCardPurchaseButton(discord.ui.Button):
         status = get_monthly_card_status(interaction.user.id, interaction.guild_id)
         legendary_roles = _monthly_legendary_roles(interaction.guild)
         if (not status["ever_purchased"] or status["first_role_pending"]) and legendary_roles:
-            embed = discord.Embed(
-                title="⭐ 月卡三星自选",
-                description="首次购买月卡可以自选一个三星身份组。确认选择后才会扣除月卡费用并立即启用。",
-                color=STYLE["KIMI_YELLOW"],
-            )
+            view = MonthlyFirstRoleView(interaction.guild, interaction.user.id)
             return await interaction.response.send_message(
-                embed=embed,
-                view=MonthlyFirstRoleView(interaction.guild, interaction.user.id),
+                embed=view.build_embed(),
+                view=view,
                 ephemeral=True,
             )
 

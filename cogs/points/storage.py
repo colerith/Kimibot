@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import shutil
 import threading
 import unicodedata
 import uuid
@@ -435,21 +436,51 @@ def _append_transaction(
 
 
 def load_points_data():
-    if not os.path.exists(POINTS_DATA_FILE):
-        return _empty_points_data()
-    try:
-        with open(POINTS_DATA_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-            return _normalize_points_data(raw)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return _empty_points_data()
+    backup_file = f"{POINTS_DATA_FILE}.bak"
+    with _POINTS_DATA_LOCK:
+        if not os.path.exists(POINTS_DATA_FILE):
+            return _empty_points_data()
+        try:
+            with open(POINTS_DATA_FILE, "r", encoding="utf-8") as f:
+                return _normalize_points_data(json.load(f))
+        except (json.JSONDecodeError, OSError) as error:
+            try:
+                with open(backup_file, "r", encoding="utf-8") as backup:
+                    recovered = _normalize_points_data(json.load(backup))
+            except (json.JSONDecodeError, OSError) as backup_error:
+                raise RuntimeError(
+                    f"积分数据文件读取失败，且备份不可用: main={error!r}; backup={backup_error!r}"
+                ) from error
+            print(f"[蛋壳系统] 主积分表读取失败，已从备份恢复: error={error!r}")
+            return recovered
 
 
 def save_points_data(data):
-    os.makedirs(os.path.dirname(POINTS_DATA_FILE), exist_ok=True)
-    normalized = _normalize_points_data(data)
-    with open(POINTS_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, indent=4, ensure_ascii=False)
+    backup_file = f"{POINTS_DATA_FILE}.bak"
+    temp_file = f"{POINTS_DATA_FILE}.{os.getpid()}.tmp"
+    with _POINTS_DATA_LOCK:
+        os.makedirs(os.path.dirname(POINTS_DATA_FILE), exist_ok=True)
+        normalized = _normalize_points_data(data)
+        try:
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(normalized, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+
+            if os.path.exists(POINTS_DATA_FILE):
+                try:
+                    with open(POINTS_DATA_FILE, "r", encoding="utf-8") as current:
+                        json.load(current)
+                    shutil.copy2(POINTS_DATA_FILE, backup_file)
+                except (json.JSONDecodeError, OSError):
+                    pass
+            os.replace(temp_file, POINTS_DATA_FILE)
+        finally:
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except OSError:
+                    pass
 
 
 @_locked_points_data
