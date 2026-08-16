@@ -650,7 +650,7 @@ def _rules_text() -> str:
         f"- 🧷 保底：5 空后至少蛋壳，20 抽无身份必出身份，80 抽内必有三星\n"
         f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
         f"- 💬 有效发言：会提升蛋壳获取加成\n"
-        f"- 🧵 社区发帖：每帖 **{format_shells(post_reward)}** 蛋壳，每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
+        f"- 🧵 社区发帖：任意论坛帖子每帖 **{format_shells(post_reward)}** 蛋壳，每人每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
     )
 
 # --- 抽奖界面 ---
@@ -1624,7 +1624,7 @@ def build_shell_help_embed() -> discord.Embed:
             "**前十奖励**：每天前 10 名签到会额外获得 0.1-1.9 蛋壳。\n"
             "**连续加成**：连续签到满 7/14/30/60/90 天后，提高签到收益。\n"
             "**发言加成**：有效发言不再单条给蛋壳，会提高签到加成。\n"
-            f"**发帖奖励**：指定论坛频道每天前 3 帖，每帖 +{format_shells(forum_reward)} 蛋壳。\n"
+            f"**发帖奖励**：任意论坛帖子每帖 +{format_shells(forum_reward)} 蛋壳，每人每日基础奖励封顶 15 蛋壳。\n"
             f"**预备答题**：未验证成员通过后固定 +{format_shells(prequiz_reward)} 蛋壳，每人一次。\n"
             f"**服务器助力**：每次助力 +{format_shells(boost_reward)} 蛋壳。\n"
             f"**蛋壳月卡**：售价 {format_shells(monthly['price'])} 蛋壳，启用后每天固定 +{format_shells(monthly['daily_reward'])}，活动收益提高到 {monthly['reward_multiplier']} 倍。\n"
@@ -1779,9 +1779,8 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     egg_reply_done = egg_reply_base_amount >= 15
 
     repo_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_REPO)
-    bug_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_BUG)
-    repo_bug_done = repo_count >= 5 or bug_count >= 5
-    repo_bug_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_REPO}", f"submission_{KIND_BUG}"})
+    repo_done = repo_count >= 1
+    repo_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_REPO}"})
     forum_amount = _sum_tx(tx_rows, sources={"daily_forum_post", "forum_post"})
     forum_done = forum_amount > 0
     ten_draw_done = _has_today_tx(tx_rows, source="role_lottery", reason_contains="draw_count=10")
@@ -1797,7 +1796,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         egg_reply_done,
     ]
     extra_tasks = [
-        repo_bug_done,
+        repo_done,
         forum_done,
         ten_draw_done,
         msg_done,
@@ -1809,7 +1808,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         bonus_lines.append(f"基础任务全清：+{format_shells(basic_result.get('amount', 0))} 蛋壳")
     elif basic_result.get("reason") == "revoked":
         bonus_lines.append(f"基础任务未达成，已扣回：-{format_shells(basic_result.get('amount', 0))} 蛋壳")
-    extra_result = await asyncio.to_thread(reconcile_daily_task_bonus, user.id, guild_id, "extra", sum(1 for done in extra_tasks if done) >= 3, 10.0)
+    extra_result = await asyncio.to_thread(reconcile_daily_task_bonus, user.id, guild_id, "extra", sum(1 for done in extra_tasks if done) >= 2, 10.0)
     if extra_result.get("reason") == "rewarded":
         bonus_lines.append(f"额外任务达成：+{format_shells(extra_result.get('amount', 0))} 蛋壳")
     elif extra_result.get("reason") == "revoked":
@@ -1824,7 +1823,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         _task_line(egg_reply_done, "小蛋问答回复", f"{format_shells(egg_reply_base_amount)}/15 · 实得 {format_shells(egg_reply_amount)} 蛋壳"),
     ]
     extra_lines = [
-        _task_line(repo_bug_done, "repo/bug 投稿拿满", f"repo {repo_count}/5 · bug {bug_count}/5 · {format_shells(repo_bug_amount)} 蛋壳"),
+        _task_line(repo_done, "至少一次 repo 投稿", f"{repo_count}/1 次 · {format_shells(repo_amount)} 蛋壳"),
         _task_line(forum_done, "社区发帖", f"{format_shells(forum_amount)} 蛋壳"),
         _task_line(ten_draw_done, "至少一次十连", "今日已十连" if ten_draw_done else "今日未十连"),
         _task_line(msg_done, "有效发言 20 条", f"{msg_count}/20 条"),
@@ -1847,7 +1846,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     else:
         embed.add_field(
             name="任务奖励",
-            value="基础任务全完成：+10 蛋壳\n额外任务完成任意 3 项：+10 蛋壳",
+            value="基础任务全完成：+10 蛋壳\n额外任务完成任意 2 项：+10 蛋壳",
             inline=False,
         )
     embed.set_footer(text="任务状态按北京时间刷新；奖励每天每档只能领取一次。")
@@ -2111,7 +2110,7 @@ class RoleClaimView(discord.ui.View):
                         f"📌 **蛋壳获取**\n"
                         f"- 📅 小蛋报到：+{format_shells(sign_reward)} 起\n"
                         f"- 💬 有效发言：提升报到加成\n"
-                        f"- 🧵 社区发帖：每帖 +{format_shells(post_reward)}，每日最多 +{format_shells(post_daily_cap)}\n",
+                        f"- 🧵 社区发帖：任意论坛帖子每帖 +{format_shells(post_reward)}，每人每日最多 +{format_shells(post_daily_cap)}\n",
             color=discord.Color.purple()
         )
         await interaction.followup.send(embed=embed, view=RoleLotteryView(), ephemeral=True)

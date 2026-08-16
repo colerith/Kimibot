@@ -1372,18 +1372,45 @@ def reward_daily_forum_post(
     amount: float,
     daily_limit: int,
 ) -> dict:
-    """指定论坛频道每日前 N 帖奖励。"""
+    """用户每日前 N 次论坛发帖奖励，额度跨所有论坛频道累计。"""
     data = load_points_data()
     today = _today()
-    reward_key = f"{guild_id}:{channel_id}:{today}"
-    rewards = data.setdefault("daily_forum_rewards", {}).setdefault(reward_key, [])
+    reward_key = f"user:{guild_id}:{user_id}:{today}"
+    reward_rows = data.setdefault("daily_forum_rewards", {})
+    rewards = reward_rows.setdefault(reward_key, [])
+
+    # 当天可能还留有旧版“按频道”记录；迁移期间一并计入个人额度，避免重复发放。
+    existing_by_thread: dict[str, dict] = {}
+    for key, rows in reward_rows.items():
+        key_parts = str(key).split(":")
+        if len(key_parts) < 3 or key_parts[-1] != today:
+            continue
+        key_guild_id = key_parts[1] if key_parts[0] == "user" and len(key_parts) >= 4 else key_parts[0]
+        if key_guild_id != str(guild_id) or not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("user_id")) != str(user_id):
+                continue
+            existing_thread_id = str(row.get("thread_id", ""))
+            if existing_thread_id:
+                existing_by_thread[existing_thread_id] = row
 
     thread_id_str = str(thread_id)
-    if any(row.get("thread_id") == thread_id_str for row in rewards if isinstance(row, dict)):
-        return {"success": False, "reason": "duplicate_thread", "rank": None, "amount": 0.0}
+    if thread_id_str in existing_by_thread:
+        return {
+            "success": False,
+            "reason": "duplicate_thread",
+            "daily_count": len(existing_by_thread),
+            "amount": 0.0,
+        }
 
-    if len(rewards) >= daily_limit:
-        return {"success": False, "reason": "daily_limit_reached", "rank": len(rewards) + 1, "amount": 0.0}
+    if len(existing_by_thread) >= daily_limit:
+        return {
+            "success": False,
+            "reason": "daily_limit_reached",
+            "daily_count": len(existing_by_thread),
+            "amount": 0.0,
+        }
 
     record, _ = _ensure_user_record(data, user_id, guild_id)
     before = _round_shells(record.get("shells", 0))
@@ -1395,11 +1422,12 @@ def reward_daily_forum_post(
     row = {
         "thread_id": thread_id_str,
         "user_id": str(user_id),
+        "channel_id": str(channel_id),
         "time": _now_iso(),
         "amount": actual_delta,
         "base_amount": base_amount,
         "monthly_bonus": monthly_bonus,
-        "rank": len(rewards) + 1,
+        "daily_count": len(existing_by_thread) + 1,
     }
     rewards.append(row)
 
@@ -1412,10 +1440,10 @@ def reward_daily_forum_post(
         guild_id=guild_id,
         amount=actual_delta,
         source="daily_forum_post",
-        reason=f"channel={channel_id};thread={thread_id};rank={row['rank']};monthly_card={multiplier}x",
+        reason=f"channel={channel_id};thread={thread_id};daily_count={row['daily_count']};monthly_card={multiplier}x",
     )
     save_points_data(data)
-    return {"success": True, "reason": "rewarded", "rank": row["rank"], "amount": actual_delta}
+    return {"success": True, "reason": "rewarded", "daily_count": row["daily_count"], "amount": actual_delta}
 
 
 def _get_praise_weights() -> list[int]:

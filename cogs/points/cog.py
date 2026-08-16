@@ -21,7 +21,6 @@ from .storage import (
     match_praise_rule,
 )
 
-FORUM_REWARD_CHANNEL_IDS = set(int(x) for x in getattr(config, "FORUM_REWARD_CHANNEL_IDS", []))
 FORUM_REWARD_AMOUNT = float(getattr(config, "FORUM_REWARD_AMOUNT", getattr(config, "POINTS_POST_REWARD", 5.0)))
 FORUM_REWARD_DAILY_POST_LIMIT = int(getattr(config, "FORUM_REWARD_DAILY_POST_LIMIT", 3))
 POINTS_MSG_COOLDOWN = getattr(
@@ -80,6 +79,7 @@ class PointListener(commands.Cog):
         self.user_cooldowns = {}
         self.praise_scanner_started = False
         self.monthly_card_settlement_started = False
+        self.forum_reward_rescan_started = False
         self.activity_write_lock = asyncio.Lock()
 
     @commands.Cog.listener()
@@ -91,6 +91,9 @@ class PointListener(commands.Cog):
         if not self.monthly_card_settlement_started:
             self.monthly_card_settlement_started = True
             self.monthly_card_daily_settlement.start()
+        if not self.forum_reward_rescan_started:
+            self.forum_reward_rescan_started = True
+            self.bot.loop.create_task(self._rescan_today_forum_posts())
 
     def cog_unload(self):
         self.praise_reward_rescan.cancel()
@@ -412,6 +415,13 @@ class PointListener(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
+        if isinstance(message.channel, discord.Thread) and message.id == message.channel.id:
+            await self._reward_forum_thread(
+                message.channel,
+                author_id=message.author.id,
+                source="starter_message",
+            )
+
         if message.channel.id == PRAISE_KIMI_CHANNEL_ID:
             try:
                 matched = await self._reward_praise_message(message)
@@ -444,36 +454,106 @@ class PointListener(commands.Cog):
                 guild_id=message.guild.id,
             )
 
-    @commands.Cog.listener()
-    async def on_thread_create(self, thread: discord.Thread):
-        """社区发帖积分：仅统计论坛帖，避免普通讨论串滥用。"""
+    async def _reward_forum_thread(
+        self,
+        thread: discord.Thread,
+        *,
+        author_id: int | None = None,
+        source: str,
+    ) -> None:
+        """结算论坛发帖奖励；创建事件与首帖消息共用，按 thread_id 去重。"""
         if not thread or not thread.guild:
             return
 
-        parent = thread.parent
-        if not isinstance(parent, discord.ForumChannel):
+        parent_id = getattr(thread, "parent_id", None)
+        if not parent_id:
             return
 
-        author_id = getattr(thread, "owner_id", None)
+        parent = thread.parent or thread.guild.get_channel(parent_id)
+        if parent is None:
+            try:
+                parent = await self.bot.fetch_channel(parent_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+                print(
+                    f"[蛋壳系统][社区发帖] 无法读取父频道 thread={thread.id} "
+                    f"channel={parent_id} source={source} error={error!r}"
+                )
+                return
+        if not isinstance(parent, discord.ForumChannel):
+            print(
+                f"[蛋壳系统][社区发帖] 跳过非论坛频道 thread={thread.id} "
+                f"channel={parent_id} type={type(parent).__name__} source={source}"
+            )
+            return
+
+        author_id = author_id or getattr(thread, "owner_id", None)
         if not author_id:
+            print(
+                f"[蛋壳系统][社区发帖] 无法识别作者 thread={thread.id} "
+                f"channel={parent_id} source={source}"
+            )
             return
 
         member = thread.guild.get_member(author_id)
-        if not member or member.bot:
+        if author_id == getattr(self.bot.user, "id", None) or (member and member.bot):
             return
 
-        if parent.id not in FORUM_REWARD_CHANNEL_IDS:
-            return
-
-        reward = reward_daily_forum_post(
+        reward = await asyncio.to_thread(
+            reward_daily_forum_post,
             user_id=author_id,
             guild_id=thread.guild.id,
-            channel_id=parent.id,
+            channel_id=parent_id,
             thread_id=thread.id,
             amount=FORUM_REWARD_AMOUNT,
             daily_limit=FORUM_REWARD_DAILY_POST_LIMIT,
         )
+        display_name = member.name if member else str(author_id)
         if reward.get("success"):
             print(
-                f"🧵 [蛋壳系统] {member.name} 第 {reward['rank']} 帖奖励 +{format_shells(reward['amount'])} 蛋壳 (Channel {parent.id})"
+                f"🧵 [蛋壳系统][社区发帖] {display_name} 今日第 {reward['daily_count']} 次发帖奖励 "
+                f"+{format_shells(reward['amount'])} 蛋壳 "
+                f"thread={thread.id} channel={parent_id} source={source}"
             )
+        else:
+            print(
+                f"[蛋壳系统][社区发帖] 未发放 user={author_id} thread={thread.id} "
+                f"channel={parent_id} source={source} reason={reward.get('reason')} "
+                f"daily_count={reward.get('daily_count')}"
+            )
+
+    async def _rescan_today_forum_posts(self) -> None:
+        """启动后补扫北京时间当天帖子，修复离线或缓存未就绪造成的漏发。"""
+        today = datetime.datetime.now(config.TZ_CN).date()
+        midnight_cn = datetime.datetime.combine(today, datetime.time.min, tzinfo=config.TZ_CN)
+        midnight_utc = midnight_cn.astimezone(datetime.timezone.utc)
+        scanned = 0
+
+        forum_channels = [
+            channel
+            for guild in self.bot.guilds
+            for channel in guild.channels
+            if isinstance(channel, discord.ForumChannel)
+        ]
+        threads: dict[int, discord.Thread] = {}
+        for channel in forum_channels:
+            channel_id = channel.id
+
+            threads.update({thread.id: thread for thread in channel.threads if thread.created_at >= midnight_utc})
+            try:
+                async for thread in channel.archived_threads(limit=100):
+                    if thread.created_at < midnight_utc:
+                        break
+                    threads[thread.id] = thread
+            except (discord.Forbidden, discord.HTTPException) as error:
+                print(f"[蛋壳系统][社区发帖] 归档帖补扫失败 channel={channel_id} error={error!r}")
+
+        for thread in sorted(threads.values(), key=lambda item: item.created_at):
+            scanned += 1
+            await self._reward_forum_thread(thread, source="startup_rescan")
+
+        print(f"[蛋壳系统][社区发帖] 今日补扫完成 date={today.isoformat()} scanned={scanned}")
+
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread):
+        """社区发帖积分：统计服务器中的所有论坛频道。"""
+        await self._reward_forum_thread(thread, source="thread_create")
