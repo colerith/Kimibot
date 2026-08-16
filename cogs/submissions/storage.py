@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import threading
 from datetime import datetime, timezone, timedelta
 
 import config
@@ -8,6 +9,7 @@ import config
 
 DATA_FILE = "data/submissions.json"
 TZ_CN = timezone(timedelta(hours=8))
+_DATA_LOCK = threading.RLock()
 
 KIND_REPO = "repo"
 KIND_BUG = "bug"
@@ -119,30 +121,40 @@ def grant_comment_reward(
 
 
 def load_data() -> dict:
-    if not os.path.exists(DATA_FILE):
-        return _empty_data()
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return _empty_data()
-    if not isinstance(raw, dict):
-        return _empty_data()
-    data = _empty_data()
-    data.update(raw)
-    if not isinstance(data.get("submissions"), dict):
-        data["submissions"] = {}
-    if not isinstance(data.get("panel_info"), dict):
-        data["panel_info"] = {}
-    if not isinstance(data.get("comment_rewards"), dict):
-        data["comment_rewards"] = {}
-    return data
+    with _DATA_LOCK:
+        if not os.path.exists(DATA_FILE):
+            return _empty_data()
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return _empty_data()
+        if not isinstance(raw, dict):
+            return _empty_data()
+        data = _empty_data()
+        data.update(raw)
+        if not isinstance(data.get("submissions"), dict):
+            data["submissions"] = {}
+        if not isinstance(data.get("panel_info"), dict):
+            data["panel_info"] = {}
+        if not isinstance(data.get("comment_rewards"), dict):
+            data["comment_rewards"] = {}
+        return data
 
 
 def save_data(data: dict) -> None:
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    with _DATA_LOCK:
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        temp_file = f"{DATA_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, DATA_FILE)
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
 
 
 def set_panel_info(channel_id: int, message_id: int) -> None:
@@ -164,34 +176,73 @@ def create_submission(
     fields: dict,
     base_reward: float,
 ) -> dict:
-    data = load_data()
-    now = _now_iso()
-    submission_id = f"{int(datetime.now(TZ_CN).timestamp())}{random.randint(1000, 9999)}"
-    record = {
-        "id": submission_id,
-        "guild_id": str(guild_id),
-        "author_id": str(author_id),
-        "author_name": author_name,
-        "kind": kind,
-        "fields": fields,
-        "attachments": [],
-        "channel_id": "",
-        "message_id": "",
-        "status": STATUS_OPEN,
-        "base_reward": _round_shells(base_reward),
-        "extra_reward": 0.0,
-        "delete_penalty": 0.0,
-        "replies": [],
-        "useful_user_ids": [],
-        "useful_reward_tiers": [],
-        "comments": [],
-        "created_at": now,
-        "updated_at": now,
-        "deleted_at": "",
-    }
-    data["submissions"][submission_id] = record
-    save_data(data)
+    record, _ = create_submission_once(
+        guild_id=guild_id,
+        author_id=author_id,
+        author_name=author_name,
+        kind=kind,
+        fields=fields,
+        base_reward=base_reward,
+        request_id="",
+    )
     return record
+
+
+def create_submission_once(
+    *,
+    guild_id: int,
+    author_id: int,
+    author_name: str,
+    kind: str,
+    fields: dict,
+    base_reward: float,
+    request_id: str,
+) -> tuple[dict, bool]:
+    """按草稿请求 ID 原子创建投稿，返回 (记录, 是否首次创建)。"""
+    with _DATA_LOCK:
+        data = load_data()
+        normalized_request_id = str(request_id or "").strip()
+        if normalized_request_id:
+            for existing in data.get("submissions", {}).values():
+                if not isinstance(existing, dict):
+                    continue
+                if (
+                    existing.get("request_id") == normalized_request_id
+                    and existing.get("guild_id") == str(guild_id)
+                    and existing.get("author_id") == str(author_id)
+                ):
+                    return existing, False
+
+        now = _now_iso()
+        submission_id = f"{int(datetime.now(TZ_CN).timestamp())}{random.randint(1000, 9999)}"
+        while submission_id in data["submissions"]:
+            submission_id = f"{int(datetime.now(TZ_CN).timestamp())}{random.randint(1000, 9999)}"
+        record = {
+            "id": submission_id,
+            "request_id": normalized_request_id,
+            "guild_id": str(guild_id),
+            "author_id": str(author_id),
+            "author_name": author_name,
+            "kind": kind,
+            "fields": fields,
+            "attachments": [],
+            "channel_id": "",
+            "message_id": "",
+            "status": STATUS_OPEN,
+            "base_reward": _round_shells(base_reward),
+            "extra_reward": 0.0,
+            "delete_penalty": 0.0,
+            "replies": [],
+            "useful_user_ids": [],
+            "useful_reward_tiers": [],
+            "comments": [],
+            "created_at": now,
+            "updated_at": now,
+            "deleted_at": "",
+        }
+        data["submissions"][submission_id] = record
+        save_data(data)
+        return record, True
 
 
 def save_submission(record: dict) -> dict:

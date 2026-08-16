@@ -416,6 +416,7 @@ def _append_transaction(
     amount: float,
     source: str,
     reason: str = "",
+    idempotency_key: str = "",
 ) -> None:
     if amount == 0:
         return
@@ -429,6 +430,8 @@ def _append_transaction(
         "source": source,
         "reason": reason,
     }
+    if idempotency_key:
+        tx["idempotency_key"] = str(idempotency_key)
     record.setdefault("transactions", []).append(tx)
     record["transactions"] = record["transactions"][-50:]
     data.setdefault("transactions", []).append(tx)
@@ -950,9 +953,29 @@ def grant_monthly_eligible_reward(
     *,
     source: str,
     reason: str = "",
+    idempotency_key: str = "",
 ) -> dict:
     data = load_points_data()
     record, _ = _ensure_user_record(data, user_id, guild_id)
+    normalized_key = str(idempotency_key or "").strip()
+    if normalized_key:
+        existing = next(
+            (
+                tx for tx in reversed(record.get("transactions", []))
+                if isinstance(tx, dict) and tx.get("idempotency_key") == normalized_key
+            ),
+            None,
+        )
+        if existing:
+            return {
+                "success": True,
+                "duplicate": True,
+                "base_amount": 0.0,
+                "monthly_bonus": 0.0,
+                "amount": _round_delta(existing.get("amount", 0)),
+                "multiplier": 1.0,
+                "balance": _round_shells(record.get("shells", 0)),
+            }
     base = _round_delta(amount)
     total, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), base)
     before = _round_shells(record.get("shells", 0))
@@ -971,10 +994,12 @@ def grant_monthly_eligible_reward(
         amount=actual_delta,
         source=source,
         reason=detail,
+        idempotency_key=normalized_key,
     )
     save_points_data(data)
     return {
         "success": True,
+        "duplicate": False,
         "base_amount": base,
         "monthly_bonus": monthly_bonus,
         "amount": actual_delta,

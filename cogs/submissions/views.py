@@ -1,7 +1,9 @@
 import discord
 from discord import ui
+import asyncio
 import inspect
 import io
+import uuid
 
 import config
 from cogs.points.storage import format_shells, grant_monthly_eligible_reward, modify_user_points
@@ -14,7 +16,7 @@ from .storage import (
     add_comment,
     add_owner_reply,
     can_create_submission,
-    create_submission,
+    create_submission_once,
     find_by_message_id,
     grant_comment_reward,
     get_panel_info,
@@ -41,6 +43,7 @@ DOMAIN_OPTIONS = ["酒馆好物", "书籍安利", "影视安利", "音乐安利"
 TYPE_OPTIONS = ["sfw", "nsfw"]
 COMMENTS_PER_PAGE = 10
 CONTENT_COLLAPSE_LIMIT = 350
+_SUBMISSION_PUBLISH_LOCKS: dict[str, asyncio.Lock] = {}
 
 RECOMMENDATION_DOMAIN_COLORS = {
     # 图一自然系配色
@@ -309,6 +312,21 @@ async def _attachments_to_files(attachments, *, spoiler: bool = False) -> list[d
 
 
 async def publish_or_update_submission(client, record: dict, attachments=None, *, force_resend: bool = False) -> tuple[dict, str]:
+    record_id = str(record.get("id", ""))
+    lock = _SUBMISSION_PUBLISH_LOCKS.setdefault(record_id, asyncio.Lock())
+    async with lock:
+        latest = get_submission(record_id) if record_id else None
+        if latest:
+            record = latest
+        return await _publish_or_update_submission_unlocked(
+            client,
+            record,
+            attachments=attachments,
+            force_resend=force_resend,
+        )
+
+
+async def _publish_or_update_submission_unlocked(client, record: dict, attachments=None, *, force_resend: bool = False) -> tuple[dict, str]:
     channel_id = _channel_id(record.get("kind", ""), record.get("fields", {}))
     channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
     if not channel:
@@ -801,6 +819,9 @@ class SubmissionDraftView(discord.ui.View):
         self.fields = fields
         self.attachments = list(attachments or [])[:9]
         self.record_id = record_id
+        self.request_id = uuid.uuid4().hex
+        self._submitting = False
+        self._finished = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -844,6 +865,60 @@ class SubmissionDraftView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         if not interaction.guild_id:
             return await interaction.followup.send("这个投稿箱只能在服务器里使用。", ephemeral=True)
+        if self._finished:
+            return await interaction.followup.send("这份投稿已经完成啦，重复点击不会再次发布。", ephemeral=True)
+        if self._submitting:
+            return await interaction.followup.send("这份投稿正在投递中，请不要重复点击~", ephemeral=True)
+
+        self._submitting = True
+        for item in self.children:
+            if hasattr(item, "disabled"):
+                item.disabled = True
+        try:
+            await interaction.edit_original_response(
+                embed=self._build_status_embed(interaction, "正在投递，请稍等一下~"),
+                view=self,
+            )
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+        try:
+            msg = await self._complete_submission(interaction)
+            if msg is None:
+                return
+            self._finished = True
+            self.clear_items()
+            try:
+                await interaction.edit_original_response(
+                    embed=self._build_status_embed(interaction, "投稿流程已完成。"),
+                    view=self,
+                )
+            except (discord.NotFound, discord.HTTPException):
+                pass
+            await interaction.followup.send(msg, ephemeral=True)
+        except Exception as error:
+            print(
+                f"[投稿箱] 投稿处理失败 request={self.request_id} user={interaction.user.id} "
+                f"kind={self.kind} error={error!r}"
+            )
+            await interaction.followup.send("投稿暂时没有送成功，按钮已经恢复，可以稍后重试。", ephemeral=True)
+        finally:
+            self._submitting = False
+            if not self._finished:
+                for item in self.children:
+                    if hasattr(item, "disabled"):
+                        item.disabled = False
+                try:
+                    await interaction.edit_original_response(
+                        embed=self._build_status_embed(interaction),
+                        view=self,
+                    )
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+
+    async def _complete_submission(self, interaction: discord.Interaction) -> str | None:
+        if not interaction.guild_id:
+            return None
 
         if not self.record_id:
             limit_status = can_create_submission(
@@ -852,19 +927,21 @@ class SubmissionDraftView(discord.ui.View):
                 kind=self.kind,
             )
             if not limit_status["allowed"]:
-                return await interaction.followup.send(
+                await interaction.followup.send(
                     f"今天的 **{_kind_label(self.kind)}** 投稿已经达到上限啦。\n"
                     f"每类投稿每日最多 **{limit_status['limit']}** 次，你今天已经提交 **{limit_status['used']}** 次。\n"
                     "明天北京时间刷新后再来投递~",
                     ephemeral=True,
                 )
+                return None
 
         attachments = self.attachments
 
         if self.record_id:
             record = update_submission_fields(self.record_id, self.fields)
             if not record:
-                return await interaction.followup.send("投稿不存在或已经删除。", ephemeral=True)
+                await interaction.followup.send("投稿不存在或已经删除。", ephemeral=True)
+                return None
             record, status = await publish_or_update_submission(
                 interaction.client,
                 record,
@@ -873,35 +950,35 @@ class SubmissionDraftView(discord.ui.View):
             )
             msg = f"✅ 投稿已更新。({status})"
         else:
-            base_reward = random_reward(self.kind, "base")
-            reward_result = grant_monthly_eligible_reward(
-                interaction.user.id,
-                interaction.guild_id,
-                base_reward,
-                source=f"submission_{self.kind}",
-                reason="submission_pending_id",
-            )
-            reward = float(reward_result["amount"])
-            record = create_submission(
+            rolled_reward = random_reward(self.kind, "base")
+            record, created = create_submission_once(
                 guild_id=interaction.guild_id,
                 author_id=interaction.user.id,
                 author_name=interaction.user.display_name,
                 kind=self.kind,
                 fields=self.fields,
-                base_reward=reward,
+                base_reward=rolled_reward,
+                request_id=self.request_id,
             )
+            reward_result = grant_monthly_eligible_reward(
+                interaction.user.id,
+                interaction.guild_id,
+                float(record.get("base_reward", rolled_reward) or 0),
+                source=f"submission_{self.kind}",
+                reason=f"submission_id={record['id']}",
+                idempotency_key=f"submission:{self.request_id}",
+            )
+            reward = float(reward_result["amount"])
+            if float(record.get("base_reward", 0) or 0) != reward:
+                record["base_reward"] = reward
+                record = save_submission(record)
             record, status = await publish_or_update_submission(interaction.client, record, attachments=attachments)
-            msg = f"✅ 投稿已送到小蛋箱！本次获得 **{format_shells(reward)}** 蛋壳。({status})"
+            prefix = "✅ 投稿已送到小蛋箱" if created else "✅ 重复请求已自动合并"
+            msg = f"{prefix}！本次获得 **{format_shells(reward)}** 蛋壳。({status})"
 
         if attachments:
             msg += f"\n📎 已随投稿上传 {len(attachments)} 个附件。"
-
-        self.clear_items()
-        try:
-            await interaction.edit_original_response(embed=self._build_status_embed(interaction, "投稿流程已完成。"), view=self)
-        except (discord.NotFound, discord.HTTPException):
-            pass
-        await interaction.followup.send(msg, ephemeral=True)
+        return msg
 
     @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, emoji="✖️")
     async def cancel(self, button, interaction: discord.Interaction):

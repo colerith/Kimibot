@@ -195,13 +195,41 @@ class PointListener(commands.Cog):
 
     @staticmethod
     def _print_praise_log(row: dict) -> None:
+        status = str(row.get("status") or "unknown")
+        reason = str(row.get("reason") or "")
+        recovered = bool(row.get("recovered"))
+
+        if recovered:
+            # Rescans revisit every message. Routine outcomes stay in the JSON
+            # audit table but do not need to flood the process console.
+            routine_failures = {"content_not_matched", "already_claimed"}
+            if status == "skipped" or (status == "failed" and reason in routine_failures):
+                return
+
+            label = {
+                "rewarded": "补发/修复",
+                "pending": "待处理",
+                "failed": "异常",
+            }.get(status, status)
+            detail = ""
+            if status in {"pending", "failed"}:
+                content = str(row.get("content") or "").replace("\n", " ")
+                detail = f" content={content[:120]!r}"
+            print(
+                f"[蛋壳系统][赞美扫描][{label}] reason={reason} "
+                f"message={row.get('message_id')} author={row.get('author_id')} "
+                f"rule={row.get('rule_id') or '-'} amount={format_shells(row.get('amount', 0))}"
+                f"{detail}"
+            )
+            return
+
         print(
-            "[蛋壳系统][赞美奇米蛋] "
-            f"status={row.get('status')} reason={row.get('reason')} "
+            "[蛋壳系统][赞美实时] "
+            f"status={status} reason={reason} "
             f"guild={row.get('guild_id')} channel={row.get('channel_id')} "
             f"message={row.get('message_id')} author={row.get('author_id')}({row.get('author_name')}) "
             f"rule={row.get('rule_id') or '-'} amount={format_shells(row.get('amount', 0))} "
-            f"recovered={row.get('recovered')} created_at={row.get('message_created_at')} "
+            f"created_at={row.get('message_created_at')} "
             f"content={row.get('content')!r}"
         )
 
@@ -321,12 +349,19 @@ class PointListener(commands.Cog):
             if already_recorded:
                 emoji = self._reward_emoji(float(already_recorded.get("amount", 0) or 0))
                 marker_ready = not emoji or await self._add_reaction_once(message, emoji)
-                if marker_ready:
-                    await self._clear_praise_status_reactions(message)
+                status_cleared = await self._clear_praise_status_reactions(message)
+                if not marker_ready:
+                    print(
+                        f"[蛋壳系统][赞美奇米蛋] 已发积分但数字反应补齐失败 "
+                        f"message={message.id} emoji={emoji!r}"
+                    )
                 await self._record_praise_log(
                     message,
                     status="skipped",
-                    reason="already_rewarded_in_scan_record",
+                    reason=(
+                        "already_rewarded_reactions_reconciled"
+                        if status_cleared else "already_rewarded_pending_cleanup_failed"
+                    ),
                     recovered=recovered,
                     rule=rule,
                 )
@@ -362,12 +397,19 @@ class PointListener(commands.Cog):
             if reason == "duplicate_message":
                 emoji = self._reward_emoji(amount)
                 marker_ready = not emoji or await self._add_reaction_once(message, emoji)
-                if marker_ready:
-                    await self._clear_praise_status_reactions(message)
+                status_cleared = await self._clear_praise_status_reactions(message)
+                if not marker_ready:
+                    print(
+                        f"[蛋壳系统][赞美奇米蛋] 重复消息已入账但数字反应补齐失败 "
+                        f"message={message.id} emoji={emoji!r}"
+                    )
                 await self._record_praise_log(
                     message,
                     status="rewarded",
-                    reason="reward_reaction_recovered",
+                    reason=(
+                        "reward_reaction_recovered"
+                        if status_cleared else "reward_recovered_pending_cleanup_failed"
+                    ),
                     recovered=recovered,
                     rule=rule,
                     amount=amount,
@@ -390,12 +432,16 @@ class PointListener(commands.Cog):
         amount = float(reward.get("amount", 0) or 0)
         emoji = self._reward_emoji(amount)
         marker_ready = not emoji or await self._add_reaction_once(message, emoji)
-        if marker_ready:
-            await self._clear_praise_status_reactions(message)
+        status_cleared = await self._clear_praise_status_reactions(message)
+        if not marker_ready:
+            print(
+                f"[蛋壳系统][赞美奇米蛋] 积分已发放但数字反应添加失败 "
+                f"message={message.id} emoji={emoji!r}"
+            )
         await self._record_praise_log(
             message,
             status="rewarded",
-            reason="rewarded",
+            reason="rewarded" if status_cleared else "rewarded_pending_cleanup_failed",
             recovered=recovered,
             rule=rule,
             amount=amount,
