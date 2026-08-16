@@ -131,7 +131,7 @@ class PointListener(commands.Cog):
     async def _add_reaction_once(message: discord.Message, emoji: str) -> bool:
         if not emoji:
             return False
-        if any(str(reaction.emoji) == emoji for reaction in message.reactions):
+        if any(str(reaction.emoji) == emoji and reaction.me for reaction in message.reactions):
             return True
         try:
             await message.add_reaction(emoji)
@@ -143,18 +143,55 @@ class PointListener(commands.Cog):
     async def _remove_own_reaction(self, message: discord.Message, emoji: str) -> bool:
         if not emoji or not self.bot.user:
             return False
-        try:
-            await message.remove_reaction(emoji, self.bot.user)
-            return True
-        except discord.HTTPException as error:
-            print(f"[蛋壳系统][赞美奇米蛋] 移除反应失败 message={message.id} emoji={emoji!r} error={error}")
-            return False
+        target = message
+        last_error = None
+        for attempt in range(1, 4):
+            attempt_error = None
+            try:
+                await target.remove_reaction(emoji, self.bot.user)
+            except discord.NotFound:
+                return True
+            except discord.HTTPException as error:
+                attempt_error = error
+                last_error = error
 
-    async def _clear_praise_status_reactions(self, message: discord.Message) -> None:
-        await self._remove_own_reaction(message, PRAISE_PENDING_REACTION)
+            try:
+                fresh = await message.channel.fetch_message(message.id)
+            except discord.NotFound:
+                return True
+            except (discord.Forbidden, discord.HTTPException) as error:
+                # A successful remove is enough when Discord does not allow a
+                # follow-up fetch to verify the fresh reaction state.
+                if attempt_error is None:
+                    return True
+                last_error = error
+            else:
+                own_reaction_remains = any(
+                    str(reaction.emoji) == emoji and reaction.me
+                    for reaction in fresh.reactions
+                )
+                if not own_reaction_remains:
+                    return True
+                target = fresh
+
+            if attempt < 3:
+                await asyncio.sleep(0.35 * attempt)
+
+        print(
+            f"[蛋壳系统][赞美奇米蛋] 移除反应重试后仍失败 "
+            f"message={message.id} emoji={emoji!r} error={last_error!r}"
+        )
+        return False
+
+    async def _clear_praise_status_reactions(self, message: discord.Message) -> bool:
+        pending_removed = await self._remove_own_reaction(message, PRAISE_PENDING_REACTION)
+        all_removed = pending_removed
         for emoji in (PRAISE_INVALID_REACTION, PRAISE_DUPLICATE_REACTION):
             if any(str(reaction.emoji) == emoji and reaction.me for reaction in message.reactions):
-                await self._remove_own_reaction(message, emoji)
+                all_removed = await self._remove_own_reaction(message, emoji) and all_removed
+        if not pending_removed:
+            print(f"[蛋壳系统][赞美奇米蛋] 待结算标记清理未完成 message={message.id}")
+        return all_removed
 
     @staticmethod
     def _print_praise_log(row: dict) -> None:
