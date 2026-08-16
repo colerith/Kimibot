@@ -328,7 +328,7 @@ class PointListener(commands.Cog):
                 recovered=recovered,
             )
             await self._add_reaction_once(message, PRAISE_INVALID_REACTION)
-            return False
+            return "invalid"
 
         if recovered:
             try:
@@ -365,6 +365,10 @@ class PointListener(commands.Cog):
                     recovered=recovered,
                     rule=rule,
                 )
+                if not status_cleared:
+                    return "cleanup_failed"
+                if not marker_ready:
+                    return "marker_failed"
                 return None
 
         await self._add_reaction_once(message, PRAISE_PENDING_REACTION)
@@ -414,6 +418,10 @@ class PointListener(commands.Cog):
                     rule=rule,
                     amount=amount,
                 )
+                if not status_cleared:
+                    return "cleanup_failed"
+                if not marker_ready:
+                    return "marker_failed"
                 return True
 
             await self._remove_own_reaction(message, PRAISE_PENDING_REACTION)
@@ -427,7 +435,7 @@ class PointListener(commands.Cog):
             )
             marker = PRAISE_DUPLICATE_REACTION if reason == "already_claimed" else PRAISE_INVALID_REACTION
             await self._add_reaction_once(message, marker)
-            return False
+            return "duplicate" if reason == "already_claimed" else "failed"
 
         amount = float(reward.get("amount", 0) or 0)
         emoji = self._reward_emoji(amount)
@@ -446,6 +454,10 @@ class PointListener(commands.Cog):
             rule=rule,
             amount=amount,
         )
+        if not status_cleared:
+            return "cleanup_failed"
+        if not marker_ready:
+            return "marker_failed"
         return True
 
     @tasks.loop(minutes=5)
@@ -462,7 +474,7 @@ class PointListener(commands.Cog):
         after_utc = after_cn.astimezone(datetime.timezone.utc)
         try:
             rules = await asyncio.to_thread(load_praise_rules)
-            scanned = rewarded = pending = skipped = failed = 0
+            scanned = rewarded = pending = invalid = duplicate = reaction_errors = errors = skipped = 0
             async for message in channel.history(limit=None, after=after_utc, oldest_first=True):
                 scanned += 1
                 try:
@@ -476,15 +488,23 @@ class PointListener(commands.Cog):
                     result = "pending"
                 if result is True:
                     rewarded += 1
-                elif result is False:
-                    failed += 1
                 elif result == "pending":
                     pending += 1
+                elif result == "invalid":
+                    invalid += 1
+                elif result == "duplicate":
+                    duplicate += 1
+                elif result in {"cleanup_failed", "marker_failed"}:
+                    reaction_errors += 1
+                elif result == "failed" or result is False:
+                    errors += 1
                 else:
                     skipped += 1
             print(
                 f"[蛋壳系统][赞美奇米蛋] 今日重扫完成 channel={PRAISE_KIMI_CHANNEL_ID} "
-                f"scanned={scanned} rewarded={rewarded} pending={pending} failed={failed} skipped={skipped}"
+                f"scanned={scanned} rewarded={rewarded} pending={pending} "
+                f"invalid={invalid} duplicate={duplicate} reaction_errors={reaction_errors} "
+                f"errors={errors} skipped={skipped}"
             )
         except (discord.Forbidden, discord.HTTPException) as error:
             print(f"[蛋壳系统] 赞美奇米蛋补发扫描失败: {error}")
