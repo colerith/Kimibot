@@ -560,7 +560,8 @@ def build_lottery_stats_embed(member: discord.Member, guild_id: int) -> discord.
         value=(
             f"连续空抽：**{stats.get('empty_streak', 0)} / {EMPTY_PITY_LIMIT}**\n"
             f"未出身份：**{stats.get('no_role_streak', 0)} / {ROLE_PITY_LIMIT}**\n"
-            f"未出三星：**{stats.get('no_legendary_streak', 0)} / {LEGENDARY_PITY_LIMIT}**"
+            f"未出三星：**{stats.get('no_legendary_streak', 0)} / {LEGENDARY_PITY_LIMIT}**\n"
+            "每抽都有正常三星概率，最迟第 80 抽必出"
         ),
         inline=False,
     )
@@ -647,7 +648,7 @@ def _rules_text() -> str:
         f"- 🎯 十连消耗：**{format_shells(ten_cost)}** 蛋壳\n"
         f"- 🎁 结果权重(抽空/蛋壳/身份)：**{w_empty}/{w_shells}/{w_role}**\n"
         f"- 🥚 蛋壳结果：随机 **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
-        f"- 🧷 保底：5 空后至少蛋壳，20 抽无身份必出身份，80 抽内必有三星\n"
+        f"- 🧷 保底：5 空后至少蛋壳，20 抽无身份必出身份；三星每抽均可出，最迟第 80 抽必出\n"
         f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
         f"- 💬 有效发言：会提升蛋壳获取加成\n"
         f"- 🧵 社区发帖：任意论坛帖子每帖 **{format_shells(post_reward)}** 蛋壳，每人每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
@@ -719,6 +720,10 @@ class RoleLotteryView(discord.ui.View):
         ]
         if sum(outcome_weights) <= 0:
             outcome_weights = [23, 32, 45]
+        else:
+            # 身份结果必须保留最低权重，否则三星在硬保底前没有出现机会。
+            role_outcome_index = outcome_pool.index(LOTTERY_OUTCOME_ROLE)
+            outcome_weights[role_outcome_index] = max(1, outcome_weights[role_outcome_index])
 
         weights_cfg = cfg.get("weights", {})
         rarity_pool = [RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY]
@@ -728,6 +733,13 @@ class RoleLotteryView(discord.ui.View):
         ]
         if sum(weights) <= 0:
             weights = [52, 38, 7, 3]
+        has_legendary_pool = any(
+            pools_by_kind_rarity[kind][RARITY_LEGENDARY]
+            for kind in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON)
+        )
+        if has_legendary_pool:
+            legendary_index = rarity_pool.index(RARITY_LEGENDARY)
+            weights[legendary_index] = max(1, weights[legendary_index])
 
         user_collection_ids = set(get_user_collection(user.id))
         refund_cfg = cfg.get("refund", {})
@@ -751,7 +763,7 @@ class RoleLotteryView(discord.ui.View):
             if force_role:
                 outcome = LOTTERY_OUTCOME_ROLE
                 if force_legendary:
-                    guarantee_notes.append("触发 80 抽三星大保底")
+                    guarantee_notes.append("连续 79 抽未出三星，本抽触发最迟兜底")
                 else:
                     guarantee_notes.append("触发 20 抽身份组保底")
             else:
@@ -2825,6 +2837,11 @@ class LotteryWeightsRefundModal(discord.ui.Modal):
         except ValueError:
             return await interaction.response.send_message(
                 "❌ 输入格式错误，请按提示填写逗号分隔的数值。",
+                ephemeral=True,
+            )
+        if w_legend <= 0 or o_role <= 0:
+            return await interaction.response.send_message(
+                "❌ 三星稀有度与身份结果权重必须大于 0，确保前 79 抽也有机会抽到三星。",
                 ephemeral=True,
             )
 
