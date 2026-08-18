@@ -667,6 +667,50 @@ def _rules_text() -> str:
         f"- 🧵 社区发帖：任意论坛帖子每帖 **{format_shells(post_reward)}** 蛋壳，每人每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
     )
 
+
+def build_role_lottery_embed(points: float, role_data: dict) -> discord.Embed:
+    """Build the user lottery panel with a supplied, current balance."""
+    cfg = get_lottery_config(role_data)
+    single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 1.0)))))
+    five_cost = max(single_cost, float(cfg.get("cost_five", float(getattr(config, "LOTTERY_FIVE_COST", 5.0)))))
+    ten_cost = max(five_cost, float(cfg.get("cost_ten", float(getattr(config, "LOTTERY_TEN_COST", 10.0)))))
+    sign_reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
+    post_reward = float(getattr(config, "POINTS_POST_REWARD", 5.0))
+    post_daily_cap = float(getattr(config, "POINTS_DAILY_POST_CAP", 15.0))
+
+    refund_cfg = cfg.get("refund", {})
+    refund_line = (
+        f"☆{format_shells(refund_cfg.get(str(RARITY_JUNK), 0))} / "
+        f"★{format_shells(refund_cfg.get(str(RARITY_NORMAL), 0))} / "
+        f"★★{format_shells(refund_cfg.get(str(RARITY_RARE), 0))} / "
+        f"★★★{format_shells(refund_cfg.get(str(RARITY_LEGENDARY), 0))}"
+    )
+    shell_reward_cfg = cfg.get("shell_reward", {})
+    shell_reward_line = (
+        f"{format_shells(shell_reward_cfg.get('min', 0.1))}-"
+        f"{format_shells(shell_reward_cfg.get('max', 1.0))}"
+    )
+
+    return discord.Embed(
+        title="🌌 **奇米蛋 · 身份抽奖**",
+        description=(
+            "这里藏着一些无法直接领取的 **稀有款式**！\n"
+            "你会是那个被命运选中的蛋子吗？\n\n"
+            f"💳 **单抽消耗**: {format_shells(single_cost)} 蛋壳\n"
+            f"💳 **五抽消耗**: {format_shells(five_cost)} 蛋壳\n"
+            f"💳 **十连消耗**: {format_shells(ten_cost)} 蛋壳\n"
+            f"🥚 **蛋壳结果**: 随机 {shell_reward_line} 蛋壳\n"
+            f"🔄 **重复补偿**: {refund_line} 蛋壳\n"
+            f"🥚 **你的蛋壳**: **{format_shells(points)}**\n\n"
+            "📌 **蛋壳获取**\n"
+            f"- 📅 小蛋报到：+{format_shells(sign_reward)} 起\n"
+            "- 💬 有效发言：提升报到加成\n"
+            f"- 🧵 社区发帖：任意论坛帖子每帖 +{format_shells(post_reward)}，"
+            f"每人每日最多 +{format_shells(post_daily_cap)}\n"
+        ),
+        color=discord.Color.purple(),
+    )
+
 # --- 抽奖界面 ---
 class RoleLotteryView(discord.ui.View):
     def __init__(self):
@@ -921,6 +965,21 @@ class RoleLotteryView(discord.ui.View):
                 equip_error = str(e)
 
         final_points = await asyncio.to_thread(get_user_points, user.id, guild_id)
+
+        # This component was deferred as a message update, so editing the
+        # original response updates the ephemeral lottery panel itself. Keep
+        # the result as a separate follow-up message below.
+        try:
+            await interaction.edit_original_response(
+                embed=build_role_lottery_embed(final_points, data),
+                view=self,
+            )
+        except (discord.NotFound, discord.HTTPException) as error:
+            print(
+                f"[身份抽奖] 主面板余额刷新失败: guild={guild_id} "
+                f"user={user.id} balance={final_points} error={error!r}"
+            )
+
         new_count = sum(1 for row in results if row["role"] and not row["dupe"])
         dupe_count = sum(1 for row in results if row["dupe"])
         shell_count = sum(1 for row in results if row.get("type") == "shells")
@@ -2208,49 +2267,8 @@ class RoleClaimView(discord.ui.View):
         except discord.NotFound:
             return
         data = await asyncio.to_thread(load_role_data)
-        cfg = get_lottery_config(data)
-        single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 1.0)))))
-        five_cost = max(single_cost, float(cfg.get("cost_five", float(getattr(config, "LOTTERY_FIVE_COST", 5.0)))))
-        ten_cost = max(five_cost, float(cfg.get("cost_ten", float(getattr(config, "LOTTERY_TEN_COST", 10.0)))))
-        sign_reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
-        post_reward = float(getattr(config, "POINTS_POST_REWARD", 5.0))
-        post_daily_cap = float(getattr(config, "POINTS_DAILY_POST_CAP", 15.0))
-
-        refund_cfg = cfg.get("refund", {})
-        refund_line = (
-            f"☆{format_shells(refund_cfg.get(str(RARITY_JUNK), 0))} / "
-            f"★{format_shells(refund_cfg.get(str(RARITY_NORMAL), 0))} / "
-            f"★★{format_shells(refund_cfg.get(str(RARITY_RARE), 0))} / "
-            f"★★★{format_shells(refund_cfg.get(str(RARITY_LEGENDARY), 0))}"
-        )
-        outcome_cfg = cfg.get("outcome_weights", {})
-        shell_reward_cfg = cfg.get("shell_reward", {})
-        outcome_line = (
-            f"抽空 {int(outcome_cfg.get(LOTTERY_OUTCOME_EMPTY, 45))} / "
-            f"蛋壳 {int(outcome_cfg.get(LOTTERY_OUTCOME_SHELLS, 32))} / "
-            f"身份 {int(outcome_cfg.get(LOTTERY_OUTCOME_ROLE, 23))}"
-        )
-        shell_reward_line = (
-            f"{format_shells(shell_reward_cfg.get('min', 0.1))}-"
-            f"{format_shells(shell_reward_cfg.get('max', 1.0))}"
-        )
-
         points = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id or 0)
-        embed = discord.Embed(
-            title="🌌 **奇米蛋 · 身份抽奖**",
-            description=f"这里藏着一些无法直接领取的 **稀有款式**！\n你会是那个被命运选中的蛋子吗？\n\n"
-                        f"💳 **单抽消耗**: {format_shells(single_cost)} 蛋壳\n"
-                        f"💳 **五抽消耗**: {format_shells(five_cost)} 蛋壳\n"
-                        f"💳 **十连消耗**: {format_shells(ten_cost)} 蛋壳\n"
-                        f"🥚 **蛋壳结果**: 随机 {shell_reward_line} 蛋壳\n"
-                        f"🔄 **重复补偿**: {refund_line} 蛋壳\n"
-                        f"🥚 **你的蛋壳**: **{format_shells(points)}**\n\n"
-                        f"📌 **蛋壳获取**\n"
-                        f"- 📅 小蛋报到：+{format_shells(sign_reward)} 起\n"
-                        f"- 💬 有效发言：提升报到加成\n"
-                        f"- 🧵 社区发帖：任意论坛帖子每帖 +{format_shells(post_reward)}，每人每日最多 +{format_shells(post_daily_cap)}\n",
-            color=discord.Color.purple()
-        )
+        embed = build_role_lottery_embed(points, data)
         await interaction.followup.send(embed=embed, view=RoleLotteryView(), ephemeral=True)
 
     @discord.ui.button(label="兑换商城", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_redeem", row=1)
