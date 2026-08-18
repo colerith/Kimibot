@@ -79,6 +79,9 @@ _LOTTERY_USER_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 # Prevent rapid confirm clicks from charging the same redeem purchase twice.
 _REDEEM_USER_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 
+# Serialize monthly-card purchases/first-role claims from duplicate panels.
+_MONTHLY_CARD_USER_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
+
 # Fold a burst of successful sign-ins into one public-panel edit per guild.
 _ROLE_PANEL_REFRESH_TASKS: dict[int, asyncio.Task] = {}
 _ROLE_PANEL_REFRESH_DIRTY: set[int] = set()
@@ -220,8 +223,8 @@ def _format_monthly_remaining(status: dict) -> str:
     return f"{hours} 小时 {minutes % 60} 分钟"
 
 
-def _monthly_legendary_roles(guild: discord.Guild) -> list[discord.Role]:
-    data = load_role_data()
+def _monthly_legendary_roles(guild: discord.Guild, role_data: dict | None = None) -> list[discord.Role]:
+    data = role_data if role_data is not None else load_role_data()
     roles = [
         guild.get_role(role_id)
         for role_id in data.get("lottery_roles", [])
@@ -1587,8 +1590,7 @@ class MonthlyFirstRoleSelect(discord.ui.Select):
             return await interaction.response.send_message("这个月卡选择面板已经失效。", ephemeral=True)
         selected_role_id = int(self.values[0])
         role = interaction.guild.get_role(selected_role_id)
-        data = load_role_data()
-        if not role or selected_role_id not in data.get("lottery_roles", []) or get_lottery_role_rarity(selected_role_id, data) != RARITY_LEGENDARY:
+        if not role or selected_role_id not in {item.id for item in panel.roles}:
             return await interaction.response.send_message("这个三星身份组已经失效，请重新打开商城选择。", ephemeral=True)
         panel.selected_role_id = selected_role_id
         panel.rebuild()
@@ -1599,11 +1601,19 @@ class MonthlyFirstRoleSelect(discord.ui.Select):
 
 
 class MonthlyFirstRoleView(discord.ui.View):
-    def __init__(self, guild: discord.Guild, user_id: int, page: int = 0):
+    def __init__(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        roles: list[discord.Role],
+        status: dict,
+        page: int = 0,
+    ):
         super().__init__(timeout=300)
         self.guild = guild
         self.user_id = user_id
-        self.roles = _monthly_legendary_roles(guild)
+        self.roles = list(roles)
+        self.status = dict(status)
         self.total_pages = max(1, math.ceil(len(self.roles) / MONTHLY_ROLE_PAGE_SIZE))
         self.page = page % self.total_pages
         self.selected_role_id: int | None = None
@@ -1640,9 +1650,8 @@ class MonthlyFirstRoleView(discord.ui.View):
 
     def build_embed(self) -> discord.Embed:
         selected_role = self.guild.get_role(self.selected_role_id) if self.selected_role_id else None
-        status = get_monthly_card_status(self.user_id, self.guild.id)
         return build_monthly_first_role_embed(
-            status,
+            self.status,
             selected_role,
             self.current_page_roles(),
             page=self.page,
@@ -1653,30 +1662,49 @@ class MonthlyFirstRoleView(discord.ui.View):
         if not interaction.guild_id or self.selected_role_id is None:
             return await interaction.response.send_message("请先选择一个三星身份组。", ephemeral=True)
         role = interaction.guild.get_role(self.selected_role_id)
-        data = load_role_data()
-        if not role or role.id not in data.get("lottery_roles", []) or get_lottery_role_rarity(role.id, data) != RARITY_LEGENDARY:
-            return await interaction.response.send_message("这个三星身份组已经失效，请重新选择。", ephemeral=True)
-
-        await interaction.response.defer(ephemeral=True)
-        status = get_monthly_card_status(interaction.user.id, interaction.guild_id)
-        purchase_result = None
-        if not status["ever_purchased"]:
-            purchase_result = purchase_monthly_card(interaction.user.id, interaction.guild_id)
-            if not purchase_result.get("success"):
-                return await interaction.followup.send(MonthlyCardPurchaseButton.failure_text(purchase_result), ephemeral=True)
-        elif not status["first_role_pending"]:
-            return await interaction.followup.send("首次三星身份组已经领取过啦。", ephemeral=True)
-
-        claim_result = claim_monthly_card_first_role(interaction.user.id, interaction.guild_id, role.id)
-        if not claim_result.get("success"):
-            return await interaction.followup.send("首次三星身份组已经领取过啦。", ephemeral=True)
-        add_to_collection(interaction.user.id, role.id)
-
-        role_warning = ""
         try:
-            await interaction.user.add_roles(role, reason="蛋壳月卡首次购买三星自选")
-        except (discord.Forbidden, discord.HTTPException):
-            role_warning = "\n身份组已加入永久换装收藏，但机器人暂时无法直接佩戴，请检查身份组层级。"
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        if not role:
+            return await interaction.followup.send("这个三星身份组已经失效，请重新选择。", ephemeral=True)
+
+        lock = _MONTHLY_CARD_USER_LOCKS.setdefault((interaction.guild_id, interaction.user.id), asyncio.Lock())
+        async with lock:
+            data, status = await asyncio.gather(
+                asyncio.to_thread(load_role_data),
+                asyncio.to_thread(get_monthly_card_status, interaction.user.id, interaction.guild_id),
+            )
+            if role.id not in data.get("lottery_roles", []) or get_lottery_role_rarity(role.id, data) != RARITY_LEGENDARY:
+                return await interaction.followup.send("这个三星身份组已经失效，请重新选择。", ephemeral=True)
+
+            purchase_result = None
+            if not status["ever_purchased"]:
+                purchase_result = await asyncio.to_thread(
+                    purchase_monthly_card,
+                    interaction.user.id,
+                    interaction.guild_id,
+                )
+                if not purchase_result.get("success"):
+                    return await interaction.followup.send(MonthlyCardPurchaseButton.failure_text(purchase_result), ephemeral=True)
+            elif not status["first_role_pending"]:
+                return await interaction.followup.send("首次三星身份组已经领取过啦。", ephemeral=True)
+
+            claim_result = await asyncio.to_thread(
+                claim_monthly_card_first_role,
+                interaction.user.id,
+                interaction.guild_id,
+                role.id,
+            )
+            if not claim_result.get("success"):
+                return await interaction.followup.send("首次三星身份组已经领取过啦。", ephemeral=True)
+            await asyncio.to_thread(add_to_collection, interaction.user.id, role.id)
+
+            role_warning = ""
+            try:
+                await interaction.user.add_roles(role, reason="蛋壳月卡首次购买三星自选")
+            except (discord.Forbidden, discord.HTTPException):
+                role_warning = "\n身份组已加入永久换装收藏，但机器人暂时无法直接佩戴，请检查身份组层级。"
         purchase_text = _monthly_purchase_result_text(purchase_result) + "\n" if purchase_result else ""
         success_embed = discord.Embed(
             title="✅ 月卡自选完成",
@@ -1729,18 +1757,36 @@ class MonthlyCardPurchaseButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("该功能仅支持在服务器中使用。", ephemeral=True)
-        status = get_monthly_card_status(interaction.user.id, interaction.guild_id)
-        legendary_roles = _monthly_legendary_roles(interaction.guild)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
+        status, role_data = await asyncio.gather(
+            asyncio.to_thread(get_monthly_card_status, interaction.user.id, interaction.guild_id),
+            asyncio.to_thread(load_role_data),
+        )
+        legendary_roles = _monthly_legendary_roles(interaction.guild, role_data)
         if (not status["ever_purchased"] or status["first_role_pending"]) and legendary_roles:
-            view = MonthlyFirstRoleView(interaction.guild, interaction.user.id)
-            return await interaction.response.send_message(
+            view = MonthlyFirstRoleView(
+                interaction.guild,
+                interaction.user.id,
+                legendary_roles,
+                status,
+            )
+            return await interaction.followup.send(
                 embed=view.build_embed(),
                 view=view,
                 ephemeral=True,
             )
 
-        await interaction.response.defer(ephemeral=True)
-        result = purchase_monthly_card(interaction.user.id, interaction.guild_id)
+        lock = _MONTHLY_CARD_USER_LOCKS.setdefault((interaction.guild_id, interaction.user.id), asyncio.Lock())
+        async with lock:
+            result = await asyncio.to_thread(
+                purchase_monthly_card,
+                interaction.user.id,
+                interaction.guild_id,
+            )
         if not result.get("success"):
             return await interaction.followup.send(self.failure_text(result), ephemeral=True)
         suffix = "\n⭐ 当前没有可选的三星身份组，首次自选资格已经保留。" if result.get("first_purchase") else ""
