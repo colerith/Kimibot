@@ -19,11 +19,17 @@ class QuizStartView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog 
 
-    def _collect_risk_reasons(self, interaction: discord.Interaction):
+    async def _collect_risk_reasons(self, interaction: discord.Interaction):
         """仅校验账号注册时长和可疑账号标记。"""
         reasons = []
 
-        wait_status = get_account_wait_status(interaction.user, interaction.guild_id)
+        # This reads the same points JSON used by a sign-in burst. Waiting for
+        # its threading lock on the event loop would freeze every quiz answer.
+        wait_status = await asyncio.to_thread(
+            get_account_wait_status,
+            interaction.user,
+            interaction.guild_id,
+        )
         if not wait_status["eligible"]:
             reasons.append(
                 f"账号还需等待 {wait_status['remaining_wait_days']} 天"
@@ -50,7 +56,7 @@ class QuizStartView(discord.ui.View):
         if has_verification_role(interaction.user):
             return await interaction.followup.send("你已经是新兵蛋子或正式成员啦，不需要再答题咯！", ephemeral=True)
 
-        risk_reasons = self._collect_risk_reasons(interaction)
+        risk_reasons = await self._collect_risk_reasons(interaction)
         if risk_reasons:
             reason_text = "\n".join(f"• {reason}" for reason in risk_reasons)
             return await interaction.followup.send(
@@ -91,9 +97,19 @@ class QuizStartView(discord.ui.View):
 
         view = QuizQuestionView(self.cog, user_id, 0)
         embed = view.build_embed(0, questions[0], 120)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        try:
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except Exception:
+            self.cog.sessions.pop(user_id, None)
+            raise
 
-        asyncio.create_task(self.cog.timer_task(interaction, user_id))
+        # Start the two-minute clock only after Discord has actually accepted
+        # the first question; time spent queued behind a busy API no longer
+        # consumes the user's answering time.
+        session = self.cog.sessions.get(user_id)
+        if session:
+            session["start_time"] = discord.utils.utcnow()
+            asyncio.create_task(self.cog.timer_task(interaction, user_id))
 
 class QuizQuestionView(discord.ui.View):
     # ✨ 修改点：初始化时接收 cog 实例

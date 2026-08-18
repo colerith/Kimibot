@@ -67,6 +67,19 @@ from discord.ui import Select
 EMBED_FIELD_VALUE_LIMIT = 1024
 MONTHLY_ROLE_PAGE_SIZE = 10
 
+# The points store serializes one JSON file internally. Without this async
+# gate, a sign-in burst can occupy every executor worker waiting on the same
+# threading lock and starve unrelated work such as the entrance quiz.
+_SIGNIN_SETTLEMENT_LOCK = asyncio.Lock()
+
+# Serialize repeat clicks from the same user's ephemeral lottery panel so the
+# balance check and deduction cannot race each other.
+_LOTTERY_USER_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
+
+# Fold a burst of successful sign-ins into one public-panel edit per guild.
+_ROLE_PANEL_REFRESH_TASKS: dict[int, asyncio.Task] = {}
+_ROLE_PANEL_REFRESH_DIRTY: set[int] = set()
+
 
 def _preview_lines(lines: list[str], limit: int = EMBED_FIELD_VALUE_LIMIT) -> str:
     if not lines:
@@ -660,14 +673,40 @@ class RoleLotteryView(discord.ui.View):
         super().__init__(timeout=None)
 
     async def _run_draw(self, interaction: discord.Interaction, draw_count: int):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            # The interaction was already older than Discord's acknowledgement
+            # window. There is no valid webhook token left to reply through.
+            return
 
         if not interaction.guild_id:
             return await interaction.followup.send("❌ 该功能仅支持在服务器内使用。", ephemeral=True)
 
         user = interaction.user
         guild_id = interaction.guild_id
-        data = load_role_data()
+        draw_lock = _LOTTERY_USER_LOCKS.setdefault((guild_id, user.id), asyncio.Lock())
+        async with draw_lock:
+            try:
+                await self._settle_draw(interaction, draw_count)
+            except Exception as error:
+                print(
+                    f"[身份抽奖] 结算失败: guild={guild_id} "
+                    f"user={user.id} count={draw_count} error={error!r}"
+                )
+                try:
+                    await interaction.followup.send(
+                        "❌ 抽奖结算遇到异常，请稍后再试；如蛋壳余额已经变化，请联系管理员核对日志。",
+                        ephemeral=True,
+                    )
+                except discord.HTTPException:
+                    pass
+
+    async def _settle_draw(self, interaction: discord.Interaction, draw_count: int):
+        """Settle one draw without doing blocking file I/O on Discord's loop."""
+        user = interaction.user
+        guild_id = interaction.guild_id
+        data = await asyncio.to_thread(load_role_data)
         cfg = get_lottery_config(data)
 
         fallback_single = float(getattr(config, "LOTTERY_COST", 1.0))
@@ -685,7 +724,7 @@ class RoleLotteryView(discord.ui.View):
         else:
             cost = cost_single * draw_count
 
-        current_points = get_user_points(user.id, guild_id)
+        current_points = await asyncio.to_thread(get_user_points, user.id, guild_id)
         if current_points < cost:
             return await interaction.followup.send(
                 f"💸 **蛋壳不足！**\n你需要 **{format_shells(cost)}** 蛋壳才能执行本次抽奖，当前只有 **{format_shells(current_points)}**。",
@@ -710,7 +749,14 @@ class RoleLotteryView(discord.ui.View):
         if not any(pools_by_kind_rarity[k][r] for k in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON) for r in (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)):
             return await interaction.followup.send("⚠️ 奖池里的身份组好像失效了，请联系管理员。", ephemeral=True)
 
-        modify_user_points(user.id, -cost, guild_id, source="role_lottery", reason=f"draw_count={draw_count}")
+        await asyncio.to_thread(
+            modify_user_points,
+            user.id,
+            -cost,
+            guild_id,
+            source="role_lottery",
+            reason=f"draw_count={draw_count}",
+        )
 
         outcome_cfg = cfg.get("outcome_weights", {})
         outcome_pool = [LOTTERY_OUTCOME_ROLE, LOTTERY_OUTCOME_SHELLS, LOTTERY_OUTCOME_EMPTY]
@@ -741,7 +787,7 @@ class RoleLotteryView(discord.ui.View):
             legendary_index = rarity_pool.index(RARITY_LEGENDARY)
             weights[legendary_index] = max(1, weights[legendary_index])
 
-        user_collection_ids = set(get_user_collection(user.id))
+        user_collection_ids = set(await asyncio.to_thread(get_user_collection, user.id))
         refund_cfg = cfg.get("refund", {})
         shell_reward_cfg = cfg.get("shell_reward", {})
         shell_reward_min = max(0.0, float(shell_reward_cfg.get("min", 0.1)))
@@ -751,7 +797,7 @@ class RoleLotteryView(discord.ui.View):
         granted_roles = []
         total_refund = 0
         total_shell_reward = 0.0
-        stats_before = get_lottery_stats(user.id, guild_id)
+        stats_before = await asyncio.to_thread(get_lottery_stats, user.id, guild_id)
         empty_streak = int(stats_before.get("empty_streak", 0))
         no_role_streak = int(stats_before.get("no_role_streak", 0))
         no_legendary_streak = int(stats_before.get("no_legendary_streak", 0))
@@ -814,7 +860,7 @@ class RoleLotteryView(discord.ui.View):
                 total_refund += refund_amt
                 results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": True, "refund": refund_amt, "shell_reward": 0})
             else:
-                add_to_collection(user.id, won_role.id)
+                await asyncio.to_thread(add_to_collection, user.id, won_role.id)
                 user_collection_ids.add(won_role.id)
                 granted_roles.append(won_role)
                 results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": False, "refund": 0, "shell_reward": 0})
@@ -823,11 +869,32 @@ class RoleLotteryView(discord.ui.View):
             no_legendary_streak = 0 if rarity == RARITY_LEGENDARY else no_legendary_streak + 1
 
         if total_refund > 0:
-            modify_user_points(user.id, total_refund, guild_id, source="role_lottery_refund", reason=f"draw_count={draw_count}")
+            await asyncio.to_thread(
+                modify_user_points,
+                user.id,
+                total_refund,
+                guild_id,
+                source="role_lottery_refund",
+                reason=f"draw_count={draw_count}",
+            )
         if total_shell_reward > 0:
-            modify_user_points(user.id, total_shell_reward, guild_id, source="role_lottery_shell_reward", reason=f"draw_count={draw_count}")
-        collection_rewards = _settle_collection_rewards(user.id, guild_id, user_collection_ids, data)
-        record_lottery_draw(
+            await asyncio.to_thread(
+                modify_user_points,
+                user.id,
+                total_shell_reward,
+                guild_id,
+                source="role_lottery_shell_reward",
+                reason=f"draw_count={draw_count}",
+            )
+        collection_rewards = await asyncio.to_thread(
+            _settle_collection_rewards,
+            user.id,
+            guild_id,
+            user_collection_ids,
+            data,
+        )
+        await asyncio.to_thread(
+            record_lottery_draw,
             user.id,
             guild_id,
             results=results,
@@ -853,7 +920,7 @@ class RoleLotteryView(discord.ui.View):
             except Exception as e:
                 equip_error = str(e)
 
-        final_points = get_user_points(user.id, guild_id)
+        final_points = await asyncio.to_thread(get_user_points, user.id, guild_id)
         new_count = sum(1 for row in results if row["role"] and not row["dupe"])
         dupe_count = sum(1 for row in results if row["dupe"])
         shell_count = sum(1 for row in results if row.get("type") == "shells")
@@ -930,25 +997,42 @@ class RoleLotteryView(discord.ui.View):
 
     @discord.ui.button(label="📜 查看蛋壳", style=discord.ButtonStyle.secondary, emoji="👛", custom_id="lottery_check_points")
     async def check_points(self, button, interaction: discord.Interaction):
-        p = get_user_points(interaction.user.id, interaction.guild_id or 0)
-        await interaction.response.send_message(f"🥚 你当前的蛋壳余额是：**{format_shells(p)}**", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        p = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id or 0)
+        await interaction.followup.send(f"🥚 你当前的蛋壳余额是：**{format_shells(p)}**", ephemeral=True)
 
     @discord.ui.button(label="我的战报", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="lottery_my_stats", row=1)
     async def lottery_stats_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        embed = build_lottery_stats_embed(interaction.user, interaction.guild_id)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        embed = await asyncio.to_thread(build_lottery_stats_embed, interaction.user, interaction.guild_id)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="📊 奖池图鉴", style=discord.ButtonStyle.success, emoji="🌌", custom_id="lottery_collection_view")
     async def collection_callback(self, button, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        data = load_role_data()
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        data = await asyncio.to_thread(load_role_data)
         if not data.get("lottery_roles", []):
             return await interaction.followup.send("🌑 这片星域空空如也（奖池未配置）。", ephemeral=True)
-        owned = set(get_user_collection(interaction.user.id))
-        rewards = _settle_collection_rewards(interaction.user.id, interaction.guild_id or 0, owned, data)
-        embed = build_collection_embed(interaction.guild, interaction.user.id)
+        owned = set(await asyncio.to_thread(get_user_collection, interaction.user.id))
+        rewards = await asyncio.to_thread(
+            _settle_collection_rewards,
+            interaction.user.id,
+            interaction.guild_id or 0,
+            owned,
+            data,
+        )
+        embed = await asyncio.to_thread(build_collection_embed, interaction.guild, interaction.user.id)
         if rewards:
             embed.add_field(name="🎁 刚刚自动发放", value=_preview_lines([
                 f"{r.get('emoji', '🏆')} **{r.get('name', '收集成就')}**：{_collection_reward_text(r, interaction.guild)}" for r in rewards
@@ -1211,34 +1295,39 @@ class RedeemRoleSelect(discord.ui.Select):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
 
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
         role_id = int(self.values[0])
-        data = load_role_data()
+        data = await asyncio.to_thread(load_role_data)
         if role_id not in data.get("redeem_roles", []):
-            return await interaction.response.send_message("这个身份组已下架。", ephemeral=True)
+            return await interaction.followup.send("这个身份组已下架。", ephemeral=True)
 
         role = interaction.guild.get_role(role_id)
         if not role:
-            return await interaction.response.send_message("这个身份组已失效，请联系管理员。", ephemeral=True)
+            return await interaction.followup.send("这个身份组已失效，请联系管理员。", ephemeral=True)
         if role in interaction.user.roles:
-            return await interaction.response.send_message(f"你已经拥有 {role.mention} 啦。", ephemeral=True)
+            return await interaction.followup.send(f"你已经拥有 {role.mention} 啦。", ephemeral=True)
 
         meta = get_redeem_role_config(role_id, data)
         available, availability_label = _redeem_availability(meta)
         if not available:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"这个身份组当前不可兑换（{availability_label}）。请重新打开兑换面板查看当前上架内容。",
                 ephemeral=True,
             )
         price, discount_active = _effective_redeem_price(meta)
-        balance = get_user_points(interaction.user.id, interaction.guild_id)
+        balance = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id)
         if balance < price:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"蛋壳不足，兑换 {role.mention} 需要 **{format_shells(price)}** 蛋壳，你当前只有 **{format_shells(balance)}**。",
                 ephemeral=True,
             )
 
-        await interaction.response.defer(ephemeral=True)
-        modify_user_points(
+        await asyncio.to_thread(
+            modify_user_points,
             interaction.user.id,
             -price,
             interaction.guild_id,
@@ -1248,7 +1337,8 @@ class RedeemRoleSelect(discord.ui.Select):
         try:
             await interaction.user.add_roles(role, reason="蛋壳兑换身份组")
         except Exception as exc:
-            modify_user_points(
+            await asyncio.to_thread(
+                modify_user_points,
                 interaction.user.id,
                 price,
                 interaction.guild_id,
@@ -1260,8 +1350,8 @@ class RedeemRoleSelect(discord.ui.Select):
                 ephemeral=True,
             )
 
-        add_redeem_ownership(interaction.user.id, role.id)
-        new_balance = get_user_points(interaction.user.id, interaction.guild_id)
+        await asyncio.to_thread(add_redeem_ownership, interaction.user.id, role.id)
+        new_balance = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id)
         await interaction.followup.send(
             f"✅ 兑换成功！你获得了 {role.mention}。\n"
             f"本次消耗：**{format_shells(price)}** 蛋壳\n"
@@ -1932,6 +2022,35 @@ async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None =
     except (discord.NotFound, discord.Forbidden):
         return False
 
+
+async def _delayed_role_panel_refresh(guild: discord.Guild, user_avatar_url: str | None) -> None:
+    """Coalesce a burst of sign-ins into one public-panel edit."""
+    try:
+        await asyncio.sleep(1.5)
+        while True:
+            _ROLE_PANEL_REFRESH_DIRTY.discard(guild.id)
+            await refresh_role_panel(guild, user_avatar_url)
+            if guild.id not in _ROLE_PANEL_REFRESH_DIRTY:
+                break
+            # A sign-in landed while the snapshot was being fetched/edited.
+            # Refresh once more so the public count cannot remain stale.
+            await asyncio.sleep(0.5)
+    except (discord.HTTPException, OSError, ValueError) as error:
+        print(f"[小蛋报到] 公开面板刷新失败: guild={guild.id} error={error}")
+    finally:
+        _ROLE_PANEL_REFRESH_TASKS.pop(guild.id, None)
+        _ROLE_PANEL_REFRESH_DIRTY.discard(guild.id)
+
+
+def schedule_role_panel_refresh(guild: discord.Guild, user_avatar_url: str | None = None) -> None:
+    current = _ROLE_PANEL_REFRESH_TASKS.get(guild.id)
+    if current and not current.done():
+        _ROLE_PANEL_REFRESH_DIRTY.add(guild.id)
+        return
+    _ROLE_PANEL_REFRESH_TASKS[guild.id] = asyncio.create_task(
+        _delayed_role_panel_refresh(guild, user_avatar_url)
+    )
+
 # --- 用户端视图: 公开主面板入口 ---
 class RoleClaimView(discord.ui.View):
     """
@@ -1953,7 +2072,10 @@ class RoleClaimView(discord.ui.View):
         except discord.NotFound:
             return
 
-        summary = get_user_summary(interaction.user.id, interaction.guild_id)
+        summary, rules_text = await asyncio.gather(
+            asyncio.to_thread(get_user_summary, interaction.user.id, interaction.guild_id),
+            asyncio.to_thread(_rules_text),
+        )
         monthly = summary.get("monthly_card", {})
         monthly_text = (
             f"蛋壳月卡：**启用中** · 剩余 **{_format_monthly_remaining(monthly)}** · 收益 **{monthly.get('reward_multiplier', 1.5)} 倍**\n"
@@ -1965,7 +2087,7 @@ class RoleClaimView(discord.ui.View):
             f"{monthly_text}"
             f"连续报到：**{summary['streak_days']}** 天\n"
             f"今日有效发言：**{summary['daily_msg_count']}** 条\n\n"
-            f"{_rules_text()}"
+            f"{rules_text}"
         )
         await interaction.followup.send(text, ephemeral=True)
 
@@ -1983,19 +2105,23 @@ class RoleClaimView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
-        data = load_role_data()
+        data = await asyncio.to_thread(load_role_data)
         claimable_ids = set(data.get("claimable_roles", []))
         lottery_ids = set(data.get("lottery_roles", []))
         redeem_ids = set(data.get("redeem_roles", []))
         collection_reward_ids = set(get_collection_reward_role_ids(data))
 
         # 从藏品数据库获取稀有身份组
-        user_lottery_collection_ids = set(get_user_collection(interaction.user.id))
-        user_redeem_owned_ids = set(get_user_redeem_ownership(interaction.user.id))
+        user_lottery_collection_ids, user_redeem_owned_ids = await asyncio.gather(
+            asyncio.to_thread(get_user_collection, interaction.user.id),
+            asyncio.to_thread(get_user_redeem_ownership, interaction.user.id),
+        )
+        user_lottery_collection_ids = set(user_lottery_collection_ids)
+        user_redeem_owned_ids = set(user_redeem_owned_ids)
         current_role_ids = {role.id for role in interaction.user.roles}
         current_redeem_ids = redeem_ids & current_role_ids
         for rid in current_redeem_ids:
-            add_redeem_ownership(interaction.user.id, rid)
+            await asyncio.to_thread(add_redeem_ownership, interaction.user.id, rid)
         user_redeem_owned_ids |= current_redeem_ids
 
         selectable_roles = []
@@ -2072,7 +2198,7 @@ class RoleClaimView(discord.ui.View):
                 "你已经通过验证答题啦，不需要再购买加速卡。",
                 ephemeral=True,
             )
-        embed = build_acceleration_embed(interaction.user, interaction.guild_id)
+        embed = await asyncio.to_thread(build_acceleration_embed, interaction.user, interaction.guild_id)
         await interaction.followup.send(embed=embed, view=AccelerationShopView(interaction.user.id), ephemeral=True)
     
     @discord.ui.button(label="身份抽奖", style=discord.ButtonStyle.primary, emoji="🎲", custom_id="role_main_lottery", row=1)
@@ -2081,7 +2207,7 @@ class RoleClaimView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
-        data = load_role_data()
+        data = await asyncio.to_thread(load_role_data)
         cfg = get_lottery_config(data)
         single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 1.0)))))
         five_cost = max(single_cost, float(cfg.get("cost_five", float(getattr(config, "LOTTERY_FIVE_COST", 5.0)))))
@@ -2109,7 +2235,7 @@ class RoleClaimView(discord.ui.View):
             f"{format_shells(shell_reward_cfg.get('max', 1.0))}"
         )
 
-        points = get_user_points(interaction.user.id, interaction.guild_id or 0)
+        points = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id or 0)
         embed = discord.Embed(
             title="🌌 **奇米蛋 · 身份抽奖**",
             description=f"这里藏着一些无法直接领取的 **稀有款式**！\n你会是那个被命运选中的蛋子吗？\n\n"
@@ -2135,7 +2261,7 @@ class RoleClaimView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
-        embed = build_redeem_shop_embed(interaction.guild, interaction.user.id)
+        embed = await asyncio.to_thread(build_redeem_shop_embed, interaction.guild, interaction.user.id)
         await interaction.followup.send(embed=embed, view=RedeemShopView(interaction.guild, interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label="每日签到", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="role_main_sign_in", row=0)
@@ -2149,12 +2275,13 @@ class RoleClaimView(discord.ui.View):
 
         reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
         try:
-            result = await asyncio.to_thread(
-                sign_in_user,
-                interaction.user.id,
-                interaction.guild_id,
-                reward,
-            )
+            async with _SIGNIN_SETTLEMENT_LOCK:
+                result = await asyncio.to_thread(
+                    sign_in_user,
+                    interaction.user.id,
+                    interaction.guild_id,
+                    reward,
+                )
         except Exception as error:
             print(f"[小蛋报到] 签到结算失败: user={interaction.user.id} error={error}")
             return await interaction.followup.send(
@@ -2162,6 +2289,7 @@ class RoleClaimView(discord.ui.View):
                 ephemeral=True,
             )
 
+        rules_text = await asyncio.to_thread(_rules_text)
         if result.get("success"):
             event = result.get("event", {})
             event_delta = float(result.get("event_delta", 0))
@@ -2184,28 +2312,24 @@ class RoleClaimView(discord.ui.View):
                 f"今日排名：第 **{result['rank']}** 位\n"
                 f"本次合计：**{'-' if result['total_delta'] < 0 else '+'}{format_shells(abs(result['total_delta']))}** 蛋壳\n"
                 f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳\n\n"
-                f"{_rules_text()}"
+                f"{rules_text}"
             )
         else:
             text = (
                 f"🕒 今日已经报到过啦。\n"
                 f"连续报到：**{result['streak_days']}** 天\n"
                 f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳\n\n"
-                f"{_rules_text()}"
+                f"{rules_text}"
             )
 
         await interaction.followup.send(text, ephemeral=True)
 
-        # 先把结算结果回复给用户，再刷新公开榜单。Discord 的消息获取或编辑
-        # 即使偶发变慢，也不会再表现为签到按钮长时间无响应。
+        # Reply first, then queue a coalesced refresh of the public leaderboard.
         if result.get("success"):
-            try:
-                await refresh_role_panel(
-                    interaction.guild,
-                    interaction.client.user.display_avatar.url if interaction.client.user else None,
-                )
-            except (discord.HTTPException, OSError, ValueError) as error:
-                print(f"[小蛋报到] 公开面板刷新失败: guild={interaction.guild_id} error={error}")
+            schedule_role_panel_refresh(
+                interaction.guild,
+                interaction.client.user.display_avatar.url if interaction.client.user else None,
+            )
 
     @discord.ui.button(label="每日任务", style=discord.ButtonStyle.secondary, emoji="📒", custom_id="role_main_daily_tasks", row=0)
     async def daily_tasks_callback(self, button, interaction: discord.Interaction):

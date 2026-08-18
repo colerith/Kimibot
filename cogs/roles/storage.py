@@ -14,6 +14,7 @@ COLLECTION_REWARDS_DATA_FILE = "data/role_collection_rewards.json"
 
 _collection_reward_lock = threading.Lock()
 _ownership_lock = threading.RLock()
+_lottery_stats_lock = threading.RLock()
 
 RARITY_NORMAL = 1
 RARITY_RARE = 2
@@ -755,8 +756,9 @@ def save_lottery_stats_data(data: dict):
 
 
 def get_lottery_stats(user_id: int, guild_id: int | None = None) -> dict:
-    data = load_lottery_stats_data()
-    return _normalize_lottery_stats(data.get(_make_lottery_user_key(user_id, guild_id), {}))
+    with _lottery_stats_lock:
+        data = load_lottery_stats_data()
+        return _normalize_lottery_stats(data.get(_make_lottery_user_key(user_id, guild_id), {}))
 
 
 def record_lottery_draw(
@@ -769,51 +771,52 @@ def record_lottery_draw(
     reward_shells: float,
     drawn_at: str,
 ) -> dict:
-    data = load_lottery_stats_data()
-    key = _make_lottery_user_key(user_id, guild_id)
-    stats = _normalize_lottery_stats(data.get(key, {}))
+    with _lottery_stats_lock:
+        data = load_lottery_stats_data()
+        key = _make_lottery_user_key(user_id, guild_id)
+        stats = _normalize_lottery_stats(data.get(key, {}))
 
-    stats["total_draws"] += len(results or [])
-    stats["spent_shells"] = _normalize_shell_amount(stats["spent_shells"] + float(spent_shells or 0), 0.0)
-    stats["refund_shells"] = _normalize_shell_amount(stats["refund_shells"] + float(refund_shells or 0), 0.0)
-    stats["reward_shells"] = _normalize_shell_amount(stats["reward_shells"] + float(reward_shells or 0), 0.0)
+        stats["total_draws"] += len(results or [])
+        stats["spent_shells"] = _normalize_shell_amount(stats["spent_shells"] + float(spent_shells or 0), 0.0)
+        stats["refund_shells"] = _normalize_shell_amount(stats["refund_shells"] + float(refund_shells or 0), 0.0)
+        stats["reward_shells"] = _normalize_shell_amount(stats["reward_shells"] + float(reward_shells or 0), 0.0)
 
-    for row in results or []:
-        row_type = row.get("type")
-        if row_type == LOTTERY_OUTCOME_EMPTY or row_type == "empty":
-            stats["empty_hits"] += 1
-            stats["empty_streak"] += 1
-            stats["no_role_streak"] += 1
-            stats["no_legendary_streak"] += 1
-            continue
-        if row_type == LOTTERY_OUTCOME_SHELLS or row_type == "shells":
-            stats["shell_hits"] += 1
-            stats["empty_streak"] = 0
-            stats["no_role_streak"] += 1
-            stats["no_legendary_streak"] += 1
-            continue
-        if row_type == LOTTERY_OUTCOME_ROLE or row_type == "role":
-            stats["role_hits"] += 1
-            stats["empty_streak"] = 0
-            stats["no_role_streak"] = 0
-            if row.get("dupe"):
-                stats["duplicate_roles"] += 1
-            else:
-                stats["new_roles"] += 1
-
-            rarity = str(row.get("rarity", ""))
-            if rarity in stats["rarity_hits"]:
-                stats["rarity_hits"][rarity] += 1
-            if rarity == str(RARITY_LEGENDARY):
-                stats["no_legendary_streak"] = 0
-            else:
+        for row in results or []:
+            row_type = row.get("type")
+            if row_type == LOTTERY_OUTCOME_EMPTY or row_type == "empty":
+                stats["empty_hits"] += 1
+                stats["empty_streak"] += 1
+                stats["no_role_streak"] += 1
                 stats["no_legendary_streak"] += 1
+                continue
+            if row_type == LOTTERY_OUTCOME_SHELLS or row_type == "shells":
+                stats["shell_hits"] += 1
+                stats["empty_streak"] = 0
+                stats["no_role_streak"] += 1
+                stats["no_legendary_streak"] += 1
+                continue
+            if row_type == LOTTERY_OUTCOME_ROLE or row_type == "role":
+                stats["role_hits"] += 1
+                stats["empty_streak"] = 0
+                stats["no_role_streak"] = 0
+                if row.get("dupe"):
+                    stats["duplicate_roles"] += 1
+                else:
+                    stats["new_roles"] += 1
 
-            kind = str(row.get("kind", ""))
-            if kind in stats["kind_hits"]:
-                stats["kind_hits"][kind] += 1
+                rarity = str(row.get("rarity", ""))
+                if rarity in stats["rarity_hits"]:
+                    stats["rarity_hits"][rarity] += 1
+                if rarity == str(RARITY_LEGENDARY):
+                    stats["no_legendary_streak"] = 0
+                else:
+                    stats["no_legendary_streak"] += 1
 
-    stats["last_draw_at"] = str(drawn_at or "")
-    data[key] = stats
-    save_lottery_stats_data(data)
-    return stats
+                kind = str(row.get("kind", ""))
+                if kind in stats["kind_hits"]:
+                    stats["kind_hits"][kind] += 1
+
+        stats["last_draw_at"] = str(drawn_at or "")
+        data[key] = stats
+        save_lottery_stats_data(data)
+        return stats

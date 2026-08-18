@@ -12,6 +12,7 @@ from .views import QuizStartView
 # --- 配置区 ---
 RETRY_COOLDOWN = 900
 QUIZ_DURATION = 120
+QUIZ_SETTLEMENT_GRACE = 10
 QUIZ_LOG_CHANNEL_ID = IDS.get("QUIZ_LOG_CHANNEL_ID")
 PUBLIC_RESULT_CHANNEL_ID = 1452485785939869808
 
@@ -70,7 +71,9 @@ class WelcomeCog(commands.Cog):
     async def timer_task(self, interaction: discord.Interaction, user_id: int):
         """答题超时计时器"""
         try:
-            await asyncio.sleep(QUIZ_DURATION)
+            # Leave a small settlement window for a selection that Discord has
+            # delivered near the deadline while the bot/API is briefly busy.
+            await asyncio.sleep(QUIZ_DURATION + QUIZ_SETTLEMENT_GRACE)
             if user_id in self.sessions:
                 session = self.sessions[user_id]
                 elapsed = (discord.utils.utcnow() - session["start_time"]).total_seconds()
