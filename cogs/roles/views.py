@@ -76,6 +76,9 @@ _SIGNIN_SETTLEMENT_LOCK = asyncio.Lock()
 # balance check and deduction cannot race each other.
 _LOTTERY_USER_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 
+# Prevent rapid confirm clicks from charging the same redeem purchase twice.
+_REDEEM_USER_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
+
 # Fold a burst of successful sign-ins into one public-panel edit per guild.
 _ROLE_PANEL_REFRESH_TASKS: dict[int, asyncio.Task] = {}
 _ROLE_PANEL_REFRESH_DIRTY: set[int] = set()
@@ -1360,68 +1363,122 @@ class RedeemRoleSelect(discord.ui.Select):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
 
+        role_id = int(self.values[0])
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            return await interaction.response.send_message("这个身份组已失效，请重新打开商城。", ephemeral=True)
+
+        panel = self.view
+        if not isinstance(panel, RedeemShopView):
+            return await interaction.response.send_message("这个兑换商城面板已经失效，请重新打开。", ephemeral=True)
+        panel.selected_role_id = role_id
+        panel.confirm_button.disabled = False
+        for option in self.options:
+            option.default = option.value == str(role_id)
+        selected_option = next((option for option in self.options if option.value == str(role_id)), None)
+        price_text = selected_option.description if selected_option else "请以确认购买时的实时价格为准"
+        await interaction.response.edit_message(
+            content=(
+                f"🧾 **待确认商品：** {role.mention}\n"
+                f"价格信息：**{price_text}**\n"
+                "确认无误后，请点击下方的 **确认购买**；选择商品不会扣除蛋壳。"
+            ),
+            view=panel,
+        )
+
+
+class RedeemConfirmButton(discord.ui.Button):
+    def __init__(self, parent_view: "RedeemShopView"):
+        super().__init__(
+            label="确认购买",
+            emoji="✅",
+            style=discord.ButtonStyle.success,
+            row=1,
+            disabled=True,
+            custom_id="role_redeem_confirm",
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        role_id = self.parent_view.selected_role_id
+        if not interaction.guild_id or role_id is None:
+            return await interaction.response.send_message("请先从下拉框选择要兑换的身份组。", ephemeral=True)
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
 
-        role_id = int(self.values[0])
-        data = await asyncio.to_thread(load_role_data)
-        if role_id not in data.get("redeem_roles", []):
-            return await interaction.followup.send("这个身份组已下架。", ephemeral=True)
-
-        role = interaction.guild.get_role(role_id)
-        if not role:
-            return await interaction.followup.send("这个身份组已失效，请联系管理员。", ephemeral=True)
-        if role in interaction.user.roles:
-            return await interaction.followup.send(f"你已经拥有 {role.mention} 啦。", ephemeral=True)
-
-        meta = get_redeem_role_config(role_id, data)
-        available, availability_label = _redeem_availability(meta)
-        if not available:
-            return await interaction.followup.send(
-                f"这个身份组当前不可兑换（{availability_label}）。请重新打开兑换面板查看当前上架内容。",
-                ephemeral=True,
+        lock = _REDEEM_USER_LOCKS.setdefault((interaction.guild_id, interaction.user.id), asyncio.Lock())
+        async with lock:
+            data, balance, owned_ids = await asyncio.gather(
+                asyncio.to_thread(load_role_data),
+                asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id),
+                asyncio.to_thread(get_user_redeem_ownership, interaction.user.id),
             )
-        price, discount_active = _effective_redeem_price(meta)
-        balance = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id)
-        if balance < price:
-            return await interaction.followup.send(
-                f"蛋壳不足，兑换 {role.mention} 需要 **{format_shells(price)}** 蛋壳，你当前只有 **{format_shells(balance)}**。",
-                ephemeral=True,
-            )
+            if role_id not in data.get("redeem_roles", []):
+                return await interaction.followup.send("这个身份组已下架，请重新打开商城。", ephemeral=True)
 
-        await asyncio.to_thread(
-            modify_user_points,
-            interaction.user.id,
-            -price,
-            interaction.guild_id,
-            source="role_redeem",
-            reason=f"role_id={role_id};mode={meta.get('sale_mode', 'permanent')};discount={discount_active}",
-        )
-        try:
-            await interaction.user.add_roles(role, reason="蛋壳兑换身份组")
-        except Exception as exc:
+            role = interaction.guild.get_role(role_id)
+            if not role:
+                return await interaction.followup.send("这个身份组已失效，请联系管理员。", ephemeral=True)
+            if role in interaction.user.roles or role_id in set(owned_ids):
+                return await interaction.followup.send(f"你已经拥有 {role.mention} 啦，可以直接在换装面板穿戴。", ephemeral=True)
+
+            meta = get_redeem_role_config(role_id, data)
+            available, availability_label = _redeem_availability(meta)
+            if not available:
+                return await interaction.followup.send(
+                    f"这个身份组当前不可兑换（{availability_label}），请重新打开商城查看。",
+                    ephemeral=True,
+                )
+            price, discount_active = _effective_redeem_price(meta)
+            if balance < price:
+                return await interaction.followup.send(
+                    f"蛋壳不足，兑换 {role.mention} 需要 **{format_shells(price)}** 蛋壳，"
+                    f"你当前只有 **{format_shells(balance)}**。",
+                    ephemeral=True,
+                )
+
             await asyncio.to_thread(
                 modify_user_points,
                 interaction.user.id,
-                price,
+                -price,
                 interaction.guild_id,
-                source="role_redeem_refund",
-                reason=f"role_id={role_id};grant_failed={type(exc).__name__}",
+                source="role_redeem",
+                reason=f"role_id={role_id};mode={meta.get('sale_mode', 'permanent')};discount={discount_active}",
             )
-            return await interaction.followup.send(
-                f"❌ 发放身份组失败，已退回 **{format_shells(price)}** 蛋壳。请检查机器人身份组层级和权限。",
-                ephemeral=True,
-            )
+            try:
+                await interaction.user.add_roles(role, reason="蛋壳兑换身份组")
+            except Exception as exc:
+                await asyncio.to_thread(
+                    modify_user_points,
+                    interaction.user.id,
+                    price,
+                    interaction.guild_id,
+                    source="role_redeem_refund",
+                    reason=f"role_id={role_id};grant_failed={type(exc).__name__}",
+                )
+                return await interaction.followup.send(
+                    f"❌ 发放身份组失败，已退回 **{format_shells(price)}** 蛋壳。请检查机器人身份组层级和权限。",
+                    ephemeral=True,
+                )
 
-        await asyncio.to_thread(add_redeem_ownership, interaction.user.id, role.id)
-        new_balance = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id)
-        await interaction.followup.send(
-            f"✅ 兑换成功！你获得了 {role.mention}。\n"
-            f"本次消耗：**{format_shells(price)}** 蛋壳\n"
-            f"当前余额：**{format_shells(new_balance)}** 蛋壳",
-            ephemeral=True,
+            await asyncio.to_thread(add_redeem_ownership, interaction.user.id, role.id)
+            new_balance = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id)
+
+        refreshed_embed = await asyncio.to_thread(
+            build_redeem_shop_embed,
+            interaction.guild,
+            interaction.user.id,
+        )
+        refreshed_view = RedeemShopView(interaction.guild, interaction.user.id)
+        await interaction.edit_original_response(
+            content=(
+                f"✅ **兑换成功！** 你获得了 {role.mention}。\n"
+                f"本次消耗：**{format_shells(price)}** 蛋壳 · 当前余额：**{format_shells(new_balance)}** 蛋壳"
+            ),
+            embed=refreshed_embed,
+            view=refreshed_view,
         )
 
 
@@ -1429,7 +1486,10 @@ class RedeemShopView(discord.ui.View):
     def __init__(self, guild: discord.Guild, user_id: int):
         super().__init__(timeout=300)
         self.user_id = user_id
+        self.selected_role_id: int | None = None
         self.add_item(RedeemRoleSelect(guild))
+        self.confirm_button = RedeemConfirmButton(self)
+        self.add_item(self.confirm_button)
         self.add_item(MonthlyCardPurchaseButton(guild))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
