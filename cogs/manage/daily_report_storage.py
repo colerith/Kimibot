@@ -16,6 +16,7 @@ def _empty_data() -> dict:
 def _empty_guild() -> dict:
     return {
         "tracking_started_date": "",
+        "initial_catchup_repaired": False,
         "days": {},
         "reports": {},
         "member_snapshot": {
@@ -89,15 +90,30 @@ def initialize_and_reconcile(
     with _REPORT_DATA_LOCK:
         data = _load_unlocked()
         record = _guild_record(data, guild_id)
-        if not record.get("tracking_started_date"):
-            record["tracking_started_date"] = today
+        today_date = date.fromisoformat(today)
+        # The first report is for the day before the feature starts.  Starting
+        # at ``today`` would make the initial catch-up scan skip yesterday.
+        first_report_date = today_date - timedelta(days=1)
+        had_tracking_start = bool(record.get("tracking_started_date"))
+        if not had_tracking_start:
+            record["tracking_started_date"] = first_report_date.isoformat()
+            record["initial_catchup_repaired"] = True
 
         try:
             tracking_start = date.fromisoformat(record["tracking_started_date"])
         except (TypeError, ValueError):
-            tracking_start = date.fromisoformat(today)
+            tracking_start = first_report_date
             record["tracking_started_date"] = tracking_start.isoformat()
-        today_date = date.fromisoformat(today)
+            record["initial_catchup_repaired"] = True
+        # Migrate data created by the old implementation, which started at the
+        # installation day and therefore permanently excluded the day before.
+        if had_tracking_start and not record.get("initial_catchup_repaired"):
+            tracking_start -= timedelta(days=1)
+            record["tracking_started_date"] = tracking_start.isoformat()
+            record["initial_catchup_repaired"] = True
+        if tracking_start > first_report_date:
+            tracking_start = first_report_date
+            record["tracking_started_date"] = tracking_start.isoformat()
         for user_id, joined_date_raw in joined_members:
             try:
                 joined_date = date.fromisoformat(joined_date_raw)

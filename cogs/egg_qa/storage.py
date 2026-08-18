@@ -1,6 +1,8 @@
 import json
 import os
 import random
+import threading
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 
 
@@ -8,12 +10,22 @@ DATA_FILE = "data/egg_qa.json"
 TZ_CN = timezone(timedelta(hours=8))
 DAILY_QUESTION_LIMIT = 3
 DAILY_REPLY_REWARD_CAP = 15
+_DATA_LOCK = threading.RLock()
 
 # 3～5 蛋壳占绝大多数；超过 5 后快速衰减，10～15 为极稀有彩蛋。
 REWARD_AMOUNTS = list(range(3, 16))
 REWARD_WEIGHTS = [6000, 3000, 900, 60, 25, 10, 4, 2, 1, 1, 1, 1, 1]
 SELF_ANSWER_AMOUNTS = [1, 2, 3]
 SELF_ANSWER_WEIGHTS = [6, 3, 1]
+
+
+def _synchronized(func):
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        with _DATA_LOCK:
+            return func(*args, **kwargs)
+
+    return wrapped
 
 
 def _now_iso() -> str:
@@ -28,6 +40,7 @@ def _empty_data() -> dict:
     return {"version": 1, "questions": {}, "panels": {}}
 
 
+@_synchronized
 def load_data() -> dict:
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as file:
@@ -43,12 +56,25 @@ def load_data() -> dict:
     return {"version": 1, "questions": raw["questions"], "panels": panels}
 
 
+@_synchronized
 def save_data(data: dict) -> None:
     os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    with open(DATA_FILE, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4, ensure_ascii=False)
+    temp_file = f"{DATA_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(temp_file, "w", encoding="utf-8") as file:
+            json.dump(data, file, indent=4, ensure_ascii=False)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_file, DATA_FILE)
+    finally:
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
 
 
+@_synchronized
 def get_daily_usage(user_id: int, guild_id: int) -> int:
     uid = str(user_id)
     gid = str(guild_id)
@@ -63,6 +89,7 @@ def get_daily_usage(user_id: int, guild_id: int) -> int:
     )
 
 
+@_synchronized
 def save_panel(channel_id: int, message_id: int) -> None:
     data = load_data()
     data["panels"][str(channel_id)] = {
@@ -73,15 +100,18 @@ def save_panel(channel_id: int, message_id: int) -> None:
     save_data(data)
 
 
+@_synchronized
 def get_panel(channel_id: int) -> dict | None:
     panel = load_data()["panels"].get(str(channel_id))
     return panel if isinstance(panel, dict) else None
 
 
+@_synchronized
 def list_panels() -> list[dict]:
     return [row for row in load_data()["panels"].values() if isinstance(row, dict)]
 
 
+@_synchronized
 def remove_panel(channel_id: int, message_id: int | None = None) -> None:
     data = load_data()
     panel = data["panels"].get(str(channel_id))
@@ -93,6 +123,7 @@ def remove_panel(channel_id: int, message_id: int | None = None) -> None:
     save_data(data)
 
 
+@_synchronized
 def create_question(*, author_id: int, guild_id: int, channel_id: int, content: str) -> dict | None:
     data = load_data()
     uid = str(author_id)
@@ -126,6 +157,7 @@ def create_question(*, author_id: int, guild_id: int, channel_id: int, content: 
     return record
 
 
+@_synchronized
 def finalize_question(question_id: str, message_id: int) -> None:
     data = load_data()
     record = data["questions"].get(str(question_id))
@@ -134,12 +166,14 @@ def finalize_question(question_id: str, message_id: int) -> None:
         save_data(data)
 
 
+@_synchronized
 def cancel_question(question_id: str) -> None:
     data = load_data()
     if data["questions"].pop(str(question_id), None) is not None:
         save_data(data)
 
 
+@_synchronized
 def find_question_by_message(message_id: int) -> dict | None:
     target = str(message_id)
     for record in load_data()["questions"].values():
@@ -148,6 +182,7 @@ def find_question_by_message(message_id: int) -> dict | None:
     return None
 
 
+@_synchronized
 def claim_reply_reward(
     *,
     question_id: str,
@@ -201,6 +236,7 @@ def claim_reply_reward(
     return reward
 
 
+@_synchronized
 def revoke_reply_reward(*, question_id: str, user_id: int, reply_message_id: int) -> None:
     """蛋壳入账失败时撤销占位，允许用户稍后重新回答。"""
     data = load_data()

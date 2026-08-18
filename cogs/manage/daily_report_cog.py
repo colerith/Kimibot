@@ -171,12 +171,20 @@ class ServerDailyReportCog(commands.Cog):
             except (discord.HTTPException, discord.ClientException) as error:
                 print(f"[服务器日报] 成员缓存补全失败，将使用现有缓存: error={error!r}")
 
-        await self._reconcile_guild(guild)
-        await self._send_missing_reports()
+        try:
+            await self._reconcile_guild(guild)
+        except Exception as error:
+            print(f"[服务器日报] 启动数据校准失败，将由修复任务重试: error={error!r}")
+
+        # Start repair loops even when one startup reconciliation/send fails.
         if not self._started:
             self._started = True
             self.daily_midnight_report.start()
             self.repair_missing_reports.start()
+        try:
+            await self._send_missing_reports()
+        except Exception as error:
+            print(f"[服务器日报] 启动补发失败，将由每小时修复任务重试: error={error!r}")
 
     async def _reconcile_guild(self, guild: discord.Guild) -> None:
         today = _date_cn()
@@ -295,7 +303,10 @@ class ServerDailyReportCog(commands.Cog):
 
     @tasks.loop(time=datetime.time(hour=0, minute=0, tzinfo=TZ_CN))
     async def daily_midnight_report(self):
-        await self._send_missing_reports()
+        try:
+            await self._send_missing_reports()
+        except Exception as error:
+            print(f"[服务器日报] 零点结算失败，将稍后重试: error={error!r}")
 
     @daily_midnight_report.before_loop
     async def before_daily_midnight_report(self):
@@ -303,7 +314,10 @@ class ServerDailyReportCog(commands.Cog):
 
     @tasks.loop(hours=1)
     async def repair_missing_reports(self):
-        await self._send_missing_reports()
+        try:
+            await self._send_missing_reports()
+        except Exception as error:
+            print(f"[服务器日报] 定时补发失败，将在下一轮重试: error={error!r}")
 
     @repair_missing_reports.before_loop
     async def before_repair_missing_reports(self):

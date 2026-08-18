@@ -1,3 +1,4 @@
+import asyncio
 import random
 
 import discord
@@ -27,6 +28,18 @@ EMBED_COLORS = [
 EGG_QA_PANEL_COLOR = 0x96ACA0  # 莫兰迪鼠尾草绿 / Sage Green
 
 
+async def _defer_ephemeral(interaction: discord.Interaction, source: str) -> bool:
+    """Acknowledge promptly and suppress irrecoverable expired interactions."""
+    try:
+        await interaction.response.defer(ephemeral=True)
+        return True
+    except discord.NotFound as error:
+        if getattr(error, "code", None) == 10062:
+            print(f"[{source}] 交互在处理前已过期: interaction={interaction.id}")
+            return False
+        raise
+
+
 class EggQuestionModal(discord.ui.Modal):
     def __init__(self):
         super().__init__(title="🙋‍♀️ 发起小蛋问答")
@@ -48,19 +61,24 @@ class EggQuestionModal(discord.ui.Modal):
         if len(question) < 2:
             return await interaction.response.send_message("问题至少需要 2 个字符。", ephemeral=True)
 
-        record = create_question(
+        # Discord requires an initial response within a few seconds.  Persist
+        # the question only after acknowledging the modal submission.
+        if not await _defer_ephemeral(interaction, "小蛋问答"):
+            return
+
+        record = await asyncio.to_thread(
+            create_question,
             author_id=interaction.user.id,
             guild_id=interaction.guild_id,
             channel_id=interaction.channel.id,
             content=question,
         )
         if not record:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 f"🥚 你今天已经发起了 **{DAILY_QUESTION_LIMIT} 次**问答，明天再来吧！",
                 ephemeral=True,
             )
 
-        await interaction.response.defer(ephemeral=True)
         embed = discord.Embed(
             title="💬 小蛋提问时间",
             description=f"## {question}",
@@ -86,14 +104,14 @@ class EggQuestionModal(discord.ui.Modal):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (discord.Forbidden, discord.HTTPException):
-            cancel_question(record["id"])
+            await asyncio.to_thread(cancel_question, record["id"])
             return await interaction.followup.send("❌ 问题发送失败，请检查机器人在该频道的权限。", ephemeral=True)
 
-        finalize_question(record["id"], message.id)
+        await asyncio.to_thread(finalize_question, record["id"], message.id)
         cog = interaction.client.get_cog("小蛋问答")
         if cog and interaction.channel.id == cog._bottom_channel_id():
             cog._schedule_bottom_refresh()
-        used = get_daily_usage(interaction.user.id, interaction.guild_id)
+        used = await asyncio.to_thread(get_daily_usage, interaction.user.id, interaction.guild_id)
         await interaction.followup.send(
             f"✅ 问题已发出！你今天还可以发起 **{max(0, DAILY_QUESTION_LIMIT - used)} 次**。",
             ephemeral=True,
@@ -113,13 +131,15 @@ class EggQAPanelView(discord.ui.View):
     async def start_question(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        used = get_daily_usage(interaction.user.id, interaction.guild_id)
-        if used >= DAILY_QUESTION_LIMIT:
-            return await interaction.response.send_message(
-                f"🥚 你今天已经发起了 **{DAILY_QUESTION_LIMIT} 次**问答，明天再来吧！",
-                ephemeral=True,
-            )
-        await interaction.response.send_modal(EggQuestionModal())
+        # Open the modal immediately. The authoritative quota check happens in
+        # its callback, avoiding file I/O before the interaction response.
+        try:
+            await interaction.response.send_modal(EggQuestionModal())
+        except discord.NotFound as error:
+            if getattr(error, "code", None) == 10062:
+                print(f"[小蛋问答] 打开弹窗前交互已过期: interaction={interaction.id}")
+                return
+            raise
 
 
 class EggQAEntryView(discord.ui.View):
@@ -180,7 +200,7 @@ def _is_egg_qa_panel_message(message: discord.Message) -> bool:
 
 async def deploy_egg_qa_panel(channel) -> discord.Message:
     """发送或原地更新指定频道的轻量问答入口，并清理重复入口。"""
-    panel = get_panel(channel.id)
+    panel = await asyncio.to_thread(get_panel, channel.id)
     target = None
     if panel and panel.get("message_id"):
         try:
@@ -210,7 +230,7 @@ async def deploy_egg_qa_panel(channel) -> discord.Message:
         target = await channel.send(embed=build_entry_embed(), view=EggQAEntryView())
     else:
         await target.edit(embed=build_entry_embed(), view=EggQAEntryView())
-    save_panel(channel.id, target.id)
+    await asyncio.to_thread(save_panel, channel.id, target.id)
     return target
 
 
@@ -222,7 +242,7 @@ async def refresh_bottom_egg_qa_panel(channel) -> discord.Message:
             if _is_egg_qa_panel_message(message):
                 old_messages.append(message)
     except (AttributeError, discord.Forbidden, discord.HTTPException):
-        panel = get_panel(channel.id)
+        panel = await asyncio.to_thread(get_panel, channel.id)
         if panel and panel.get("message_id"):
             try:
                 old_messages.append(await channel.fetch_message(int(panel["message_id"])))
@@ -236,5 +256,5 @@ async def refresh_bottom_egg_qa_panel(channel) -> discord.Message:
             pass
 
     message = await channel.send(embed=build_entry_embed(), view=EggQAEntryView())
-    save_panel(channel.id, message.id)
+    await asyncio.to_thread(save_panel, channel.id, message.id)
     return message

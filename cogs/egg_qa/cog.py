@@ -69,7 +69,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
     async def _refresh_saved_panels(self):
         await self.bot.wait_until_ready()
         refreshed = 0
-        saved_panels = list_panels()
+        saved_panels = await asyncio.to_thread(list_panels)
         for panel in saved_panels:
             channel_id = int(panel.get("channel_id") or 0)
             message_id = int(panel.get("message_id") or 0)
@@ -82,7 +82,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
                 await deploy_egg_qa_panel(channel)
                 refreshed += 1
             except discord.NotFound:
-                remove_panel(channel_id, message_id)
+                await asyncio.to_thread(remove_panel, channel_id, message_id)
             except (discord.Forbidden, discord.HTTPException):
                 continue
 
@@ -132,7 +132,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
         referenced_id = message.reference.message_id
         if not referenced_id:
             return
-        question = find_question_by_message(referenced_id)
+        question = await asyncio.to_thread(find_question_by_message, referenced_id)
         if not question:
             return
         if question.get("guild_id") != str(message.guild.id):
@@ -141,7 +141,8 @@ class EggQACog(commands.Cog, name="小蛋问答"):
             return
         is_self_answer = question.get("author_id") == str(message.author.id)
 
-        reward = claim_reply_reward(
+        reward = await asyncio.to_thread(
+            claim_reply_reward,
             question_id=question["id"],
             user_id=message.author.id,
             reply_message_id=message.id,
@@ -152,7 +153,8 @@ class EggQACog(commands.Cog, name="小蛋问答"):
 
         amount = int(reward["amount"])
         try:
-            credited = grant_monthly_eligible_reward(
+            credited = await asyncio.to_thread(
+                grant_monthly_eligible_reward,
                 message.author.id,
                 message.guild.id,
                 amount,
@@ -169,7 +171,8 @@ class EggQACog(commands.Cog, name="小蛋问答"):
                     f"base={amount} bonus={monthly_bonus} total={credited.get('amount')}"
                 )
         except Exception as error:
-            revoke_reply_reward(
+            await asyncio.to_thread(
+                revoke_reply_reward,
                 question_id=question["id"],
                 user_id=message.author.id,
                 reply_message_id=message.id,

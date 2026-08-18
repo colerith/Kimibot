@@ -1137,7 +1137,13 @@ class RoleClaimSelect(discord.ui.Select):
         return True
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound as error:
+            if getattr(error, "code", None) == 10062:
+                print(f"[身份装饰] 交互在处理前已过期: interaction={interaction.id}")
+                return
+            raise
         try:
             role_id = int(self.values[0])
             target_role = interaction.guild.get_role(role_id)
@@ -1148,7 +1154,7 @@ class RoleClaimSelect(discord.ui.Select):
             return await interaction.followup.send("装饰已下架或失效", ephemeral=True)
 
         # 1. 判断身份组类型
-        data = load_role_data()
+        data = await asyncio.to_thread(load_role_data)
         claimable_ids = data.get("claimable_roles", [])
         lottery_ids = data.get("lottery_roles", [])
         redeem_ids = data.get("redeem_roles", [])
