@@ -1858,7 +1858,9 @@ def _sum_tx(rows: list[dict], *, sources: set[str] | None = None, prefixes: tupl
             total += float(tx.get("amount", 0) or 0)
         except (TypeError, ValueError):
             continue
-    return total
+    # All shell rewards use one decimal place. Normalize after aggregation so
+    # values displayed as 15.0 are not internally 14.999999999999998.
+    return round(total, 1)
 
 
 def _sum_tx_base(rows: list[dict], *, sources: set[str] | None = None, prefixes: tuple[str, ...] = ()) -> float:
@@ -1878,7 +1880,7 @@ def _sum_tx_base(rows: list[dict], *, sources: set[str] | None = None, prefixes:
             total += float(amount or 0)
         except (TypeError, ValueError):
             continue
-    return total
+    return round(total, 1)
 
 
 def _has_today_tx(rows: list[dict], *, source: str, reason_contains: str | None = None) -> bool:
