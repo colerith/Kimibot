@@ -4,7 +4,7 @@ import datetime
 from config import IDS, STYLE, QUOTA
 from .utils import (
     STRINGS, SPECIFIC_REVIEWER_ID, get_ticket_info,
-    execute_archive, load_quota_data, save_quota_data
+    execute_archive, load_quota_data, save_quota_data, send_approved_archive_dm
 )
 
 # --- 模态框: 填写归档备注 ---
@@ -74,11 +74,21 @@ class ArchiveRequestView(discord.ui.View):
         # 移除用户权限
         info = get_ticket_info(interaction.channel)
         cid = info.get("创建者ID")
+        archived_member = None
         if cid:
             mem = interaction.guild.get_member(int(cid))
             if mem:
                 await interaction.channel.set_permissions(mem, read_messages=False)
                 await interaction.channel.send("🔒 频道已锁定。")
+                archived_member = mem
+
+        if archived_member:
+            await send_approved_archive_dm(
+                archived_member,
+                interaction.guild,
+                info.get("工单ID"),
+                automatic=False,
+            )
 
     @discord.ui.button(label="已申请加群", style=discord.ButtonStyle.primary, custom_id="req_archive_1")
     async def btn_Applied(self, button, interaction): await self.process(interaction, "已申请加群")

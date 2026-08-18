@@ -15,6 +15,54 @@ QUIZ_DURATION = 120
 QUIZ_SETTLEMENT_GRACE = 10
 QUIZ_LOG_CHANNEL_ID = IDS.get("QUIZ_LOG_CHANNEL_ID")
 PUBLIC_RESULT_CHANNEL_ID = 1452485785939869808
+MANUAL_REVIEW_URL = "https://discord.com/channels/1397629012292931726/1417572579304013885"
+
+
+def build_newbie_approved_dm(member: discord.Member, guild: discord.Guild, score: int) -> discord.Embed:
+    """Build the private welcome card sent after the entrance quiz passes."""
+    embed = discord.Embed(
+        title="🐣 欢迎成为新兵蛋子！",
+        description=(
+            f"嗨，**{member.display_name}**！你已经顺利通过 **{guild.name}** 的入站答题。\n"
+            "【新兵蛋子】身份已发放，基础社区权限现已解锁啦 ✨"
+        ),
+        color=STYLE.get("KIMI_YELLOW", 0xF7C873),
+    )
+    embed.add_field(
+        name="🎉 本次答题",
+        value=f"最终得分：**{score}/100**\n身份状态：✅ 已通过并发放",
+        inline=False,
+    )
+    embed.add_field(
+        name="🔓 想解锁更多内容？（可选）",
+        value=(
+            "人工审核是用于申请更多社区权限的**自愿选项，并不是必须步骤**。\n"
+            "不参加人工审核也不会影响你已经获得的【新兵蛋子】身份和现有权限。\n\n"
+            f"如果之后有需要，可以前往 [人工审核入口]({MANUAL_REVIEW_URL}) 查看说明。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="💛 温馨提醒",
+        value="记得阅读频道说明和社区守则；慢慢逛、开心玩就好～",
+        inline=False,
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text="人工审核完全自愿 · 不申请不会影响当前的新兵蛋子身份")
+    return embed
+
+
+def build_manual_review_link_view() -> discord.ui.View:
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(
+            label="前往人工审核入口（可选）",
+            emoji="🔎",
+            style=discord.ButtonStyle.link,
+            url=MANUAL_REVIEW_URL,
+        )
+    )
+    return view
 
 class WelcomeCog(commands.Cog):
     def __init__(self, bot):
@@ -45,8 +93,8 @@ class WelcomeCog(commands.Cog):
             description=f"你好呀，{member.mention}！\n\n"
                         f"🚪 **第一步：获取基础权限**\n"
                         f"请前往 <#{quiz_channel_id}> 参与答题，答对后即可获得【新兵蛋子】身份。\n\n"
-                        f"🔑 **第二步：解锁全区**\n"
-                        f"如需访问更多内容，请前往 <#{ticket_channel_id}> 申请人工审核。\n\n"
+                        f"🔑 **可选：解锁更多内容**\n"
+                        f"人工审核并非必须；如有需要，可前往 <#{ticket_channel_id}> 申请更多社区权限。\n\n"
                         f"祝你玩得开心捏！✨",
             color=STYLE["KIMI_YELLOW"]
         )
@@ -108,6 +156,7 @@ class WelcomeCog(commands.Cog):
             color=0x00FF00 if passed else 0xFF0000
         )
 
+        approved_member = None
         if passed:
             embed.description += "\n\n🎉 **恭喜通过！**\n✅ 已自动获得【新兵蛋子】身份组，并解锁部分频道。"
             role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
@@ -115,6 +164,7 @@ class WelcomeCog(commands.Cog):
                 try:
                     member = interaction.guild.get_member(user_id) or await interaction.guild.fetch_member(user_id)
                     await member.add_roles(role, reason="自助答题通过")
+                    approved_member = member
                 except Exception as e:
                     print(f"为用户 {user_id} 添加身份组失败: {e}")
         else:
@@ -145,6 +195,18 @@ class WelcomeCog(commands.Cog):
             except Exception as final_e:
                 print(f"最终发送答题结果失败: {final_e}")
         # --- 修改结束 ---
+
+        # 先完成答题交互，再发送私信，避免私信接口延迟影响结果页面。
+        if passed and approved_member:
+            try:
+                await approved_member.send(
+                    embed=build_newbie_approved_dm(approved_member, interaction.guild, score),
+                    view=build_manual_review_link_view(),
+                )
+            except discord.Forbidden:
+                print(f"无法发送新兵蛋子通过私信: user={user_id} reason=dm_closed")
+            except discord.HTTPException as error:
+                print(f"发送新兵蛋子通过私信失败: user={user_id} error={error!r}")
 
         # 发送日志的逻辑保持不变
         self._send_public_log(interaction, user_id, score, passed, is_timeout, details)

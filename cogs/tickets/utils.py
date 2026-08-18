@@ -12,6 +12,70 @@ SPECIFIC_REVIEWER_ID = 1452321798308888776
 TIMEOUT_HOURS_ARCHIVE = 6
 TIMEOUT_HOURS_REMIND = 3
 STRINGS_PATH = os.path.join(os.path.dirname(__file__), 'strings.json')
+QQ_GROUP_QR_URL = "https://discord.com/channels/1397629012292931726/1520276633498419220"
+
+
+def build_approved_archive_dm(member, guild, ticket_id, *, automatic=False):
+    """Build the DM sent after an approved audit ticket is archived."""
+    archive_note = (
+        "由于等待确认超时，系统已经自动完成归档。"
+        if automatic
+        else "你已完成最后确认，审核工单现已安全归档。"
+    )
+    embed = discord.Embed(
+        title="📦 人工审核工单已归档",
+        description=(
+            f"嗨，**{member.display_name}**！你在 **{guild.name}** 的人工审核流程已经全部完成。\n"
+            f"{archive_note} 已获得的正式成员身份和社区权限不会受到影响。"
+        ),
+        color=0x8FA8C7,
+    )
+    embed.add_field(name="🧾 工单编号", value=f"`{ticket_id}`", inline=False)
+    embed.add_field(
+        name="💬 还想加入 QQ 闲聊群？",
+        value=(
+            "如果你还想加入社区 QQ 闲聊群，可以前往 "
+            f"[QQ群二维码领取频道]({QQ_GROUP_QR_URL}) 获取最新二维码。\n"
+            "加入闲聊群是可选的，不会影响你的 Discord 社区权限。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="💛 欢迎常来玩",
+        value="审核辛苦啦！之后请继续遵守社区守则，祝你玩得开心～",
+        inline=False,
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text="审核流程已完成 · 正式成员权限继续有效")
+    return embed
+
+
+def build_qq_group_link_view():
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(
+            label="前往获取 QQ 群二维码",
+            emoji="💬",
+            style=discord.ButtonStyle.link,
+            url=QQ_GROUP_QR_URL,
+        )
+    )
+    return view
+
+
+async def send_approved_archive_dm(member, guild, ticket_id, *, automatic=False):
+    """Send an approved-ticket archive DM without affecting the archive flow."""
+    try:
+        await member.send(
+            embed=build_approved_archive_dm(member, guild, str(ticket_id or "未知"), automatic=automatic),
+            view=build_qq_group_link_view(),
+        )
+        return True
+    except discord.Forbidden:
+        print(f"无法发送审核归档私信: user={member.id} reason=dm_closed")
+    except discord.HTTPException as error:
+        print(f"发送审核归档私信失败: user={member.id} error={error!r}")
+    return False
 
 # --- 文本加载 ---
 def load_strings():

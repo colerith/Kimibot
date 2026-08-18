@@ -13,7 +13,8 @@ import os
 from config import IDS, QUOTA, STYLE
 from .utils import (
     STRINGS, SPECIFIC_REVIEWER_ID, TIMEOUT_HOURS_ARCHIVE, TIMEOUT_HOURS_REMIND,
-    is_reviewer_egg, get_ticket_info, load_quota_data, save_quota_data, execute_archive
+    is_reviewer_egg, get_ticket_info, load_quota_data, save_quota_data, execute_archive,
+    send_approved_archive_dm,
 )
 from .views import (
     TicketActionView, TimeoutOptionView, ArchiveRequestView,
@@ -22,6 +23,126 @@ from .views import (
 
 # --- 持久化工具函数 (新增) ---
 AUDIT_SCHEDULE_FILE = "data/audit_schedule.json"
+
+
+def build_ticket_created_dm(
+    user: discord.Member,
+    guild: discord.Guild,
+    channel: discord.TextChannel,
+    ticket_id: str,
+) -> discord.Embed:
+    """Build the private confirmation card for a newly created audit ticket."""
+    embed = discord.Embed(
+        title="🎫 人工审核工单创建成功",
+        description=(
+            f"嗨，**{user.display_name}**！你在 **{guild.name}** 的专属审核工单已经准备好啦。\n"
+            "请只在自己的工单频道内查看要求并提交审核材料。"
+        ),
+        color=STYLE.get("KIMI_YELLOW", 0xF7C873),
+    )
+    embed.add_field(
+        name="📌 工单信息",
+        value=(
+            f"工单编号：`{ticket_id}`\n"
+            f"专属频道：[点击进入 {channel.name}]({channel.jump_url})"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📝 接下来这样做",
+        value=(
+            "**1.** 进入工单，仔细阅读完整审核要求\n"
+            "**2.** 按要求准备截图、录屏与语音材料\n"
+            "**3.** 确认材料无误后，在工单内通知审核小蛋"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⏰ 提交时间",
+        value=(
+            "建议在创建后 **6 小时内**提交，当日最晚提交时间为 **北京时间 23:30**。\n"
+            "暂时无法完成时，可在工单内选择 **放弃审核**；以后仍可重新申请。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔒 隐私提醒",
+        value="审核材料可能包含个人信息，请做好必要打码，且不要发送到工单以外的频道。",
+        inline=False,
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.set_footer(text=f"工单 #{ticket_id} · 请保留这条私信，方便随时返回")
+    return embed
+
+
+def build_ticket_link_view(channel: discord.TextChannel) -> discord.ui.View:
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(
+            label="立即进入我的审核工单",
+            emoji="➡️",
+            style=discord.ButtonStyle.link,
+            url=channel.jump_url,
+        )
+    )
+    return view
+
+
+def build_ticket_approved_dm(
+    user: discord.Member,
+    guild: discord.Guild,
+    channel: discord.TextChannel,
+    ticket_id: str,
+) -> discord.Embed:
+    """Build the private confirmation card for a successfully approved audit."""
+    embed = discord.Embed(
+        title="🎉 人工审核顺利通过！",
+        description=(
+            f"恭喜你，**{user.display_name}**！你在 **{guild.name}** 的人工审核已经完成。\n"
+            "正式成员身份已发放，更多社区内容现已解锁啦 ✨"
+        ),
+        color=0x73C991,
+    )
+    embed.add_field(
+        name="🧾 工单编号",
+        value=f"`{ticket_id}`",
+        inline=False,
+    )
+    embed.add_field(
+        name="✅ 当前状态",
+        value="审核结果：**已通过**\n身份状态：**正式成员身份已更新**",
+        inline=False,
+    )
+    embed.add_field(
+        name="📮 最后一步",
+        value=(
+            f"请返回 [审核工单频道]({channel.jump_url}) 查看通过说明，并完成最后的归档确认。\n"
+            "如果暂时没有确认，系统会在等待一段时间后自动归档；已获得的身份和权限不会受影响。"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="💛 欢迎加入",
+        value="感谢你的配合！记得遵守社区守则，祝你在社区玩得开心～",
+        inline=False,
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.set_footer(text="权限已生效 · 请回到工单完成最后确认")
+    return embed
+
+
+def build_ticket_approved_link_view(channel: discord.TextChannel) -> discord.ui.View:
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(
+            label="返回工单完成确认",
+            emoji="✅",
+            style=discord.ButtonStyle.link,
+            url=channel.jump_url,
+        )
+    )
+    return view
+
 
 def load_audit_schedule():
     if not os.path.exists(AUDIT_SCHEDULE_FILE):
@@ -244,10 +365,16 @@ class Tickets(commands.Cog):
 
             # 私信通知
             try:
-                msg = STRINGS["messages"]["dm_create_success"].format(guild_name=interaction.guild.name, channel_mention=ch.mention)
-                await interaction.user.send(msg)
+                await interaction.user.send(
+                    embed=build_ticket_created_dm(interaction.user, interaction.guild, ch, str(tid)),
+                    view=build_ticket_link_view(ch),
+                )
                 msg_status = STRINGS["messages"]["dm_status_ok"]
-            except:
+            except discord.Forbidden:
+                print(f"无法发送工单创建私信: user={interaction.user.id} reason=dm_closed")
+                msg_status = STRINGS["messages"]["dm_status_fail"]
+            except discord.HTTPException as error:
+                print(f"发送工单创建私信失败: user={interaction.user.id} error={error!r}")
                 msg_status = STRINGS["messages"]["dm_status_fail"]
 
             await interaction.followup.send(f"好惹！你的审核频道 {ch.mention} 已经创建好惹！审核要求已发送到频道内~ {msg_status}", ephemeral=True)
@@ -289,18 +416,25 @@ class Tickets(commands.Cog):
         if user:
             r_new = guild.get_role(IDS["VERIFICATION_ROLE_ID"])
             r_done = guild.get_role(IDS["HATCHED_ROLE_ID"])
+            roles_updated = False
             try:
                 if r_new: await user.remove_roles(r_new, reason="审核通过")
                 if r_done: await user.add_roles(r_done, reason="审核通过")
-
-                # 私信
-                dm_data = STRINGS["embeds"]["dm_approved"]
-                content = dm_data["desc_template"].format(user_name=user.name, guild_name=guild.name)
-                em = discord.Embed(title=dm_data["title"], description=content, color=STYLE.get("KIMI_YELLOW", 0xFFFF00))
-                em.add_field(name="🔗 前往工单频道", value=channel.mention, inline=False)
-                await user.send(embed=em)
+                roles_updated = True
             except Exception as e:
-                print(f"给身份或私信失败: {e}")
+                print(f"审核通过后更新身份失败: user={user.id} error={e!r}")
+
+            if roles_updated:
+                try:
+                    ticket_id = str(info.get("工单ID") or "未知")
+                    await user.send(
+                        embed=build_ticket_approved_dm(user, guild, channel, ticket_id),
+                        view=build_ticket_approved_link_view(channel),
+                    )
+                except discord.Forbidden:
+                    print(f"无法发送审核通过私信: user={user.id} reason=dm_closed")
+                except discord.HTTPException as error:
+                    print(f"发送审核通过私信失败: user={user.id} error={error!r}")
 
         # 2. 移动频道到二审(已过审)分类
         cat2 = guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
@@ -499,42 +633,33 @@ class Tickets(commands.Cog):
                     # 1. 处理：已过审但在等待确认 (1小时处理)
                     if is_approved_waiting and diff_approved > datetime.timedelta(hours=1):
 
-                        # a. 尝试发送 DM 私信通知 (新增功能)
-                        if member:
-                            try:
-                                dm_embed = discord.Embed(
-                                    title="✨ 工单自动归档通知",
-                                    description=(
-                                        f"亲爱的小宝，您在 **{channel.guild.name}** 的审核工单 **{channel.name}** "
-                                        f"已通过审核。\n\n"
-                                        f"由于超过 1 小时未确认，系统已自动将其归档保存。\n"
-                                        f"您现在的身份组应该已经更新啦，欢迎正式加入我们！🎉"
-                                    ),
-                                    color=0x4CAF50  # 柔和的绿色
-                                )
-                                dm_embed.set_footer(text=f"工单ID: {tid} | 操作时间: {now.strftime('%Y-%m-%d %H:%M')}")
-                                await member.send(embed=dm_embed)
-                            except discord.Forbidden:
-                                print(f"无法发送私信给用户 {member.display_name} (ID: {member.id}) - 可能已关闭私信")
-                            except Exception as e:
-                                print(f"发送私信时发生未知错误: {e}")
-
-                        # b. 频道内提示
+                        # a. 频道内提示
                         await channel.send("✅ **自动完成**\n检测到通过审核后超过 **1小时** 未操作，系统已默认处理并归档。")
 
-                        # c. 锁定权限
+                        # b. 锁定权限
                         if member:
                             try:
                                 await channel.set_permissions(member, send_messages=False)
                             except Exception as e:
                                 print(f"锁定权限失败 {channel.name}: {e}")
 
-                        # d. 移动到归档分类
+                        # c. 移动到归档分类
+                        archive_completed = False
                         if archive_cat:
                             try:
-                                await channel.edit(category=archive_cat, reason="已过审3小时无响应自动完成")
+                                await channel.edit(category=archive_cat, reason="已过审1小时无响应自动完成")
+                                archive_completed = True
                             except Exception as e:
                                 print(f"移动频道失败 {channel.name}: {e}")
+
+                        # d. 归档完成后发送统一私信通知
+                        if member and archive_completed:
+                            await send_approved_archive_dm(
+                                member,
+                                channel.guild,
+                                tid,
+                                automatic=True,
+                            )
 
                         # 保持原名，不发归档报告
                         continue
