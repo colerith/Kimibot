@@ -2412,8 +2412,8 @@ class RoleClaimView(discord.ui.View):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
         try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+            await interaction.response.send_message("🥚 正在结算今日报到，请稍候……", ephemeral=True)
+        except (discord.NotFound, discord.HTTPException):
             return
 
         reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
@@ -2427,9 +2427,9 @@ class RoleClaimView(discord.ui.View):
                 )
         except Exception as error:
             print(f"[小蛋报到] 签到结算失败: user={interaction.user.id} error={error}")
-            return await interaction.followup.send(
+            return await self._finish_sign_in_response(
+                interaction,
                 "❌ 报到结算失败，请稍后再试；本次不会重复扣除或发放蛋壳。",
-                ephemeral=True,
             )
 
         rules_text = await asyncio.to_thread(_rules_text)
@@ -2465,7 +2465,7 @@ class RoleClaimView(discord.ui.View):
                 f"{rules_text}"
             )
 
-        await interaction.followup.send(text, ephemeral=True)
+        await self._finish_sign_in_response(interaction, text)
 
         # Reply first, then queue a coalesced refresh of the public leaderboard.
         if result.get("success"):
@@ -2473,6 +2473,22 @@ class RoleClaimView(discord.ui.View):
                 interaction.guild,
                 interaction.client.user.display_avatar.url if interaction.client.user else None,
             )
+
+    @staticmethod
+    async def _finish_sign_in_response(interaction: discord.Interaction, text: str) -> None:
+        try:
+            await interaction.edit_original_response(content=text)
+            return
+        except (discord.NotFound, discord.HTTPException) as error:
+            print(
+                "[小蛋报到] 交互结果更新失败，尝试私信补发: "
+                f"user={interaction.user.id} error={error}"
+            )
+
+        try:
+            await interaction.user.send(text)
+        except (discord.Forbidden, discord.HTTPException):
+            return
 
     @discord.ui.button(label="每日任务", style=discord.ButtonStyle.secondary, emoji="📒", custom_id="role_main_daily_tasks", row=0)
     async def daily_tasks_callback(self, button, interaction: discord.Interaction):
