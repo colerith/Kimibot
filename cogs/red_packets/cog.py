@@ -9,6 +9,17 @@ from . import storage
 
 MAX_PACKET_COUNT = 50
 MIN_PACKET_UNIT = 0.1
+RED_PACKET_IMAGE_URL = (
+    "https://i.postimg.cc/kMKjMnc1/"
+    "qi-mi-dan-hong-bao-feng-mian-2-cong-cong-da-wang123-lai-zi-xiao-hong-shu-wang-ye-ban.jpg"
+)
+
+
+def _build_claim_progress(claimed_count: int, count: int) -> str:
+    progress_units = 10
+    ratio = claimed_count / count if count > 0 else 0
+    filled_units = max(0, min(progress_units, round(ratio * progress_units)))
+    return f"{'▰' * filled_units}{'▱' * (progress_units - filled_units)}  **{claimed_count}/{count}**"
 
 
 def is_admin_packet_sender(member) -> bool:
@@ -23,34 +34,53 @@ def build_packet_embed(packet: dict, *, closed_note: str | None = None) -> disco
     admin_free = bool(packet.get("admin_free"))
     status = packet.get("status", "active")
 
-    title = "小蛋红包"
+    title = "🧧 奇米蛋红包来啦！"
+    color = 0xED4245
+    footer_text = "点击下方按钮领取 · 每人限领一次 · 24 小时后自动结束"
     if status == "empty":
-        title = "小蛋红包已抢完"
+        title = "🎉 红包已被抢光"
+        color = 0xF0B232
+        footer_text = "手慢啦，这个红包已经被大家抢完了"
     elif status == "expired":
-        title = "小蛋红包已过期"
+        title = "⌛ 红包已经过期"
+        color = 0x747F8D
+        footer_text = "红包已结束，未领取部分已按规则处理"
 
-    desc = [
-        packet.get("message") or "奇米蛋抱着红包跑来啦。",
-        "",
-        f"发送者：<@{packet.get('sender_id')}>",
-        f"红包金额：**{storage.format_shells(packet.get('total_amount', 0))}** 蛋壳",
-        f"红包数量：**{count}** 个",
-        f"领取进度：**{claimed_count}/{count}**",
-        f"剩余蛋壳：**{storage.format_shells(remaining_amount)}**",
-        f"过期时间：`{packet.get('expires_at', '')}` 北京时间",
-    ]
-    if admin_free:
-        desc.append("类型：管理员福利红包")
-    if closed_note:
-        desc.append("")
-        desc.append(closed_note)
+    expires_timestamp = int(storage.parse_time(packet.get("expires_at", "")).timestamp())
+    message = packet.get("message") or "奇米蛋抱着红包跑来啦。"
+    admin_badge = "\n\n✨ **管理员福利红包 · 免费发放**" if admin_free else ""
 
     embed = discord.Embed(
         title=title,
-        description="\n".join(desc),
-        color=0xF05A5A if status == "active" else 0xA0AAB0,
+        description=f"> {message}\n\n来自 <@{packet.get('sender_id')}> 的小小心意{admin_badge}",
+        color=color,
     )
-    embed.set_footer(text="发送者本人不能领取；24小时后自动清理未领取部分。")
+    embed.add_field(
+        name="💰 红包总额",
+        value=f"**{storage.format_shells(packet.get('total_amount', 0))}** 蛋壳",
+        inline=True,
+    )
+    embed.add_field(name="🧧 红包数量", value=f"**{count}** 个", inline=True)
+    embed.add_field(
+        name="🥚 剩余蛋壳",
+        value=f"**{storage.format_shells(remaining_amount)}**",
+        inline=True,
+    )
+    embed.add_field(
+        name="📊 领取进度",
+        value=_build_claim_progress(claimed_count, count),
+        inline=False,
+    )
+    embed.add_field(
+        name="⏰ 结束时间",
+        value=f"<t:{expires_timestamp}:F>（<t:{expires_timestamp}:R>）",
+        inline=False,
+    )
+    if closed_note:
+        embed.add_field(name="📌 处理结果", value=closed_note, inline=False)
+
+    embed.set_image(url=RED_PACKET_IMAGE_URL)
+    embed.set_footer(text=footer_text)
     return embed
 
 

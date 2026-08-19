@@ -154,12 +154,12 @@ def _spoiler(text: str, enabled: bool) -> str:
     return f"||{text.replace('||', '')}||"
 
 
-def _image_urls_text(urls: list[str], spoiler: bool) -> str:
-    if not urls:
-        return ""
-    lines = [f"{index + 1}. {url}" for index, url in enumerate(urls[:9])]
-    text = "\n".join(lines)
-    return _spoiler(text, spoiler)
+def _embedded_attachment_url(attachments) -> str | None:
+    """Return an attachment:// URL so Discord hides the hero image from the file list."""
+    if not attachments:
+        return None
+    filename = str(getattr(attachments[0], "filename", "") or "")
+    return f"attachment://{filename}" if filename else None
 
 
 def _clamp_comment_page(record: dict, comments: list[dict]) -> int:
@@ -217,7 +217,7 @@ def build_panel_embed() -> discord.Embed:
     return embed
 
 
-def build_submission_embed(record: dict) -> discord.Embed:
+def build_submission_embed(record: dict, *, image_url: str | None = None) -> discord.Embed:
     kind = record.get("kind", "")
     fields = record.get("fields", {})
     content_type = str(fields.get("content_type", "sfw")).lower()
@@ -230,39 +230,48 @@ def build_submission_embed(record: dict) -> discord.Embed:
         embed_color = BUG_SUBMISSION_COLOR
     else:
         embed_color = REPO_SUBMISSION_COLOR
+    kind_icon = {
+        KIND_RECOMMENDATION: "🌟",
+        KIND_BUG: "🐞",
+        KIND_REPO: "📦",
+    }.get(kind, "🥚")
+    status_label = {
+        "open": "🟢 收集中",
+        "closed": "⚪ 已关闭",
+        "deleted": "⚪ 已删除",
+    }.get(str(record.get("status", "open")), str(record.get("status", "open")))
+    type_label = "🔞 NSFW" if is_nsfw else "🌿 SFW"
+
     embed = discord.Embed(
-        title=f"🥚 {_kind_label(kind)}投稿 · {_spoiler(str(title), is_nsfw)}",
+        title=f"{kind_icon} {_kind_label(kind)}投稿｜{_spoiler(str(title), is_nsfw)}",
         color=embed_color,
     )
-    embed.add_field(name="投稿人", value=f"<@{record.get('author_id')}>", inline=True)
-    embed.add_field(name="状态", value=record.get("status", "open"), inline=True)
+    embed.add_field(name="👤 投稿人", value=f"<@{record.get('author_id')}>", inline=True)
+    embed.add_field(name="📌 状态", value=status_label, inline=True)
     if kind != KIND_BUG:
-        embed.add_field(name="类型", value=content_type, inline=True)
+        embed.add_field(name="🛡️ 内容分级", value=type_label, inline=True)
     if kind == KIND_RECOMMENDATION:
-        embed.add_field(name="领域", value=str(fields.get("domain", "其他类型")), inline=True)
+        embed.add_field(name="🗂️ 安利领域", value=str(fields.get("domain", "其他类型")), inline=True)
     content = str(fields.get("content", "") or "没有填写内容")
-    embed.add_field(name="内容", value=_content_preview(content, is_nsfw)[:1024], inline=False)
+    embed.add_field(name="📝 投稿内容", value=_content_preview(content, is_nsfw)[:1024], inline=False)
     image_urls = record.get("attachments", [])
-    if isinstance(image_urls, list) and image_urls:
-        if is_nsfw:
-            embed.add_field(name="图片", value=_image_urls_text(image_urls, True)[:1024], inline=False)
-        else:
-            embed.set_image(url=str(image_urls[0]))
-            if len(image_urls) > 1:
-                embed.add_field(name="更多图片", value=_image_urls_text(image_urls[1:], False)[:1024], inline=False)
+    if image_url:
+        embed.set_image(url=image_url)
+    elif isinstance(image_urls, list) and image_urls and not is_nsfw:
+        embed.set_image(url=str(image_urls[0]))
 
     replies = record.get("replies", [])
     if replies:
         latest = replies[-1]
         embed.add_field(
-            name="服主回复",
+            name="💌 服主回复",
             value=f"**{latest.get('user_name', '服主')}：** {str(latest.get('content', ''))[:900]}",
             inline=False,
         )
 
     if kind == KIND_RECOMMENDATION:
         useful_count = len(record.get("useful_user_ids", []) if isinstance(record.get("useful_user_ids", []), list) else [])
-        embed.add_field(name="觉得有用", value=f"{useful_count} 人", inline=True)
+        embed.add_field(name="👍 觉得有用", value=f"**{useful_count}** 人", inline=True)
         comments = record.get("comments", []) if isinstance(record.get("comments", []), list) else []
         if comments:
             page = _clamp_comment_page(record, comments)
@@ -283,7 +292,7 @@ def build_submission_embed(record: dict) -> discord.Embed:
             )
 
     total_reward = float(record.get("base_reward", 0) or 0) + float(record.get("extra_reward", 0) or 0)
-    embed.set_footer(text=f"投稿ID: {record.get('id')} · 已奖励 {format_shells(total_reward)} 蛋壳")
+    embed.set_footer(text=f"投稿 #{record.get('id')} · 已奖励 {format_shells(total_reward)} 蛋壳")
     return embed
 
 
@@ -334,7 +343,6 @@ async def _publish_or_update_submission_unlocked(client, record: dict, attachmen
 
     old_channel_id = int(record.get("channel_id") or 0)
     old_message_id = int(record.get("message_id") or 0)
-    embed = build_submission_embed(record)
     view = _view_for_record(record)
     content_type = str(record.get("fields", {}).get("content_type", "sfw")).lower()
     files = await _attachments_to_files(attachments or [], spoiler=content_type == "nsfw")
@@ -344,6 +352,10 @@ async def _publish_or_update_submission_unlocked(client, record: dict, attachmen
     if old_channel_id == channel_id and old_message_id and not force_resend:
         try:
             message = await channel.fetch_message(old_message_id)
+            embed = build_submission_embed(
+                record,
+                image_url=_embedded_attachment_url(message.attachments),
+            )
             await message.edit(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
             return record, "updated"
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
@@ -357,6 +369,7 @@ async def _publish_or_update_submission_unlocked(client, record: dict, attachmen
         except Exception:
             pass
 
+    embed = build_submission_embed(record, image_url=_embedded_attachment_url(files))
     message = await channel.send(embed=embed, view=view, files=files, allowed_mentions=discord.AllowedMentions.none())
     record["channel_id"] = str(channel.id)
     record["message_id"] = str(message.id)
@@ -364,7 +377,14 @@ async def _publish_or_update_submission_unlocked(client, record: dict, attachmen
         record["attachments"] = [att.url for att in message.attachments[:9]]
         save_submission(record)
         try:
-            await message.edit(embed=build_submission_embed(record), view=view, allowed_mentions=discord.AllowedMentions.none())
+            await message.edit(
+                embed=build_submission_embed(
+                    record,
+                    image_url=_embedded_attachment_url(message.attachments),
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except discord.HTTPException:
             pass
     save_submission(record)
@@ -384,7 +404,10 @@ async def refresh_all_submission_panels(client) -> dict:
             channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
             message = await channel.fetch_message(message_id)
             await message.edit(
-                embed=build_submission_embed(record),
+                embed=build_submission_embed(
+                    record,
+                    image_url=_embedded_attachment_url(message.attachments),
+                ),
                 view=_view_for_record(record),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -1109,7 +1132,10 @@ class RecommendationActionView(discord.ui.View):
         record["comment_page"] = min(max(page + delta, 0), max_page)
         save_submission(record)
         await interaction.message.edit(
-            embed=build_submission_embed(record),
+            embed=build_submission_embed(
+                record,
+                image_url=_embedded_attachment_url(interaction.message.attachments),
+            ),
             view=RecommendationActionView(record),
             allowed_mentions=discord.AllowedMentions.none(),
         )
