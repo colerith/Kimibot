@@ -157,6 +157,15 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
                     ephemeral=True,
                 )
                 return
+
+        # Acknowledge the command before writing points and packet data. This also
+        # guarantees that an expired interaction never deducts the sender's balance.
+        try:
+            await ctx.defer()
+        except discord.NotFound:
+            return
+
+        if not admin_free:
             modify_user_points(
                 ctx.author.id,
                 -amount,
@@ -181,12 +190,11 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
         self._registered_packet_ids.add(packet["id"])
 
         try:
-            await ctx.respond(
+            response = await ctx.interaction.edit_original_response(
                 embed=build_packet_embed(packet),
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            response = await ctx.interaction.original_response()
             storage.set_packet_message(packet["id"], response.id)
         except discord.HTTPException:
             storage.mark_packet_cancelled(packet["id"])
@@ -201,8 +209,18 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             raise
 
     async def handle_claim(self, interaction: discord.Interaction, packet_id: str):
+        # Discord requires component interactions to be acknowledged within a few
+        # seconds. Claiming touches both红包 and points storage, so defer before any
+        # synchronous I/O and send the result through the follow-up webhook.
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except (discord.NotFound, discord.HTTPException):
+            # The interaction may already have expired (for example during an
+            # event-loop stall). Do not mutate balances when no reply is possible.
+            return
+
         if not interaction.guild:
-            await interaction.response.send_message("红包只能在服务器里领取哦。", ephemeral=True)
+            await self._send_claim_result(interaction, "红包只能在服务器里领取哦。")
             return
 
         result = storage.claim_packet(packet_id, interaction.user.id)
@@ -221,7 +239,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             else:
                 text = "这个红包找不到了，可能已经被清理。"
 
-            await interaction.response.send_message(text, ephemeral=True)
+            await self._send_claim_result(interaction, text)
             if packet:
                 if reason == "expired":
                     await self._refund_expired_packet(packet)
@@ -238,12 +256,21 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             reason=f"packet={packet_id}",
         )
 
-        await interaction.response.send_message(
+        await self._send_claim_result(
+            interaction,
             f"抢到 **{storage.format_shells(amount)}** 蛋壳！"
             f" 当前余额：**{storage.format_shells(balance)}**。",
-            ephemeral=True,
         )
         await self._refresh_packet_message(packet)
+
+    @staticmethod
+    async def _send_claim_result(interaction: discord.Interaction, text: str) -> None:
+        try:
+            await interaction.followup.send(text, ephemeral=True)
+        except (discord.NotFound, discord.HTTPException):
+            # A follow-up token can also expire if the process was blocked for an
+            # unusually long time. The claim itself is already safely persisted.
+            return
 
     @tasks.loop(minutes=30)
     async def cleanup_expired_packets(self):
