@@ -41,6 +41,7 @@ RECOMMENDATION_CHANNEL_ID = 1536024803587137536
 
 DOMAIN_OPTIONS = ["酒馆好物", "书籍安利", "影视安利", "音乐安利", "游戏安利", "便利生活", "其他类型"]
 TYPE_OPTIONS = ["sfw", "nsfw"]
+REPO_TYPE_OPTIONS = ["预设", "角色卡", "脚本", "美化", "其他"]
 COMMENTS_PER_PAGE = 10
 CONTENT_COLLAPSE_LIMIT = 350
 _SUBMISSION_PUBLISH_LOCKS: dict[str, asyncio.Lock] = {}
@@ -250,6 +251,9 @@ def build_submission_embed(record: dict, *, image_url: str | None = None) -> dis
     embed.add_field(name="📌 状态", value=status_label, inline=True)
     if kind != KIND_BUG:
         embed.add_field(name="🛡️ 内容分级", value=type_label, inline=True)
+    if kind == KIND_REPO:
+        repo_type = str(fields.get("repo_type", "其他"))
+        embed.add_field(name="🧩 作品类型", value=repo_type, inline=True)
     if kind == KIND_RECOMMENDATION:
         embed.add_field(name="🗂️ 安利领域", value=str(fields.get("domain", "其他类型")), inline=True)
     content = str(fields.get("content", "") or "没有填写内容")
@@ -454,11 +458,13 @@ class SubmissionModal(ui.DesignerModal):
         record: dict | None = None,
         *,
         content_type: str | None = None,
+        repo_type: str | None = None,
         domain: str | None = None,
     ):
         self.kind = kind
         self.record = record
         self.content_type = (content_type or _field(record or {}, "content_type", "sfw")).lower()
+        self.repo_type = repo_type or _field(record or {}, "repo_type", "其他")
         self.domain = domain or _field(record or {}, "domain", "其他类型")
         is_edit = record is not None
         title = "修改投稿" if is_edit else "提交投稿"
@@ -502,9 +508,11 @@ class SubmissionModal(ui.DesignerModal):
 
         if self.kind == KIND_REPO:
             content_type = self.content_type if self.content_type in TYPE_OPTIONS else "sfw"
+            repo_type = self.repo_type if self.repo_type in REPO_TYPE_OPTIONS else "其他"
             fields = {
                 "title": self.subject_input.value.strip(),
                 "content_type": content_type,
+                "repo_type": repo_type,
                 "content": self.content_input.value.strip(),
             }
         elif self.kind == KIND_BUG:
@@ -654,7 +662,7 @@ class SubmissionTypeSelect(discord.ui.Select):
                 default=current == "nsfw",
             ),
         ]
-        super().__init__(placeholder="选择投稿类型", min_values=1, max_values=1, options=options, row=0)
+        super().__init__(placeholder="选择内容分级（SFW / NSFW）", min_values=1, max_values=1, options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         content_type = self.values[0]
@@ -686,14 +694,88 @@ class SubmissionTypeSelectView(discord.ui.View):
     async def next_step(self, button, interaction: discord.Interaction):
         content_type = self.selected_content_type if self.selected_content_type in TYPE_OPTIONS else "sfw"
         if self.kind == KIND_REPO:
-            return await interaction.response.send_modal(
-                SubmissionModal(KIND_REPO, self.record, content_type=content_type)
+            return await interaction.response.edit_message(
+                content="继续选择 repo 的电波系作品类型。",
+                embed=None,
+                view=RepoWorkTypeSelectView(
+                    interaction.user.id,
+                    content_type,
+                    self.record,
+                ),
             )
 
         await interaction.response.edit_message(
             content="继续选择安利领域。",
             embed=None,
             view=RecommendationDomainSelectView(interaction.user.id, content_type, self.record),
+        )
+
+
+class RepoWorkTypeSelect(discord.ui.Select):
+    def __init__(self, record: dict | None = None):
+        current = _field(record or {}, "repo_type")
+        emoji_map = {
+            "预设": "🧠",
+            "角色卡": "🎭",
+            "脚本": "🧩",
+            "美化": "🎨",
+            "其他": "📦",
+        }
+        options = [
+            discord.SelectOption(
+                label=repo_type,
+                value=repo_type,
+                emoji=emoji_map[repo_type],
+                default=current == repo_type,
+            )
+            for repo_type in REPO_TYPE_OPTIONS
+        ]
+        super().__init__(
+            placeholder="选择 repo 的电波系作品类型",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        repo_type = self.values[0]
+        self.view.selected_repo_type = repo_type
+        for option in self.options:
+            option.default = option.value == repo_type
+        await interaction.response.edit_message(
+            content=f"已选择作品类型：**{repo_type}**。确认后点击「下一步」。",
+            view=self.view,
+        )
+
+
+class RepoWorkTypeSelectView(discord.ui.View):
+    def __init__(self, owner_id: int, content_type: str, record: dict | None = None):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.content_type = content_type
+        self.record = record
+        current = _field(record or {}, "repo_type")
+        self.selected_repo_type = current if current in REPO_TYPE_OPTIONS else None
+        self.add_item(RepoWorkTypeSelect(record))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("这个选择面板只属于发起它的人。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="下一步", emoji="➡️", style=discord.ButtonStyle.primary, row=1)
+    async def next_step(self, button, interaction: discord.Interaction):
+        if self.selected_repo_type not in REPO_TYPE_OPTIONS:
+            return await interaction.response.send_message("请先选择电波系作品类型。", ephemeral=True)
+        await interaction.response.send_modal(
+            SubmissionModal(
+                KIND_REPO,
+                self.record,
+                content_type=self.content_type,
+                repo_type=self.selected_repo_type,
+            )
         )
 
 
@@ -797,7 +879,7 @@ class SubmissionPanelView(ui.DesignerView):
         except discord.NotFound:
             return
         await interaction.followup.send(
-            "先选择 repo 类型。",
+            "先选择内容分级（SFW / NSFW）。",
             view=SubmissionTypeSelectView(interaction.user.id, KIND_REPO),
             ephemeral=True,
         )
@@ -1027,6 +1109,8 @@ def _build_full_content_embed(record: dict) -> discord.Embed:
     embed.add_field(name="投稿ID", value=str(record.get("id", "")), inline=True)
     if record.get("kind") != KIND_BUG:
         embed.add_field(name="类型", value=content_type, inline=True)
+    if record.get("kind") == KIND_REPO:
+        embed.add_field(name="作品类型", value=str(fields.get("repo_type", "其他")), inline=True)
     if record.get("kind") == KIND_RECOMMENDATION:
         embed.add_field(name="领域", value=str(fields.get("domain", "其他类型")), inline=True)
     embed.set_footer(text="仅你可见的完整投稿内容。")
@@ -1206,7 +1290,7 @@ class SubmissionEditView(discord.ui.View):
         kind = record.get("kind", KIND_REPO)
         if kind in {KIND_REPO, KIND_RECOMMENDATION}:
             return await interaction.response.send_message(
-                "先选择新的类型。",
+                "先确认新的内容分级。",
                 view=SubmissionTypeSelectView(interaction.user.id, kind, record),
                 ephemeral=True,
             )
