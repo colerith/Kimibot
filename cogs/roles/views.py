@@ -2247,13 +2247,44 @@ class RoleClaimView(discord.ui.View):
         # 允许所有用户与这个公共面板交互
         return True
 
+    @staticmethod
+    async def _begin_private_response(interaction: discord.Interaction, text: str) -> bool:
+        try:
+            await interaction.response.send_message(text, ephemeral=True)
+            return True
+        except (discord.NotFound, discord.HTTPException):
+            return False
+
+    @staticmethod
+    async def _complete_private_response(
+        interaction: discord.Interaction,
+        *,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+        view: discord.ui.View | None = None,
+        fallback_dm_text: str | None = None,
+    ) -> bool:
+        try:
+            await interaction.edit_original_response(content=content, embed=embed, view=view)
+            return True
+        except (discord.NotFound, discord.HTTPException) as error:
+            print(
+                "[小蛋报到面板] 私密响应更新失败: "
+                f"user={interaction.user.id} error={error}"
+            )
+
+        if fallback_dm_text:
+            try:
+                await interaction.user.send(fallback_dm_text)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        return False
+
     @discord.ui.button(label="蛋壳余额", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_shells", row=0)
     async def shells_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+        if not await self._begin_private_response(interaction, "🥚 正在查询你的蛋壳余额……"):
             return
 
         summary, rules_text = await asyncio.gather(
@@ -2273,21 +2304,17 @@ class RoleClaimView(discord.ui.View):
             f"今日有效发言：**{summary['daily_msg_count']}** 条\n\n"
             f"{rules_text}"
         )
-        await interaction.followup.send(text, ephemeral=True)
+        await self._complete_private_response(interaction, content=text)
 
     @discord.ui.button(label="使用帮助", style=discord.ButtonStyle.secondary, emoji="❔", custom_id="role_main_shell_help", row=0)
     async def shell_help_callback(self, button, interaction: discord.Interaction):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+        if not await self._begin_private_response(interaction, "📖 正在打开小蛋使用手册……"):
             return
-        await interaction.followup.send(embed=build_shell_help_embed(), ephemeral=True)
+        await self._complete_private_response(interaction, embed=build_shell_help_embed())
 
     @discord.ui.button(label="小蛋换装", style=discord.ButtonStyle.success, emoji="🎨", custom_id="role_main_start", row=1)
     async def start_decor_callback(self, button, interaction: discord.Interaction):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+        if not await self._begin_private_response(interaction, "🎨 正在整理你的小蛋衣柜……"):
             return
         data = await asyncio.to_thread(load_role_data)
         claimable_ids = set(data.get("claimable_roles", []))
@@ -2329,7 +2356,10 @@ class RoleClaimView(discord.ui.View):
                 selectable_roles.append(role)
 
         if not selectable_roles:
-            return await interaction.followup.send("⚠️ 现在好像还没有任何可用的装饰品呢！", ephemeral=True)
+            return await self._complete_private_response(
+                interaction,
+                content="⚠️ 现在好像还没有任何可用的装饰品呢！",
+            )
 
         # 4. 构建当前状态文本，分别显示
         user_current_claimable = [r.name for r in interaction.user.roles if r.id in claimable_ids]
@@ -2367,53 +2397,59 @@ class RoleClaimView(discord.ui.View):
             color=0xFFB6C1
         )
         # 传入合并后的列表
-        await interaction.followup.send(embed=embed, view=RoleSelectionView(selectable_roles), ephemeral=True)
+        await self._complete_private_response(
+            interaction,
+            embed=embed,
+            view=RoleSelectionView(selectable_roles),
+        )
 
     @discord.ui.button(label="加速购买", style=discord.ButtonStyle.secondary, emoji="⚡", custom_id="role_main_acceleration", row=1)
     async def acceleration_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+        if not await self._begin_private_response(interaction, "⚡ 正在加载加速卡商店……"):
             return
         if has_verification_role(interaction.user):
-            return await interaction.followup.send(
-                "你已经通过验证答题啦，不需要再购买加速卡。",
-                ephemeral=True,
+            return await self._complete_private_response(
+                interaction,
+                content="你已经通过验证答题啦，不需要再购买加速卡。",
             )
         embed = await asyncio.to_thread(build_acceleration_embed, interaction.user, interaction.guild_id)
-        await interaction.followup.send(embed=embed, view=AccelerationShopView(interaction.user.id), ephemeral=True)
+        await self._complete_private_response(
+            interaction,
+            embed=embed,
+            view=AccelerationShopView(interaction.user.id),
+        )
     
     @discord.ui.button(label="身份抽奖", style=discord.ButtonStyle.primary, emoji="🎲", custom_id="role_main_lottery", row=1)
     async def lottery_entry_callback(self, button, interaction: discord.Interaction):
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+        if not await self._begin_private_response(interaction, "🎲 正在摇匀身份组奖池……"):
             return
-        data = await asyncio.to_thread(load_role_data)
-        points = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id or 0)
+        data, points = await asyncio.gather(
+            asyncio.to_thread(load_role_data),
+            asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id or 0),
+        )
         embed = build_role_lottery_embed(points, data)
-        await interaction.followup.send(embed=embed, view=RoleLotteryView(), ephemeral=True)
+        await self._complete_private_response(interaction, embed=embed, view=RoleLotteryView())
 
     @discord.ui.button(label="兑换商城", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_redeem", row=1)
     async def redeem_entry_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+        if not await self._begin_private_response(interaction, "🥚 正在加载蛋壳兑换商城……"):
             return
         embed = await asyncio.to_thread(build_redeem_shop_embed, interaction.guild, interaction.user.id)
-        await interaction.followup.send(embed=embed, view=RedeemShopView(interaction.guild, interaction.user.id), ephemeral=True)
+        await self._complete_private_response(
+            interaction,
+            embed=embed,
+            view=RedeemShopView(interaction.guild, interaction.user.id),
+        )
 
     @discord.ui.button(label="每日签到", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="role_main_sign_in", row=0)
     async def main_sign_in_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        try:
-            await interaction.response.send_message("🥚 正在结算今日报到，请稍候……", ephemeral=True)
-        except (discord.NotFound, discord.HTTPException):
+        if not await self._begin_private_response(interaction, "🥚 正在结算今日报到，请稍候……"):
             return
 
         reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
@@ -2427,9 +2463,9 @@ class RoleClaimView(discord.ui.View):
                 )
         except Exception as error:
             print(f"[小蛋报到] 签到结算失败: user={interaction.user.id} error={error}")
-            return await self._finish_sign_in_response(
+            return await self._complete_private_response(
                 interaction,
-                "❌ 报到结算失败，请稍后再试；本次不会重复扣除或发放蛋壳。",
+                content="❌ 报到结算失败，请稍后再试；本次不会重复扣除或发放蛋壳。",
             )
 
         rules_text = await asyncio.to_thread(_rules_text)
@@ -2465,7 +2501,11 @@ class RoleClaimView(discord.ui.View):
                 f"{rules_text}"
             )
 
-        await self._finish_sign_in_response(interaction, text)
+        await self._complete_private_response(
+            interaction,
+            content=text,
+            fallback_dm_text=text,
+        )
 
         # Reply first, then queue a coalesced refresh of the public leaderboard.
         if result.get("success"):
@@ -2474,42 +2514,33 @@ class RoleClaimView(discord.ui.View):
                 interaction.client.user.display_avatar.url if interaction.client.user else None,
             )
 
-    @staticmethod
-    async def _finish_sign_in_response(interaction: discord.Interaction, text: str) -> None:
-        try:
-            await interaction.edit_original_response(content=text)
-            return
-        except (discord.NotFound, discord.HTTPException) as error:
-            print(
-                "[小蛋报到] 交互结果更新失败，尝试私信补发: "
-                f"user={interaction.user.id} error={error}"
-            )
-
-        try:
-            await interaction.user.send(text)
-        except (discord.Forbidden, discord.HTTPException):
-            return
-
     @discord.ui.button(label="每日任务", style=discord.ButtonStyle.secondary, emoji="📒", custom_id="role_main_daily_tasks", row=0)
     async def daily_tasks_callback(self, button, interaction: discord.Interaction):
         if not interaction.guild_id:
             return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+        if not await self._begin_private_response(interaction, "📒 正在整理你今天的小蛋任务……"):
             return
         embed = await build_daily_tasks_embed(interaction.user, interaction.guild_id)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await self._complete_private_response(interaction, embed=embed)
 
     @discord.ui.button(label="一键移除", style=discord.ButtonStyle.danger, emoji="🧹", custom_id="role_main_remove_all", row=1)
     async def remove_all_callback(self, button, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        if not await self._begin_private_response(interaction, "🧹 正在帮你收好身上的装饰……"):
+            return
         # 调用我们的全局移除函数
         removed = await remove_all_decorations(interaction.user, interaction.guild)
         if removed:
-            await interaction.followup.send(f"🧹 已清空身上的 {len(removed)} 个装饰！", ephemeral=True)
+            await self._complete_private_response(
+                interaction,
+                content=f"🧹 已清空身上的 {len(removed)} 个装饰！",
+            )
         else:
-            await interaction.followup.send("❔ 你身上本来就很干净哦。", ephemeral=True)
+            await self._complete_private_response(
+                interaction,
+                content="❔ 你身上本来就很干净哦。",
+            )
 
 # --- 用户端：通知订阅 ---
 class NotificationSelect(discord.ui.Select):
