@@ -1361,33 +1361,44 @@ class RedeemRoleSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        # Acknowledge the select interaction immediately. If the bot's event loop
+        # was briefly busy, editing through the original response afterwards avoids
+        # Discord's 3-second "Unknown interaction" (10062) window.
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except (discord.NotFound, discord.HTTPException):
+            return
+
         if not self.values or self.values[0] == "none":
-            return await interaction.response.send_message("当前暂无可兑换身份组。", ephemeral=True)
+            return await interaction.followup.send("当前暂无可兑换身份组。", ephemeral=True)
         if not interaction.guild_id:
-            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+            return await interaction.followup.send("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
 
         role_id = int(self.values[0])
         role = interaction.guild.get_role(role_id)
         if not role:
-            return await interaction.response.send_message("这个身份组已失效，请重新打开商城。", ephemeral=True)
+            return await interaction.followup.send("这个身份组已失效，请重新打开商城。", ephemeral=True)
 
         panel = self.view
         if not isinstance(panel, RedeemShopView):
-            return await interaction.response.send_message("这个兑换商城面板已经失效，请重新打开。", ephemeral=True)
+            return await interaction.followup.send("这个兑换商城面板已经失效，请重新打开。", ephemeral=True)
         panel.selected_role_id = role_id
         panel.confirm_button.disabled = False
         for option in self.options:
             option.default = option.value == str(role_id)
         selected_option = next((option for option in self.options if option.value == str(role_id)), None)
         price_text = selected_option.description if selected_option else "请以确认购买时的实时价格为准"
-        await interaction.response.edit_message(
-            content=(
-                f"🧾 **待确认商品：** {role.mention}\n"
-                f"价格信息：**{price_text}**\n"
-                "确认无误后，请点击下方的 **确认购买**；选择商品不会扣除蛋壳。"
-            ),
-            view=panel,
-        )
+        try:
+            await interaction.edit_original_response(
+                content=(
+                    f"🧾 **待确认商品：** {role.mention}\n"
+                    f"价格信息：**{price_text}**\n"
+                    "确认无误后，请点击下方的 **确认购买**；选择商品不会扣除蛋壳。"
+                ),
+                view=panel,
+            )
+        except (discord.NotFound, discord.HTTPException):
+            return
 
 
 class RedeemConfirmButton(discord.ui.Button):
