@@ -259,10 +259,14 @@ def build_submission_embed(record: dict, *, image_url: str | None = None) -> dis
     content = str(fields.get("content", "") or "没有填写内容")
     embed.add_field(name="📝 投稿内容", value=_content_preview(content, is_nsfw)[:1024], inline=False)
     image_urls = record.get("attachments", [])
-    if image_url:
-        embed.set_image(url=image_url)
-    elif isinstance(image_urls, list) and image_urls and not is_nsfw:
-        embed.set_image(url=str(image_urls[0]))
+    # Discord does not reliably preserve the spoiler cover for images rendered
+    # inside an embed. Keep every NSFW image as a SPOILER_ attachment instead;
+    # SFW submissions still use the first attachment as the embed hero image.
+    if not is_nsfw:
+        if image_url:
+            embed.set_image(url=image_url)
+        elif isinstance(image_urls, list) and image_urls:
+            embed.set_image(url=str(image_urls[0]))
 
     replies = record.get("replies", [])
     if replies:
