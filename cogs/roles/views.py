@@ -722,16 +722,43 @@ class RoleLotteryView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
+    async def _edit_lottery_panel(self, interaction: discord.Interaction, embed: discord.Embed) -> bool:
+        try:
+            await interaction.edit_original_response(content=None, embed=embed, view=self)
+            return True
+        except (discord.NotFound, discord.HTTPException) as error:
+            print(
+                "[身份抽奖] 结果面板更新失败: "
+                f"guild={interaction.guild_id} user={interaction.user.id} error={error!r}"
+            )
+            return False
+
+    async def _show_lottery_notice(
+        self,
+        interaction: discord.Interaction,
+        title: str,
+        description: str,
+        *,
+        color: int = 0xED4245,
+    ) -> None:
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.set_footer(text="可以继续使用下方按钮，本面板会更新而不会新增结果消息。")
+        await self._edit_lottery_panel(interaction, embed)
+
     async def _run_draw(self, interaction: discord.Interaction, draw_count: int):
         try:
             await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
+        except (discord.NotFound, discord.HTTPException):
             # The interaction was already older than Discord's acknowledgement
             # window. There is no valid webhook token left to reply through.
             return
 
         if not interaction.guild_id:
-            return await interaction.followup.send("❌ 该功能仅支持在服务器内使用。", ephemeral=True)
+            return await self._show_lottery_notice(
+                interaction,
+                "❌ 无法抽奖",
+                "该功能仅支持在服务器内使用。",
+            )
 
         user = interaction.user
         guild_id = interaction.guild_id
@@ -744,13 +771,11 @@ class RoleLotteryView(discord.ui.View):
                     f"[身份抽奖] 结算失败: guild={guild_id} "
                     f"user={user.id} count={draw_count} error={error!r}"
                 )
-                try:
-                    await interaction.followup.send(
-                        "❌ 抽奖结算遇到异常，请稍后再试；如蛋壳余额已经变化，请联系管理员核对日志。",
-                        ephemeral=True,
-                    )
-                except discord.HTTPException:
-                    pass
+                await self._show_lottery_notice(
+                    interaction,
+                    "❌ 抽奖结算遇到异常",
+                    "请稍后再试；如蛋壳余额已经变化，请联系管理员核对日志。",
+                )
 
     async def _settle_draw(self, interaction: discord.Interaction, draw_count: int):
         """Settle one draw without doing blocking file I/O on Discord's loop."""
@@ -776,14 +801,22 @@ class RoleLotteryView(discord.ui.View):
 
         current_points = await asyncio.to_thread(get_user_points, user.id, guild_id)
         if current_points < cost:
-            return await interaction.followup.send(
-                f"💸 **蛋壳不足！**\n你需要 **{format_shells(cost)}** 蛋壳才能执行本次抽奖，当前只有 **{format_shells(current_points)}**。",
-                ephemeral=True,
+            return await self._show_lottery_notice(
+                interaction,
+                "💸 蛋壳不足",
+                f"本次抽奖需要 **{format_shells(cost)}** 蛋壳，"
+                f"你当前只有 **{format_shells(current_points)}**。",
+                color=0xF0B232,
             )
 
         pool_ids = data.get("lottery_roles", [])
         if not pool_ids:
-            return await interaction.followup.send("🏜️ 奖池目前是空的，请联系管理员进货！", ephemeral=True)
+            return await self._show_lottery_notice(
+                interaction,
+                "🏜️ 奖池空空如也",
+                "奖池目前没有可抽取内容，请联系管理员进货。",
+                color=0x747F8D,
+            )
 
         pools_by_kind_rarity = {
             LOTTERY_KIND_COLOR: {r: [] for r in (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)},
@@ -797,7 +830,12 @@ class RoleLotteryView(discord.ui.View):
                         pools_by_kind_rarity[kind][rarity].append(role)
 
         if not any(pools_by_kind_rarity[k][r] for k in (LOTTERY_KIND_COLOR, LOTTERY_KIND_ICON) for r in (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)):
-            return await interaction.followup.send("⚠️ 奖池里的身份组好像失效了，请联系管理员。", ephemeral=True)
+            return await self._show_lottery_notice(
+                interaction,
+                "⚠️ 奖池暂时不可用",
+                "奖池里的身份组已经失效，请联系管理员检查配置。",
+                color=0x747F8D,
+            )
 
         await asyncio.to_thread(
             modify_user_points,
@@ -972,20 +1010,6 @@ class RoleLotteryView(discord.ui.View):
 
         final_points = await asyncio.to_thread(get_user_points, user.id, guild_id)
 
-        # This component was deferred as a message update, so editing the
-        # original response updates the ephemeral lottery panel itself. Keep
-        # the result as a separate follow-up message below.
-        try:
-            await interaction.edit_original_response(
-                embed=build_role_lottery_embed(final_points, data),
-                view=self,
-            )
-        except (discord.NotFound, discord.HTTPException) as error:
-            print(
-                f"[身份抽奖] 主面板余额刷新失败: guild={guild_id} "
-                f"user={user.id} balance={final_points} error={error!r}"
-            )
-
         new_count = sum(1 for row in results if row["role"] and not row["dupe"])
         dupe_count = sum(1 for row in results if row["dupe"])
         shell_count = sum(1 for row in results if row.get("type") == "shells")
@@ -1046,7 +1070,8 @@ class RoleLotteryView(discord.ui.View):
             ]
             embed.add_field(name="🏆 新达成收集成就", value=_preview_lines(reward_lines), inline=False)
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.set_footer(text="继续点击下方按钮即可再次抽奖 · 新结果会覆盖本面板")
+        await self._edit_lottery_panel(interaction, embed)
 
     @discord.ui.button(label="🎲 试试手气", style=discord.ButtonStyle.primary, emoji="🎰", custom_id="lottery_draw_btn")
     async def draw_callback(self, button, interaction: discord.Interaction):
