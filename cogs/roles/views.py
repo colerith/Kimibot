@@ -722,7 +722,13 @@ class RoleLotteryView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
+    def _set_controls_disabled(self, disabled: bool) -> None:
+        for item in self.children:
+            if hasattr(item, "disabled"):
+                item.disabled = disabled
+
     async def _edit_lottery_panel(self, interaction: discord.Interaction, embed: discord.Embed) -> bool:
+        self._set_controls_disabled(False)
         try:
             await interaction.edit_original_response(content=None, embed=embed, view=self)
             return True
@@ -746,9 +752,25 @@ class RoleLotteryView(discord.ui.View):
         await self._edit_lottery_panel(interaction, embed)
 
     async def _run_draw(self, interaction: discord.Interaction, draw_count: int):
+        loading_titles = {
+            1: "🎰 命运之轮正在转动……",
+            5: "🍀 五连试炼正在开奖……",
+            10: "💫 十连演算正在进行……",
+        }
+        loading_embed = discord.Embed(
+            title=loading_titles.get(draw_count, "🎲 小蛋正在抽奖……"),
+            description=(
+                f"正在结算本次 **{draw_count} 抽**，请稍候片刻。\n"
+                "结果会直接显示在当前面板，请不要重复点击。"
+            ),
+            color=discord.Color.purple(),
+        )
+        loading_embed.set_footer(text="🥚 正在读取奖池、保底进度与蛋壳余额")
+        self._set_controls_disabled(True)
         try:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.edit_message(embed=loading_embed, view=self)
         except (discord.NotFound, discord.HTTPException):
+            self._set_controls_disabled(False)
             # The interaction was already older than Discord's acknowledgement
             # window. There is no valid webhook token left to reply through.
             return
