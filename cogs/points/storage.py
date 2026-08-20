@@ -5,9 +5,11 @@ import math
 import os
 import random
 import shutil
+import sqlite3
 import threading
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from pathlib import Path
@@ -16,6 +18,7 @@ from typing import Any
 import config
 
 POINTS_DATA_FILE = "data/user_points.json"
+POINTS_DB_FILE = "data/user_points.sqlite3"
 RANDOM_EVENTS_FILE = Path(__file__).with_name("random_events.json")
 PRAISE_RULES_FILE = "data/praise_rules.json"
 TZ_CN = timezone(timedelta(hours=8))
@@ -23,6 +26,9 @@ TZ_CN = timezone(timedelta(hours=8))
 SHELL_PRECISION = 1
 LEGACY_POINTS_TO_SHELLS = 0.1
 _POINTS_DATA_LOCK = threading.RLock()
+_POINTS_DB_READY = False
+_RANDOM_EVENTS_CACHE: list[dict] | None = None
+_RANDOM_EVENTS_MTIME_NS = -1
 _PRAISE_RULES_LOCK = threading.RLock()
 
 DEFAULT_MONTHLY_CARD_CONFIG = {
@@ -438,52 +444,295 @@ def _append_transaction(
     data["transactions"] = data["transactions"][-500:]
 
 
-def load_points_data():
+_DICT_SECTIONS = (
+    "daily_signins",
+    "daily_forum_rewards",
+    "daily_praise_rewards",
+    "daily_praise_scan_records",
+    "daily_task_rewards",
+)
+_LIST_SECTIONS = ("acceleration_purchases", "monthly_card_purchases")
+
+
+def _json_dump(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_load(value: str | None, default: Any) -> Any:
+    if value is None:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _connect_points_db() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(POINTS_DB_FILE), exist_ok=True)
+    connection = sqlite3.connect(POINTS_DB_FILE, timeout=30)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=30000")
+    return connection
+
+
+@contextmanager
+def _points_connection():
+    connection = _connect_points_db()
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def _create_points_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS points_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS point_users (
+            user_key TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            has_monthly_card INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS point_sections (
+            namespace TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            data TEXT NOT NULL,
+            PRIMARY KEY(namespace, item_key)
+        );
+        CREATE TABLE IF NOT EXISTS point_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            time TEXT NOT NULL,
+            guild_id TEXT NOT NULL DEFAULT '',
+            user_id TEXT NOT NULL,
+            amount REAL NOT NULL,
+            balance REAL NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            idempotency_key TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_point_transactions_user
+            ON point_transactions(guild_id, user_id, id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_point_transactions_idempotency
+            ON point_transactions(guild_id, user_id, idempotency_key)
+            WHERE idempotency_key <> '';
+        """
+    )
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(point_users)")}
+    if "has_monthly_card" not in columns:
+        connection.execute(
+            "ALTER TABLE point_users ADD COLUMN has_monthly_card INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+def _read_legacy_points_json() -> dict:
     backup_file = f"{POINTS_DATA_FILE}.bak"
-    with _POINTS_DATA_LOCK:
-        if not os.path.exists(POINTS_DATA_FILE):
-            return _empty_points_data()
+    if not os.path.exists(POINTS_DATA_FILE):
+        return _empty_points_data()
+    try:
+        with open(POINTS_DATA_FILE, "r", encoding="utf-8") as file:
+            return _normalize_points_data(json.load(file))
+    except (json.JSONDecodeError, OSError) as error:
         try:
-            with open(POINTS_DATA_FILE, "r", encoding="utf-8") as f:
-                return _normalize_points_data(json.load(f))
-        except (json.JSONDecodeError, OSError) as error:
-            try:
-                with open(backup_file, "r", encoding="utf-8") as backup:
-                    recovered = _normalize_points_data(json.load(backup))
-            except (json.JSONDecodeError, OSError) as backup_error:
-                raise RuntimeError(
-                    f"积分数据文件读取失败，且备份不可用: main={error!r}; backup={backup_error!r}"
-                ) from error
-            print(f"[蛋壳系统] 主积分表读取失败，已从备份恢复: error={error!r}")
-            return recovered
+            with open(backup_file, "r", encoding="utf-8") as backup:
+                recovered = _normalize_points_data(json.load(backup))
+        except (json.JSONDecodeError, OSError) as backup_error:
+            raise RuntimeError(
+                f"积分数据文件读取失败，且备份不可用: main={error!r}; backup={backup_error!r}"
+            ) from error
+        print(f"[蛋壳系统] 主积分表读取失败，已从备份恢复: error={error!r}")
+        return recovered
+
+
+def _replace_database_snapshot(connection: sqlite3.Connection, data: dict) -> None:
+    normalized = _normalize_points_data(data)
+    connection.execute("DELETE FROM point_users")
+    connection.execute("DELETE FROM point_sections")
+    connection.execute("DELETE FROM point_transactions")
+    connection.executemany(
+        "INSERT INTO point_users(user_key, data, has_monthly_card) VALUES (?, ?, ?)",
+        (
+            (str(key), _json_dump(value), int(bool(value.get("monthly_card_periods"))))
+            for key, value in normalized["users"].items()
+        ),
+    )
+    for namespace in _DICT_SECTIONS:
+        rows = normalized.get(namespace, {})
+        if isinstance(rows, dict):
+            connection.executemany(
+                "INSERT INTO point_sections(namespace, item_key, data) VALUES (?, ?, ?)",
+                ((namespace, str(key), _json_dump(value)) for key, value in rows.items()),
+            )
+    for namespace in _LIST_SECTIONS:
+        connection.execute(
+            "INSERT INTO point_sections(namespace, item_key, data) VALUES (?, 'value', ?)",
+            (namespace, _json_dump(normalized.get(namespace, []))),
+        )
+    connection.execute(
+        "INSERT INTO point_sections(namespace, item_key, data) VALUES ('config', 'monthly_card', ?)",
+        (_json_dump(normalized.get("monthly_card_config", DEFAULT_MONTHLY_CARD_CONFIG)),),
+    )
+    for tx in normalized.get("transactions", []):
+        if not isinstance(tx, dict):
+            continue
+        connection.execute(
+            """INSERT OR IGNORE INTO point_transactions
+               (time, guild_id, user_id, amount, balance, source, reason, idempotency_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(tx.get("time", "")), str(tx.get("guild_id", "")), str(tx.get("user_id", "")),
+                _round_delta(tx.get("amount", 0)), _round_shells(tx.get("balance", 0)),
+                str(tx.get("source", "")), str(tx.get("reason", "")), str(tx.get("idempotency_key", "")),
+            ),
+        )
+
+
+def _ensure_points_db() -> None:
+    global _POINTS_DB_READY
+    if _POINTS_DB_READY:
+        return
+    with _POINTS_DATA_LOCK:
+        if _POINTS_DB_READY:
+            return
+        with _points_connection() as connection:
+            _create_points_schema(connection)
+            migrated = connection.execute(
+                "SELECT value FROM points_meta WHERE key='json_migrated'"
+            ).fetchone()
+            if migrated is None:
+                legacy = _read_legacy_points_json()
+                _replace_database_snapshot(connection, legacy)
+                connection.execute(
+                    "INSERT OR REPLACE INTO points_meta(key, value) VALUES ('json_migrated', ?)",
+                    (_now_iso(),),
+                )
+                if os.path.exists(POINTS_DATA_FILE):
+                    migration_backup = f"{POINTS_DATA_FILE}.pre_sqlite.bak"
+                    if not os.path.exists(migration_backup):
+                        shutil.copy2(POINTS_DATA_FILE, migration_backup)
+                print(
+                    f"[蛋壳系统] SQLite 数据库已就绪，导入用户 {len(legacy.get('users', {}))} 条；"
+                    "原 JSON 已保留为迁移备份。"
+                )
+        _POINTS_DB_READY = True
+
+
+def initialize_points_storage() -> None:
+    """启动期主动完成建表/迁移，避免首次按钮交互承担迁移延迟。"""
+    _ensure_points_db()
+
+
+def _db_get_section(connection: sqlite3.Connection, namespace: str, item_key: str, default: Any) -> Any:
+    row = connection.execute(
+        "SELECT data FROM point_sections WHERE namespace=? AND item_key=?",
+        (namespace, str(item_key)),
+    ).fetchone()
+    return _json_load(row["data"] if row else None, default)
+
+
+def _db_put_section(connection: sqlite3.Connection, namespace: str, item_key: str, value: Any) -> None:
+    connection.execute(
+        """INSERT INTO point_sections(namespace, item_key, data) VALUES (?, ?, ?)
+           ON CONFLICT(namespace, item_key) DO UPDATE SET data=excluded.data""",
+        (namespace, str(item_key), _json_dump(value)),
+    )
+
+
+def _db_get_user(connection: sqlite3.Connection, user_id: int, guild_id: int | None) -> tuple[dict, str]:
+    key = _make_user_key(user_id, guild_id)
+    row = connection.execute("SELECT data FROM point_users WHERE user_key=?", (key,)).fetchone()
+    return _normalize_record(_json_load(row["data"] if row else None, {})), key
+
+
+def _db_put_user(connection: sqlite3.Connection, key: str, record: dict) -> None:
+    normalized = _normalize_record(record)
+    connection.execute(
+        """INSERT INTO point_users(user_key, data, has_monthly_card) VALUES (?, ?, ?)
+           ON CONFLICT(user_key) DO UPDATE SET
+               data=excluded.data, has_monthly_card=excluded.has_monthly_card""",
+        (key, _json_dump(normalized), int(bool(normalized.get("monthly_card_periods")))),
+    )
+
+
+def _db_monthly_config(connection: sqlite3.Connection) -> dict:
+    return _normalize_monthly_card_config(
+        _db_get_section(connection, "config", "monthly_card", DEFAULT_MONTHLY_CARD_CONFIG)
+    )
+
+
+def _db_append_transaction(
+    connection: sqlite3.Connection,
+    record: dict,
+    *,
+    user_id: int,
+    guild_id: int | None,
+    amount: float,
+    source: str,
+    reason: str = "",
+    idempotency_key: str = "",
+) -> dict | None:
+    if amount == 0:
+        return None
+    tx = {
+        "time": _now_iso(), "guild_id": str(guild_id) if guild_id else "", "user_id": str(user_id),
+        "amount": _round_delta(amount), "balance": _round_shells(record.get("shells", 0)),
+        "source": str(source), "reason": str(reason),
+    }
+    if idempotency_key:
+        tx["idempotency_key"] = str(idempotency_key)
+    connection.execute(
+        """INSERT INTO point_transactions
+           (time, guild_id, user_id, amount, balance, source, reason, idempotency_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (tx["time"], tx["guild_id"], tx["user_id"], tx["amount"], tx["balance"], tx["source"], tx["reason"], str(idempotency_key)),
+    )
+    record.setdefault("transactions", []).append(tx)
+    record["transactions"] = record["transactions"][-50:]
+    connection.execute(
+        "DELETE FROM point_transactions WHERE id NOT IN (SELECT id FROM point_transactions ORDER BY id DESC LIMIT 500)"
+    )
+    return tx
+
+
+def load_points_data():
+    """兼容管理/报表调用的完整快照；高频业务不应调用此函数。"""
+    _ensure_points_db()
+    with _POINTS_DATA_LOCK, _points_connection() as connection:
+        data = _empty_points_data()
+        for row in connection.execute("SELECT user_key, data FROM point_users"):
+            data["users"][row["user_key"]] = _normalize_record(_json_load(row["data"], {}))
+        for namespace in _DICT_SECTIONS:
+            data[namespace] = {
+                row["item_key"]: _json_load(row["data"], {})
+                for row in connection.execute(
+                    "SELECT item_key, data FROM point_sections WHERE namespace=?", (namespace,)
+                )
+            }
+        for namespace in _LIST_SECTIONS:
+            data[namespace] = _db_get_section(connection, namespace, "value", [])
+        data["monthly_card_config"] = _db_monthly_config(connection)
+        data["transactions"] = [
+            dict(row) for row in connection.execute(
+                """SELECT time, guild_id, user_id, amount, balance, source, reason, idempotency_key
+                   FROM point_transactions ORDER BY id ASC"""
+            )
+        ]
+        for tx in data["transactions"]:
+            if not tx.get("idempotency_key"):
+                tx.pop("idempotency_key", None)
+        return data
 
 
 def save_points_data(data):
-    backup_file = f"{POINTS_DATA_FILE}.bak"
-    temp_file = f"{POINTS_DATA_FILE}.{os.getpid()}.tmp"
-    with _POINTS_DATA_LOCK:
-        os.makedirs(os.path.dirname(POINTS_DATA_FILE), exist_ok=True)
-        normalized = _normalize_points_data(data)
-        try:
-            with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(normalized, f, indent=4, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-
-            if os.path.exists(POINTS_DATA_FILE):
-                try:
-                    with open(POINTS_DATA_FILE, "r", encoding="utf-8") as current:
-                        json.load(current)
-                    shutil.copy2(POINTS_DATA_FILE, backup_file)
-                except (json.JSONDecodeError, OSError):
-                    pass
-            os.replace(temp_file, POINTS_DATA_FILE)
-        finally:
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except OSError:
-                    pass
+    """兼容低频管理写入；将完整快照事务性写入 SQLite。"""
+    _ensure_points_db()
+    with _POINTS_DATA_LOCK, _points_connection() as connection:
+        _replace_database_snapshot(connection, data)
 
 
 @_locked_points_data
@@ -496,27 +745,49 @@ def modify_user_points(
     reason: str = "",
 ) -> float:
     """兼容旧入口：修改用户蛋壳余额，返回最新余额。"""
-    data = load_points_data()
-    record, _ = _ensure_user_record(data, user_id, guild_id)
+    _ensure_points_db()
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        record, key = _db_get_user(connection, user_id, guild_id)
+        current_shells = _round_shells(record.get("shells", 0))
+        new_shells = _round_shells(current_shells + _round_delta(amount))
+        actual_delta = _round_delta(new_shells - current_shells)
+        record["shells"] = record["points"] = new_shells
+        _db_append_transaction(
+            connection, record, user_id=user_id, guild_id=guild_id,
+            amount=actual_delta, source=source, reason=reason,
+        )
+        _db_put_user(connection, key, record)
+        return new_shells
 
-    current_shells = _round_shells(record.get("shells", 0))
-    delta = _round_delta(amount)
-    new_shells = _round_shells(current_shells + delta)
-    actual_delta = _round_delta(new_shells - current_shells)
 
-    record["shells"] = new_shells
-    record["points"] = new_shells
-    _append_transaction(
-        data,
-        record,
-        user_id=user_id,
-        guild_id=guild_id,
-        amount=actual_delta,
-        source=source,
-        reason=reason,
-    )
-    save_points_data(data)
-    return new_shells
+@_locked_points_data
+def spend_user_points(
+    user_id: int,
+    amount: float,
+    guild_id: int,
+    *,
+    source: str,
+    reason: str = "",
+) -> dict:
+    """原子检查并扣除蛋壳，避免余额检查与抽卡扣款之间被其他消费穿插。"""
+    cost = _round_delta(max(0.0, float(amount)))
+    _ensure_points_db()
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        record, key = _db_get_user(connection, user_id, guild_id)
+        balance = _round_shells(record.get("shells", 0))
+        if balance < cost:
+            return {"success": False, "reason": "insufficient_shells", "cost": cost, "balance": balance}
+        after = _round_shells(balance - cost)
+        actual_delta = _round_delta(after - balance)
+        record["shells"] = record["points"] = after
+        _db_append_transaction(
+            connection, record, user_id=user_id, guild_id=guild_id,
+            amount=actual_delta, source=source, reason=reason,
+        )
+        _db_put_user(connection, key, record)
+        return {"success": True, "reason": "spent", "cost": abs(actual_delta), "balance": after}
 
 
 @_locked_points_data
@@ -526,44 +797,7 @@ def claim_daily_task_bonus(
     bonus_key: str,
     amount: float = 10.0,
 ) -> dict:
-    data = load_points_data()
-    today = _today()
-    reward_key = f"{guild_id}:{today}"
-    rows = data.setdefault("daily_task_rewards", {}).setdefault(reward_key, {})
-    uid = str(user_id)
-    normalized_key = str(bonus_key or "bonus")[:32]
-    claim_key = f"{uid}:{normalized_key}"
-    if claim_key in rows:
-        existing = rows[claim_key] if isinstance(rows[claim_key], dict) else {}
-        return {
-            "success": False,
-            "reason": "already_claimed",
-            "amount": _round_delta(existing.get("amount", 0)) if isinstance(existing, dict) else 0.0,
-        }
-
-    record, _ = _ensure_user_record(data, user_id, guild_id)
-    before = _round_shells(record.get("shells", 0))
-    delta = _round_delta(amount)
-    after = _round_shells(before + delta)
-    actual_delta = _round_delta(after - before)
-    rows[claim_key] = {
-        "time": _now_iso(),
-        "amount": actual_delta,
-        "bonus_key": normalized_key,
-    }
-    record["shells"] = after
-    record["points"] = after
-    _append_transaction(
-        data,
-        record,
-        user_id=user_id,
-        guild_id=guild_id,
-        amount=actual_delta,
-        source="daily_task_bonus",
-        reason=f"bonus={normalized_key}",
-    )
-    save_points_data(data)
-    return {"success": True, "reason": "rewarded", "amount": actual_delta, "balance": after}
+    return _reconcile_daily_task_bonus_sql(user_id, guild_id, bonus_key, True, amount)
 
 
 @_locked_points_data
@@ -574,91 +808,150 @@ def reconcile_daily_task_bonus(
     qualified: bool,
     amount: float = 10.0,
 ) -> dict:
-    data = load_points_data()
+    return _reconcile_daily_task_bonus_sql(user_id, guild_id, bonus_key, qualified, amount)
+
+
+def _reconcile_daily_task_bonus_sql(
+    user_id: int,
+    guild_id: int,
+    bonus_key: str,
+    qualified: bool,
+    amount: float,
+) -> dict:
+    _ensure_points_db()
     today = _today()
     reward_key = f"{guild_id}:{today}"
-    rows = data.setdefault("daily_task_rewards", {}).setdefault(reward_key, {})
-    uid = str(user_id)
     normalized_key = str(bonus_key or "bonus")[:32]
-    claim_key = f"{uid}:{normalized_key}"
-    existing = rows.get(claim_key)
-
-    if qualified and existing:
-        return {
-            "success": False,
-            "reason": "already_claimed",
-            "amount": _round_delta(existing.get("amount", 0)) if isinstance(existing, dict) else 0.0,
-        }
-
-    record, _ = _ensure_user_record(data, user_id, guild_id)
-
-    if qualified:
+    claim_key = f"{user_id}:{normalized_key}"
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        rows = _db_get_section(connection, "daily_task_rewards", reward_key, {})
+        existing = rows.get(claim_key) if isinstance(rows, dict) else None
+        if qualified and existing:
+            return {
+                "success": False, "reason": "already_claimed",
+                "amount": _round_delta(existing.get("amount", 0)) if isinstance(existing, dict) else 0.0,
+            }
+        if not qualified and not existing:
+            return {"success": False, "reason": "not_qualified", "amount": 0.0}
+        record, user_key = _db_get_user(connection, user_id, guild_id)
         before = _round_shells(record.get("shells", 0))
-        delta = _round_delta(amount)
-        after = _round_shells(before + delta)
-        actual_delta = _round_delta(after - before)
-        rows[claim_key] = {
-            "time": _now_iso(),
-            "amount": actual_delta,
-            "bonus_key": normalized_key,
-        }
-        record["shells"] = after
-        record["points"] = after
-        _append_transaction(
-            data,
-            record,
-            user_id=user_id,
-            guild_id=guild_id,
-            amount=actual_delta,
-            source="daily_task_bonus",
-            reason=f"bonus={normalized_key}",
+        if qualified:
+            after = _round_shells(before + _round_delta(amount))
+            actual_delta = _round_delta(after - before)
+            rows[claim_key] = {"time": _now_iso(), "amount": actual_delta, "bonus_key": normalized_key}
+            source = "daily_task_bonus"
+            reason = f"bonus={normalized_key}"
+            result_reason = "rewarded"
+        else:
+            revoke_amount = _round_delta(existing.get("amount", amount)) if isinstance(existing, dict) else _round_delta(amount)
+            after = _round_shells(before - revoke_amount)
+            actual_delta = _round_delta(after - before)
+            rows.pop(claim_key, None)
+            source = "daily_task_bonus_revoke"
+            reason = f"bonus={normalized_key};recheck=not_qualified"
+            result_reason = "revoked"
+        record["shells"] = record["points"] = after
+        _db_append_transaction(
+            connection, record, user_id=user_id, guild_id=guild_id,
+            amount=actual_delta, source=source, reason=reason,
         )
-        save_points_data(data)
-        return {"success": True, "reason": "rewarded", "amount": actual_delta, "balance": after}
-
-    if not existing:
-        return {"success": False, "reason": "not_qualified", "amount": 0.0}
-
-    revoke_amount = _round_delta(existing.get("amount", amount)) if isinstance(existing, dict) else _round_delta(amount)
-    before = _round_shells(record.get("shells", 0))
-    after = _round_shells(before - revoke_amount)
-    actual_delta = _round_delta(after - before)
-    rows.pop(claim_key, None)
-    record["shells"] = after
-    record["points"] = after
-    _append_transaction(
-        data,
-        record,
-        user_id=user_id,
-        guild_id=guild_id,
-        amount=actual_delta,
-        source="daily_task_bonus_revoke",
-        reason=f"bonus={normalized_key};recheck=not_qualified",
-    )
-    save_points_data(data)
-    return {"success": True, "reason": "revoked", "amount": abs(actual_delta), "balance": after}
+        _db_put_user(connection, user_key, record)
+        _db_put_section(connection, "daily_task_rewards", reward_key, rows)
+        return {
+            "success": True, "reason": result_reason,
+            "amount": abs(actual_delta) if result_reason == "revoked" else actual_delta,
+            "balance": after,
+        }
 
 
-@_locked_points_data
 def get_user_points(user_id: int, guild_id: int | None = None) -> float:
     """兼容旧入口：获取用户蛋壳余额。"""
-    data = load_points_data()
-    record, _ = _ensure_user_record(data, user_id, guild_id)
-    return _round_shells(record.get("shells", 0))
+    _ensure_points_db()
+    with _points_connection() as connection:
+        record, _ = _db_get_user(connection, user_id, guild_id)
+        return _round_shells(record.get("shells", 0))
 
 
-@_locked_points_data
 def get_user_summary(user_id: int, guild_id: int | None = None) -> dict:
-    data = load_points_data()
-    record, _ = _ensure_user_record(data, user_id, guild_id)
-    monthly_card = _monthly_card_status(record, data.get("monthly_card_config"))
+    _ensure_points_db()
+    with _points_connection() as connection:
+        record, _ = _db_get_user(connection, user_id, guild_id)
+        monthly_card = _monthly_card_status(record, _db_monthly_config(connection))
+        return {
+            "shells": _round_shells(record.get("shells", 0)),
+            "last_sign_date": record.get("last_sign_date", ""),
+            "streak_days": int(record.get("streak_days", 0)),
+            "daily_msg_count": int(record.get("daily_msg_count", 0)),
+            "acceleration_days": int(record.get("acceleration_days", 0)),
+            "monthly_card": monthly_card,
+        }
+
+
+def get_user_daily_snapshot(user_id: int, guild_id: int) -> dict:
+    """只读取每日任务所需的当前用户、今日流水和今日识别奖励。"""
+    _ensure_points_db()
+    today = _today()
+    user_key = _make_user_key(user_id, guild_id)
+    praise_key = f"{guild_id}:{today}"
+    with _points_connection() as connection:
+        record, _ = _db_get_user(connection, user_id, guild_id)
+        transactions = []
+        for row in connection.execute(
+            """SELECT time, guild_id, user_id, amount, balance, source, reason, idempotency_key
+               FROM point_transactions
+               WHERE guild_id=? AND user_id=? AND substr(time, 1, 10)=?
+               ORDER BY id ASC""",
+            (str(guild_id), str(user_id), today),
+        ):
+            tx = dict(row)
+            if not tx.get("idempotency_key"):
+                tx.pop("idempotency_key", None)
+            transactions.append(tx)
+        praise_rows = _db_get_section(connection, "daily_praise_rewards", praise_key, {})
     return {
-        "shells": _round_shells(record.get("shells", 0)),
-        "last_sign_date": record.get("last_sign_date", ""),
-        "streak_days": int(record.get("streak_days", 0)),
-        "daily_msg_count": int(record.get("daily_msg_count", 0)),
-        "acceleration_days": int(record.get("acceleration_days", 0)),
-        "monthly_card": monthly_card,
+        "version": 3,
+        "users": {user_key: record},
+        "transactions": transactions,
+        "daily_praise_rewards": {praise_key: praise_rows},
+    }
+
+
+def get_daily_activity_stats(guild_id: int, report_date: str) -> dict:
+    """读取日报所需三类日记录，不加载用户表和流水表。"""
+    _ensure_points_db()
+    daily_key = f"{guild_id}:{report_date}"
+    with _points_connection() as connection:
+        signers = _db_get_section(connection, "daily_signins", daily_key, [])
+        praise_rows = _db_get_section(connection, "daily_praise_rewards", daily_key, {})
+        forum_records = connection.execute(
+            """SELECT item_key, data FROM point_sections
+               WHERE namespace='daily_forum_rewards' AND item_key LIKE ?""",
+            (f"%:{report_date}",),
+        ).fetchall()
+    signin_users = {str(user_id) for user_id in signers if str(user_id).isdigit()}
+    forum_users, forum_threads = set(), set()
+    for record in forum_records:
+        parts = str(record["item_key"]).split(":")
+        key_guild_id = parts[1] if parts and parts[0] == "user" and len(parts) >= 4 else (parts[0] if parts else "")
+        if key_guild_id != str(guild_id):
+            continue
+        rows = _json_load(record["data"], [])
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            if row.get("user_id"):
+                forum_users.add(str(row["user_id"]))
+            if row.get("thread_id"):
+                forum_threads.add(str(row["thread_id"]))
+    praise_users = {
+        str(key).split(":", 1)[0]
+        for key, row in (praise_rows.items() if isinstance(praise_rows, dict) else [])
+        if isinstance(row, dict)
+    }
+    return {
+        "signin_users": len(signin_users), "forum_users": len(forum_users),
+        "forum_posts": len(forum_threads), "praise_users": len(praise_users),
     }
 
 
@@ -754,10 +1047,10 @@ def _grant_monthly_daily_reward(
     return actual_delta
 
 
-@_locked_points_data
 def get_monthly_card_config() -> dict:
-    data = load_points_data()
-    return _normalize_monthly_card_config(data.get("monthly_card_config"))
+    _ensure_points_db()
+    with _points_connection() as connection:
+        return _db_monthly_config(connection)
 
 
 @_locked_points_data
@@ -769,29 +1062,28 @@ def update_monthly_card_config(
     reward_multiplier: float,
     enabled: bool | None = None,
 ) -> dict:
-    data = load_points_data()
-    current = _normalize_monthly_card_config(data.get("monthly_card_config"))
-    current.update({
-        "price": price,
-        "duration_days": duration_days,
-        "daily_reward": daily_reward,
-        "reward_multiplier": reward_multiplier,
-    })
-    if enabled is not None:
-        current["enabled"] = bool(enabled)
-    saved = _normalize_monthly_card_config(current)
-    data["monthly_card_config"] = saved
-    save_points_data(data)
-    return saved
+    _ensure_points_db()
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = _db_monthly_config(connection)
+        current.update({
+            "price": price, "duration_days": duration_days,
+            "daily_reward": daily_reward, "reward_multiplier": reward_multiplier,
+        })
+        if enabled is not None:
+            current["enabled"] = bool(enabled)
+        saved = _normalize_monthly_card_config(current)
+        _db_put_section(connection, "config", "monthly_card", saved)
+        return saved
 
 
-@_locked_points_data
 def get_monthly_card_status(user_id: int, guild_id: int) -> dict:
-    data = load_points_data()
-    record, _ = _ensure_user_record(data, user_id, guild_id)
-    status = _monthly_card_status(record, data.get("monthly_card_config"))
-    status["balance"] = _round_shells(record.get("shells", 0))
-    return status
+    _ensure_points_db()
+    with _points_connection() as connection:
+        record, _ = _db_get_user(connection, user_id, guild_id)
+        status = _monthly_card_status(record, _db_monthly_config(connection))
+        status["balance"] = _round_shells(record.get("shells", 0))
+        return status
 
 
 @_locked_points_data
@@ -918,30 +1210,48 @@ def claim_monthly_card_first_role(user_id: int, guild_id: int, role_id: int) -> 
 
 @_locked_points_data
 def settle_monthly_card_daily_rewards() -> dict:
-    data = load_points_data()
+    _ensure_points_db()
     now = datetime.now(TZ_CN)
     rewarded_users = 0
     total_reward = 0.0
-    for key, record in data.get("users", {}).items():
-        if not isinstance(record, dict) or ":" not in str(key):
-            continue
-        guild_raw, user_raw = str(key).split(":", 1)
-        try:
-            guild_id, user_id = int(guild_raw), int(user_raw)
-        except ValueError:
-            continue
-        reward = _grant_monthly_daily_reward(
-            data,
-            record,
-            user_id=user_id,
-            guild_id=guild_id,
-            now=now,
-        )
-        if reward > 0:
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        config_data = _db_monthly_config(connection)
+        candidates = connection.execute(
+            "SELECT user_key, data FROM point_users WHERE has_monthly_card=1"
+        ).fetchall()
+        for row in candidates:
+            key = str(row["user_key"])
+            if ":" not in key:
+                continue
+            try:
+                guild_id, user_id = (int(value) for value in key.split(":", 1))
+            except ValueError:
+                continue
+            record = _normalize_record(_json_load(row["data"], {}))
+            local_data = {"monthly_card_config": config_data, "transactions": []}
+            reward = _grant_monthly_daily_reward(
+                local_data, record, user_id=user_id, guild_id=guild_id, now=now
+            )
+            if reward <= 0:
+                continue
+            tx = local_data["transactions"][-1]
+            connection.execute(
+                """INSERT INTO point_transactions
+                   (time, guild_id, user_id, amount, balance, source, reason, idempotency_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, '')""",
+                (
+                    tx["time"], tx["guild_id"], tx["user_id"], tx["amount"],
+                    tx["balance"], tx["source"], tx["reason"],
+                ),
+            )
+            _db_put_user(connection, key, record)
             rewarded_users += 1
             total_reward = _round_delta(total_reward + reward)
-    if rewarded_users:
-        save_points_data(data)
+        if rewarded_users:
+            connection.execute(
+                "DELETE FROM point_transactions WHERE id NOT IN (SELECT id FROM point_transactions ORDER BY id DESC LIMIT 500)"
+            )
     return {"date": now.date().isoformat(), "rewarded_users": rewarded_users, "total_reward": total_reward}
 
 
@@ -955,57 +1265,50 @@ def grant_monthly_eligible_reward(
     reason: str = "",
     idempotency_key: str = "",
 ) -> dict:
-    data = load_points_data()
-    record, _ = _ensure_user_record(data, user_id, guild_id)
+    _ensure_points_db()
     normalized_key = str(idempotency_key or "").strip()
-    if normalized_key:
-        existing = next(
-            (
-                tx for tx in reversed(record.get("transactions", []))
-                if isinstance(tx, dict) and tx.get("idempotency_key") == normalized_key
-            ),
-            None,
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        record, key = _db_get_user(connection, user_id, guild_id)
+        if normalized_key:
+            existing = connection.execute(
+                """SELECT amount FROM point_transactions
+                   WHERE guild_id=? AND user_id=? AND idempotency_key=?""",
+                (str(guild_id), str(user_id), normalized_key),
+            ).fetchone()
+            if existing:
+                return {
+                    "success": True,
+                    "duplicate": True,
+                    "base_amount": 0.0,
+                    "monthly_bonus": 0.0,
+                    "amount": _round_delta(existing["amount"]),
+                    "multiplier": 1.0,
+                    "balance": _round_shells(record.get("shells", 0)),
+                }
+        base = _round_delta(amount)
+        total, monthly_bonus, multiplier = _monthly_reward_amount(record, _db_monthly_config(connection), base)
+        before = _round_shells(record.get("shells", 0))
+        after = _round_shells(before + total)
+        actual_delta = _round_delta(after - before)
+        record["shells"] = record["points"] = after
+        detail = reason
+        if monthly_bonus > 0:
+            detail = f"{reason};monthly_card={multiplier}x;base={format_shells(base)}".strip(";")
+        _db_append_transaction(
+            connection, record, user_id=user_id, guild_id=guild_id,
+            amount=actual_delta, source=source, reason=detail, idempotency_key=normalized_key,
         )
-        if existing:
-            return {
-                "success": True,
-                "duplicate": True,
-                "base_amount": 0.0,
-                "monthly_bonus": 0.0,
-                "amount": _round_delta(existing.get("amount", 0)),
-                "multiplier": 1.0,
-                "balance": _round_shells(record.get("shells", 0)),
-            }
-    base = _round_delta(amount)
-    total, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), base)
-    before = _round_shells(record.get("shells", 0))
-    after = _round_shells(before + total)
-    actual_delta = _round_delta(after - before)
-    record["shells"] = after
-    record["points"] = after
-    detail = reason
-    if monthly_bonus > 0:
-        detail = f"{reason};monthly_card={multiplier}x;base={format_shells(base)}".strip(";")
-    _append_transaction(
-        data,
-        record,
-        user_id=user_id,
-        guild_id=guild_id,
-        amount=actual_delta,
-        source=source,
-        reason=detail,
-        idempotency_key=normalized_key,
-    )
-    save_points_data(data)
-    return {
-        "success": True,
-        "duplicate": False,
-        "base_amount": base,
-        "monthly_bonus": monthly_bonus,
-        "amount": actual_delta,
-        "multiplier": multiplier,
-        "balance": after,
-    }
+        _db_put_user(connection, key, record)
+        return {
+            "success": True,
+            "duplicate": False,
+            "base_amount": base,
+            "monthly_bonus": monthly_bonus,
+            "amount": actual_delta,
+            "multiplier": multiplier,
+            "balance": after,
+        }
 
 
 def get_acceleration_tiers() -> list[dict]:
@@ -1032,10 +1335,10 @@ def get_acceleration_tiers() -> list[dict]:
     ]
 
 
-@_locked_points_data
 def get_acceleration_status(user_id: int, guild_id: int | None = None) -> dict:
-    data = load_points_data()
-    record, _ = _ensure_user_record(data, user_id, guild_id)
+    _ensure_points_db()
+    with _points_connection() as connection:
+        record, _ = _db_get_user(connection, user_id, guild_id)
     max_days = int(getattr(config, "ACCELERATION_CARD_MAX_DAYS", 25))
     base_wait = int(getattr(config, "ACCOUNT_BASE_WAIT_DAYS", 30))
     min_wait = int(getattr(config, "ACCOUNT_MIN_WAIT_DAYS", 5))
@@ -1117,6 +1420,13 @@ def purchase_acceleration_card(user_id: int, guild_id: int, tier_id: str) -> dic
 
 
 def load_random_events() -> list[dict]:
+    global _RANDOM_EVENTS_CACHE, _RANDOM_EVENTS_MTIME_NS
+    try:
+        mtime_ns = os.stat(RANDOM_EVENTS_FILE).st_mtime_ns
+    except OSError:
+        mtime_ns = -1
+    if _RANDOM_EVENTS_CACHE is not None and mtime_ns == _RANDOM_EVENTS_MTIME_NS:
+        return [dict(event) for event in _RANDOM_EVENTS_CACHE]
     try:
         with open(RANDOM_EVENTS_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
@@ -1154,7 +1464,9 @@ def load_random_events() -> list[dict]:
         )
         seen_ids.add(event_id)
 
-    return valid_events or DEFAULT_RANDOM_EVENTS["events"]
+    _RANDOM_EVENTS_CACHE = valid_events or [dict(event) for event in DEFAULT_RANDOM_EVENTS["events"]]
+    _RANDOM_EVENTS_MTIME_NS = mtime_ns
+    return [dict(event) for event in _RANDOM_EVENTS_CACHE]
 
 
 def _pick_random_event() -> dict:
@@ -1215,12 +1527,12 @@ def _register_daily_rank(data: dict, guild_id: int, user_id: int, today: str) ->
     return signers.index(uid) + 1
 
 
-@_locked_points_data
 def get_daily_signin_summary(guild_id: int) -> dict:
-    data = load_points_data()
+    _ensure_points_db()
     today = _today()
     daily_key = f"{guild_id}:{today}"
-    signers = data.get("daily_signins", {}).get(daily_key, [])
+    with _points_connection() as connection:
+        signers = _db_get_section(connection, "daily_signins", daily_key, [])
     if not isinstance(signers, list):
         signers = []
     normalized = []
@@ -1240,96 +1552,74 @@ def get_daily_signin_summary(guild_id: int) -> dict:
 @_locked_points_data
 def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
     """每日报到，返回详细蛋壳结算结果。"""
-    data = load_points_data()
-    record, _ = _ensure_user_record(data, user_id, guild_id)
+    _ensure_points_db()
     today = _today()
-
-    if record.get("last_sign_date", "") == today:
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        record, key = _db_get_user(connection, user_id, guild_id)
+        if record.get("last_sign_date", "") == today:
+            return {
+                "success": False, "balance": _round_shells(record.get("shells", 0)),
+                "streak_days": int(record.get("streak_days", 0)), "message": "今日已报到",
+            }
+        streak_days = _calculate_streak(
+            str(record.get("last_sign_date", "")), today, int(record.get("streak_days", 0))
+        )
+        daily_msg_count = int(record.get("daily_msg_count", 0))
+        if record.get("daily_msg_date", "") != today:
+            daily_msg_count = 0
+        base_reward = _round_delta(reward)
+        streak_rate = get_streak_bonus_rate(streak_days)
+        activity_rate = get_activity_bonus_rate(daily_msg_count)
+        bonus_amount = _round_delta(base_reward * (streak_rate + activity_rate))
+        daily_key = f"{guild_id}:{today}"
+        signers = _db_get_section(connection, "daily_signins", daily_key, [])
+        uid = str(user_id)
+        if uid not in signers:
+            signers.append(uid)
+        rank = signers.index(uid) + 1
+        rank_bonus = _round_delta(random.randint(1, 19) / 10) if rank <= 10 else 0.0
+        event = _pick_random_event()
+        event_delta = _round_delta(event.get("delta", 0))
+        before = _round_shells(record.get("shells", 0))
+        positive_rewards = _round_delta(base_reward + bonus_amount + rank_bonus + max(0.0, event_delta))
+        _, monthly_card_bonus, monthly_multiplier = _monthly_reward_amount(
+            record, _db_monthly_config(connection), positive_rewards
+        )
+        total_delta = _round_delta(base_reward + bonus_amount + rank_bonus + event_delta + monthly_card_bonus)
+        after = _round_shells(before + total_delta)
+        actual_delta = _round_delta(after - before)
+        record.update({"last_sign_date": today, "streak_days": streak_days, "shells": after, "points": after})
+        _db_append_transaction(
+            connection, record, user_id=user_id, guild_id=guild_id, amount=actual_delta,
+            source="sign_in", reason=f"rank={rank};event={event['id']};monthly_card={monthly_multiplier}x",
+        )
+        _db_put_user(connection, key, record)
+        _db_put_section(connection, "daily_signins", daily_key, signers)
         return {
-            "success": False,
-            "balance": _round_shells(record.get("shells", 0)),
-            "streak_days": int(record.get("streak_days", 0)),
-            "message": "今日已报到",
+            "success": True, "balance": after, "base_reward": base_reward,
+            "bonus_amount": bonus_amount, "streak_rate": streak_rate, "activity_rate": activity_rate,
+            "streak_days": streak_days, "daily_msg_count": daily_msg_count, "rank": rank,
+            "rank_bonus": rank_bonus, "event": event, "event_delta": event_delta,
+            "monthly_card_bonus": monthly_card_bonus, "monthly_card_multiplier": monthly_multiplier,
+            "total_delta": actual_delta,
         }
-
-    streak_days = _calculate_streak(
-        str(record.get("last_sign_date", "")),
-        today,
-        int(record.get("streak_days", 0)),
-    )
-    daily_msg_count = int(record.get("daily_msg_count", 0))
-    if record.get("daily_msg_date", "") != today:
-        daily_msg_count = 0
-
-    base_reward = _round_delta(reward)
-    streak_rate = get_streak_bonus_rate(streak_days)
-    activity_rate = get_activity_bonus_rate(daily_msg_count)
-    bonus_amount = _round_delta(base_reward * (streak_rate + activity_rate))
-
-    rank = _register_daily_rank(data, guild_id, user_id, today)
-    rank_bonus = _round_delta(random.randint(1, 19) / 10) if rank <= 10 else 0.0
-
-    event = _pick_random_event()
-    event_delta = _round_delta(event.get("delta", 0))
-
-    before = _round_shells(record.get("shells", 0))
-    positive_rewards = _round_delta(base_reward + bonus_amount + rank_bonus + max(0.0, event_delta))
-    _, monthly_card_bonus, monthly_multiplier = _monthly_reward_amount(
-        record,
-        data.get("monthly_card_config"),
-        positive_rewards,
-    )
-    total_delta = _round_delta(base_reward + bonus_amount + rank_bonus + event_delta + monthly_card_bonus)
-    after = _round_shells(before + total_delta)
-    actual_delta = _round_delta(after - before)
-
-    record["last_sign_date"] = today
-    record["streak_days"] = streak_days
-    record["shells"] = after
-    record["points"] = after
-
-    _append_transaction(
-        data,
-        record,
-        user_id=user_id,
-        guild_id=guild_id,
-        amount=actual_delta,
-        source="sign_in",
-        reason=f"rank={rank};event={event['id']};monthly_card={monthly_multiplier}x",
-    )
-    save_points_data(data)
-
-    return {
-        "success": True,
-        "balance": after,
-        "base_reward": base_reward,
-        "bonus_amount": bonus_amount,
-        "streak_rate": streak_rate,
-        "activity_rate": activity_rate,
-        "streak_days": streak_days,
-        "daily_msg_count": daily_msg_count,
-        "rank": rank,
-        "rank_bonus": rank_bonus,
-        "event": event,
-        "event_delta": event_delta,
-        "monthly_card_bonus": monthly_card_bonus,
-        "monthly_card_multiplier": monthly_multiplier,
-        "total_delta": actual_delta,
-    }
 
 
 @_locked_points_data
 def record_message_activity(user_id: int, guild_id: int) -> int:
     """记录每日有效发言次数，不直接发放蛋壳。"""
-    data = load_points_data()
-    record, _ = _ensure_user_record(data, user_id, guild_id)
+    _ensure_points_db()
     today = _today()
-    if record.get("daily_msg_date", "") != today:
-        record["daily_msg_date"] = today
-        record["daily_msg_count"] = 0
-    record["daily_msg_count"] = int(record.get("daily_msg_count", 0)) + 1
-    save_points_data(data)
-    return int(record["daily_msg_count"])
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        record, key = _db_get_user(connection, user_id, guild_id)
+        if record.get("daily_msg_date", "") != today:
+            record["daily_msg_date"] = today
+            record["daily_msg_count"] = 0
+        record["daily_msg_count"] = int(record.get("daily_msg_count", 0)) + 1
+        _db_put_user(connection, key, record)
+        return int(record["daily_msg_count"])
 
 
 def add_message_points(

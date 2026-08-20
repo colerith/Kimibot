@@ -2,8 +2,11 @@
 
 import json
 import os
+import copy
+import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from typing import Dict, List
 
 ROLES_DATA_FILE = "data/general_roles.json"
@@ -11,10 +14,16 @@ COLLECTIONS_DATA_FILE = "data/user_collections.json"
 LOTTERY_STATS_DATA_FILE = "data/role_lottery_stats.json"
 REDEEM_OWNERSHIP_DATA_FILE = "data/role_redeem_ownership.json"
 COLLECTION_REWARDS_DATA_FILE = "data/role_collection_rewards.json"
+ROLE_STATE_DB_FILE = "data/role_user_state.sqlite3"
 
 _collection_reward_lock = threading.Lock()
 _ownership_lock = threading.RLock()
 _lottery_stats_lock = threading.RLock()
+_role_state_write_lock = threading.RLock()
+_role_data_lock = threading.RLock()
+_role_data_cache: dict | None = None
+_role_data_cache_mtime_ns = -1
+_role_state_ready = False
 
 RARITY_NORMAL = 1
 RARITY_RARE = 2
@@ -299,21 +308,39 @@ def _normalize_role_data(data: dict) -> dict:
 
 # --- 身份组配置数据 ---
 def load_role_data():
-    if not os.path.exists(ROLES_DATA_FILE):
-        return _normalize_role_data({})
-    try:
-        with open(ROLES_DATA_FILE, "r", encoding="utf-8") as f:
-            return _normalize_role_data(json.load(f))
-    except Exception:
-        return _normalize_role_data({})
+    """读取低频变更的奖池配置，并按文件 mtime 缓存规范化结果。"""
+    global _role_data_cache, _role_data_cache_mtime_ns
+    with _role_data_lock:
+        try:
+            mtime_ns = os.stat(ROLES_DATA_FILE).st_mtime_ns
+        except OSError:
+            mtime_ns = -1
+        if _role_data_cache is not None and mtime_ns == _role_data_cache_mtime_ns:
+            return copy.deepcopy(_role_data_cache)
+        try:
+            with open(ROLES_DATA_FILE, "r", encoding="utf-8") as file:
+                normalized = _normalize_role_data(json.load(file))
+        except (OSError, json.JSONDecodeError):
+            normalized = _normalize_role_data({})
+        _role_data_cache = normalized
+        _role_data_cache_mtime_ns = mtime_ns
+        return copy.deepcopy(normalized)
 
 
 def save_role_data(data):
     """保存身份组配置文件。"""
+    global _role_data_cache, _role_data_cache_mtime_ns
     normalized = _normalize_role_data(data)
-    os.makedirs(os.path.dirname(ROLES_DATA_FILE), exist_ok=True)
-    with open(ROLES_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, indent=4, ensure_ascii=False)
+    with _role_data_lock:
+        os.makedirs(os.path.dirname(ROLES_DATA_FILE), exist_ok=True)
+        temp_file = f"{ROLES_DATA_FILE}.{os.getpid()}.tmp"
+        with open(temp_file, "w", encoding="utf-8") as file:
+            json.dump(normalized, file, indent=4, ensure_ascii=False)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_file, ROLES_DATA_FILE)
+        _role_data_cache = normalized
+        _role_data_cache_mtime_ns = os.stat(ROLES_DATA_FILE).st_mtime_ns
 
 
 def get_lottery_role_rarity(role_id: int, role_data: dict | None = None) -> int:
@@ -539,73 +566,190 @@ def get_collection_reward_claim_status(user_id: int) -> dict:
     return load_collection_reward_claims().get(str(user_id), {"groups": [], "full": False})
 
 
-def load_collections_data():
-    """加载用户藏品数据。"""
-    if not os.path.exists(COLLECTIONS_DATA_FILE):
-        return {}
+def _connect_role_state_db() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(ROLE_STATE_DB_FILE), exist_ok=True)
+    connection = sqlite3.connect(ROLE_STATE_DB_FILE, timeout=30)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA busy_timeout=30000")
+    return connection
+
+
+@contextmanager
+def _role_state_connection():
+    connection = _connect_role_state_db()
     try:
-        with open(COLLECTIONS_DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def _read_json_dict(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            raw = json.load(file)
+    except (OSError, json.JSONDecodeError):
         return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _ensure_role_state_db() -> None:
+    global _role_state_ready
+    if _role_state_ready:
+        return
+    with _ownership_lock:
+        if _role_state_ready:
+            return
+        with _role_state_connection() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS role_state_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS role_user_state (
+                    namespace TEXT NOT NULL,
+                    user_key TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    PRIMARY KEY(namespace, user_key)
+                );
+                """
+            )
+            migrated = connection.execute(
+                "SELECT value FROM role_state_meta WHERE key='json_migrated'"
+            ).fetchone()
+            if migrated is None:
+                sources = {
+                    "collections": _read_json_dict(COLLECTIONS_DATA_FILE),
+                    "redeem": _read_json_dict(REDEEM_OWNERSHIP_DATA_FILE),
+                    "lottery_stats": _read_json_dict(LOTTERY_STATS_DATA_FILE),
+                }
+                for namespace, rows in sources.items():
+                    for user_key, value in rows.items():
+                        if namespace in {"collections", "redeem"}:
+                            value = _uniq_ids(value)
+                        else:
+                            value = _normalize_lottery_stats(value)
+                        connection.execute(
+                            "INSERT OR REPLACE INTO role_user_state(namespace, user_key, data) VALUES (?, ?, ?)",
+                            (namespace, str(user_key), json.dumps(value, ensure_ascii=False, separators=(",", ":"))),
+                        )
+                connection.execute(
+                    "INSERT INTO role_state_meta(key, value) VALUES ('json_migrated', '1')"
+                )
+                for path in (COLLECTIONS_DATA_FILE, REDEEM_OWNERSHIP_DATA_FILE, LOTTERY_STATS_DATA_FILE):
+                    if os.path.exists(path) and not os.path.exists(f"{path}.pre_sqlite.bak"):
+                        import shutil
+                        shutil.copy2(path, f"{path}.pre_sqlite.bak")
+        _role_state_ready = True
+
+
+def initialize_role_state_storage() -> None:
+    """启动期主动迁移抽卡藏品、兑换归属和保底统计。"""
+    _ensure_role_state_db()
+
+
+def _load_role_namespace(namespace: str) -> dict:
+    _ensure_role_state_db()
+    with _role_state_connection() as connection:
+        return {
+            row["user_key"]: json.loads(row["data"])
+            for row in connection.execute(
+                "SELECT user_key, data FROM role_user_state WHERE namespace=?", (namespace,)
+            )
+        }
+
+
+def _save_role_namespace(namespace: str, data: dict) -> None:
+    _ensure_role_state_db()
+    with _role_state_write_lock:
+        with _role_state_connection() as connection:
+            connection.execute("DELETE FROM role_user_state WHERE namespace=?", (namespace,))
+            connection.executemany(
+                "INSERT INTO role_user_state(namespace, user_key, data) VALUES (?, ?, ?)",
+                (
+                    (namespace, str(key), json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+                    for key, value in (data or {}).items()
+                ),
+            )
+
+
+def load_collections_data():
+    """兼容批量管理调用；抽卡热路径使用单用户查询。"""
+    return {str(uid): _uniq_ids(role_ids) for uid, role_ids in _load_role_namespace("collections").items()}
+
 
 def save_collections_data(data):
-    """保存用户藏品数据。"""
-    os.makedirs(os.path.dirname(COLLECTIONS_DATA_FILE), exist_ok=True)
-    with open(COLLECTIONS_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    _save_role_namespace("collections", {str(uid): _uniq_ids(ids) for uid, ids in (data or {}).items()})
 
 def add_to_collection(user_id: int, role_id: int):
     """将一个稀有身份组添加到用户的永久藏品中。"""
-    with _ownership_lock:
-        uid_str = str(user_id)
-        data = load_collections_data()
-        if uid_str not in data:
-            data[uid_str] = []
+    add_many_to_collection(user_id, [role_id])
 
-        if role_id not in data[uid_str]:
-            data[uid_str].append(role_id)
-            save_collections_data(data)
+
+def add_many_to_collection(user_id: int, role_ids) -> list[int]:
+    """一次事务加入多个藏品，避免十连抽逐次读写。"""
+    _ensure_role_state_db()
+    with _ownership_lock, _role_state_write_lock:
+        with _role_state_connection() as connection:
+            uid = str(user_id)
+            row = connection.execute(
+                "SELECT data FROM role_user_state WHERE namespace='collections' AND user_key=?", (uid,)
+            ).fetchone()
+            owned = set(_uniq_ids(json.loads(row["data"]) if row else []))
+            owned.update(_uniq_ids(role_ids))
+            normalized = sorted(owned)
+            connection.execute(
+                """INSERT INTO role_user_state(namespace, user_key, data) VALUES ('collections', ?, ?)
+                   ON CONFLICT(namespace, user_key) DO UPDATE SET data=excluded.data""",
+                (uid, json.dumps(normalized, separators=(",", ":"))),
+            )
+            return normalized
 
 def get_user_collection(user_id: int) -> list:
     """获取一个用户的所有藏品ID列表。"""
-    uid_str = str(user_id)
-    data = load_collections_data()
-    return data.get(uid_str, [])
+    _ensure_role_state_db()
+    with _role_state_connection() as connection:
+        row = connection.execute(
+            "SELECT data FROM role_user_state WHERE namespace='collections' AND user_key=?", (str(user_id),)
+        ).fetchone()
+        return _uniq_ids(json.loads(row["data"]) if row else [])
 
 
 def load_redeem_ownership_data():
-    if not os.path.exists(REDEEM_OWNERSHIP_DATA_FILE):
-        return {}
-    try:
-        with open(REDEEM_OWNERSHIP_DATA_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {str(uid): _uniq_ids(role_ids) for uid, role_ids in raw.items()}
+    return {str(uid): _uniq_ids(role_ids) for uid, role_ids in _load_role_namespace("redeem").items()}
 
 
 def save_redeem_ownership_data(data):
-    os.makedirs(os.path.dirname(REDEEM_OWNERSHIP_DATA_FILE), exist_ok=True)
-    normalized = {str(uid): _uniq_ids(role_ids) for uid, role_ids in (data or {}).items()}
-    with open(REDEEM_OWNERSHIP_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, indent=4, ensure_ascii=False)
+    _save_role_namespace("redeem", {str(uid): _uniq_ids(role_ids) for uid, role_ids in (data or {}).items()})
 
 
 def add_redeem_ownership(user_id: int, role_id: int):
-    with _ownership_lock:
-        uid_str = str(user_id)
-        data = load_redeem_ownership_data()
-        roles = data.setdefault(uid_str, [])
-        if role_id not in roles:
-            roles.append(role_id)
-            save_redeem_ownership_data(data)
+    _ensure_role_state_db()
+    with _ownership_lock, _role_state_write_lock:
+        with _role_state_connection() as connection:
+            uid = str(user_id)
+            row = connection.execute(
+                "SELECT data FROM role_user_state WHERE namespace='redeem' AND user_key=?", (uid,)
+            ).fetchone()
+            roles = set(_uniq_ids(json.loads(row["data"]) if row else []))
+            roles.add(int(role_id))
+            connection.execute(
+                """INSERT INTO role_user_state(namespace, user_key, data) VALUES ('redeem', ?, ?)
+                   ON CONFLICT(namespace, user_key) DO UPDATE SET data=excluded.data""",
+                (uid, json.dumps(sorted(roles), separators=(",", ":"))),
+            )
 
 
 def get_user_redeem_ownership(user_id: int) -> list[int]:
-    return load_redeem_ownership_data().get(str(user_id), [])
+    _ensure_role_state_db()
+    with _role_state_connection() as connection:
+        row = connection.execute(
+            "SELECT data FROM role_user_state WHERE namespace='redeem' AND user_key=?", (str(user_id),)
+        ).fetchone()
+        return _uniq_ids(json.loads(row["data"]) if row else [])
 
 
 def reconcile_cached_member_ownership(member_role_ids: dict[int, set[int]], role_data: dict | None = None) -> dict:
@@ -618,7 +762,7 @@ def reconcile_cached_member_ownership(member_role_ids: dict[int, set[int]], role
     redeem_ids = set(data.get("redeem_roles", []))
     collection_added = redeem_added = users_changed = 0
 
-    with _ownership_lock:
+    with _ownership_lock, _role_state_write_lock:
         collections = load_collections_data()
         redeem_ownership = load_redeem_ownership_data()
         collections_changed = redeem_changed = False
@@ -736,29 +880,25 @@ def _normalize_lottery_stats(raw: dict | None = None) -> dict:
 
 
 def load_lottery_stats_data() -> dict:
-    if not os.path.exists(LOTTERY_STATS_DATA_FILE):
-        return {}
-    try:
-        with open(LOTTERY_STATS_DATA_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {str(k): _normalize_lottery_stats(v) for k, v in raw.items()}
+    return {str(key): _normalize_lottery_stats(value) for key, value in _load_role_namespace("lottery_stats").items()}
 
 
 def save_lottery_stats_data(data: dict):
-    os.makedirs(os.path.dirname(LOTTERY_STATS_DATA_FILE), exist_ok=True)
-    normalized = {str(k): _normalize_lottery_stats(v) for k, v in (data or {}).items()}
-    with open(LOTTERY_STATS_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(normalized, f, indent=4, ensure_ascii=False)
+    _save_role_namespace(
+        "lottery_stats",
+        {str(key): _normalize_lottery_stats(value) for key, value in (data or {}).items()},
+    )
 
 
 def get_lottery_stats(user_id: int, guild_id: int | None = None) -> dict:
+    _ensure_role_state_db()
     with _lottery_stats_lock:
-        data = load_lottery_stats_data()
-        return _normalize_lottery_stats(data.get(_make_lottery_user_key(user_id, guild_id), {}))
+        with _role_state_connection() as connection:
+            row = connection.execute(
+                "SELECT data FROM role_user_state WHERE namespace='lottery_stats' AND user_key=?",
+                (_make_lottery_user_key(user_id, guild_id),),
+            ).fetchone()
+            return _normalize_lottery_stats(json.loads(row["data"]) if row else {})
 
 
 def record_lottery_draw(
@@ -771,52 +911,55 @@ def record_lottery_draw(
     reward_shells: float,
     drawn_at: str,
 ) -> dict:
-    with _lottery_stats_lock:
-        data = load_lottery_stats_data()
+    _ensure_role_state_db()
+    with _lottery_stats_lock, _role_state_write_lock:
         key = _make_lottery_user_key(user_id, guild_id)
-        stats = _normalize_lottery_stats(data.get(key, {}))
+        with _role_state_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT data FROM role_user_state WHERE namespace='lottery_stats' AND user_key=?", (key,)
+            ).fetchone()
+            stats = _normalize_lottery_stats(json.loads(existing["data"]) if existing else {})
+            stats["total_draws"] += len(results or [])
+            stats["spent_shells"] = _normalize_shell_amount(stats["spent_shells"] + float(spent_shells or 0), 0.0)
+            stats["refund_shells"] = _normalize_shell_amount(stats["refund_shells"] + float(refund_shells or 0), 0.0)
+            stats["reward_shells"] = _normalize_shell_amount(stats["reward_shells"] + float(reward_shells or 0), 0.0)
 
-        stats["total_draws"] += len(results or [])
-        stats["spent_shells"] = _normalize_shell_amount(stats["spent_shells"] + float(spent_shells or 0), 0.0)
-        stats["refund_shells"] = _normalize_shell_amount(stats["refund_shells"] + float(refund_shells or 0), 0.0)
-        stats["reward_shells"] = _normalize_shell_amount(stats["reward_shells"] + float(reward_shells or 0), 0.0)
-
-        for row in results or []:
-            row_type = row.get("type")
-            if row_type == LOTTERY_OUTCOME_EMPTY or row_type == "empty":
-                stats["empty_hits"] += 1
-                stats["empty_streak"] += 1
-                stats["no_role_streak"] += 1
-                stats["no_legendary_streak"] += 1
-                continue
-            if row_type == LOTTERY_OUTCOME_SHELLS or row_type == "shells":
-                stats["shell_hits"] += 1
-                stats["empty_streak"] = 0
-                stats["no_role_streak"] += 1
-                stats["no_legendary_streak"] += 1
-                continue
-            if row_type == LOTTERY_OUTCOME_ROLE or row_type == "role":
-                stats["role_hits"] += 1
-                stats["empty_streak"] = 0
-                stats["no_role_streak"] = 0
-                if row.get("dupe"):
-                    stats["duplicate_roles"] += 1
-                else:
-                    stats["new_roles"] += 1
-
-                rarity = str(row.get("rarity", ""))
-                if rarity in stats["rarity_hits"]:
-                    stats["rarity_hits"][rarity] += 1
-                if rarity == str(RARITY_LEGENDARY):
-                    stats["no_legendary_streak"] = 0
-                else:
+            for row in results or []:
+                row_type = row.get("type")
+                if row_type == LOTTERY_OUTCOME_EMPTY or row_type == "empty":
+                    stats["empty_hits"] += 1
+                    stats["empty_streak"] += 1
+                    stats["no_role_streak"] += 1
                     stats["no_legendary_streak"] += 1
+                    continue
+                if row_type == LOTTERY_OUTCOME_SHELLS or row_type == "shells":
+                    stats["shell_hits"] += 1
+                    stats["empty_streak"] = 0
+                    stats["no_role_streak"] += 1
+                    stats["no_legendary_streak"] += 1
+                    continue
+                if row_type == LOTTERY_OUTCOME_ROLE or row_type == "role":
+                    stats["role_hits"] += 1
+                    stats["empty_streak"] = 0
+                    stats["no_role_streak"] = 0
+                    stats["duplicate_roles"] += int(bool(row.get("dupe")))
+                    stats["new_roles"] += int(not bool(row.get("dupe")))
+                    rarity = str(row.get("rarity", ""))
+                    if rarity in stats["rarity_hits"]:
+                        stats["rarity_hits"][rarity] += 1
+                    if rarity == str(RARITY_LEGENDARY):
+                        stats["no_legendary_streak"] = 0
+                    else:
+                        stats["no_legendary_streak"] += 1
+                    kind = str(row.get("kind", ""))
+                    if kind in stats["kind_hits"]:
+                        stats["kind_hits"][kind] += 1
 
-                kind = str(row.get("kind", ""))
-                if kind in stats["kind_hits"]:
-                    stats["kind_hits"][kind] += 1
-
-        stats["last_draw_at"] = str(drawn_at or "")
-        data[key] = stats
-        save_lottery_stats_data(data)
-        return stats
+            stats["last_draw_at"] = str(drawn_at or "")
+            connection.execute(
+                """INSERT INTO role_user_state(namespace, user_key, data) VALUES ('lottery_stats', ?, ?)
+                   ON CONFLICT(namespace, user_key) DO UPDATE SET data=excluded.data""",
+                (key, json.dumps(stats, ensure_ascii=False, separators=(",", ":"))),
+            )
+            return stats

@@ -14,7 +14,12 @@ from .views import (
     refresh_role_panel,
 )
 from cogs.shared.utils import is_super_egg
-from .storage import load_role_data, get_collection_reward_role_ids, reconcile_cached_member_ownership
+from .storage import (
+    get_collection_reward_role_ids,
+    initialize_role_state_storage,
+    load_role_data,
+    reconcile_cached_member_ownership,
+)
 
 class RolesCog(commands.Cog):
     """负责自助身份组领取、通知订阅和相关管理命令。"""
@@ -26,6 +31,11 @@ class RolesCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        try:
+            await asyncio.to_thread(initialize_role_state_storage)
+        except Exception as error:
+            print(f"[Roles] 抽卡 SQLite 初始化失败 error={error!r}")
+            return
         # 注册持久化视图，这样机器人重启后按钮也能继续工作
         self.bot.add_view(RoleClaimView())
         self.bot.add_view(NotificationEntranceView())

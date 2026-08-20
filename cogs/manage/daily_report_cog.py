@@ -5,7 +5,7 @@ import discord
 from discord.ext import commands, tasks
 
 from config import IDS, TZ_CN
-from cogs.points.storage import load_points_data
+from cogs.points.storage import get_daily_activity_stats
 from .daily_report_storage import (
     get_day_stats,
     get_missing_report_dates,
@@ -34,41 +34,7 @@ def _role_ids(member: discord.Member) -> set[int]:
 
 def load_daily_activity_stats(guild_id: int, report_date: str) -> dict:
     """Read durable daily activity counters from the points ledger."""
-    data = load_points_data()
-    signin_rows = data.get("daily_signins", {}).get(f"{guild_id}:{report_date}", [])
-    signin_users = {str(user_id) for user_id in signin_rows if str(user_id).isdigit()}
-
-    forum_users = set()
-    forum_threads = set()
-    for key, rows in data.get("daily_forum_rewards", {}).items():
-        parts = str(key).split(":")
-        if not parts or parts[-1] != report_date or not isinstance(rows, list):
-            continue
-        key_guild_id = parts[1] if parts[0] == "user" and len(parts) >= 4 else parts[0]
-        if key_guild_id != str(guild_id):
-            continue
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            user_id = str(row.get("user_id", ""))
-            thread_id = str(row.get("thread_id", ""))
-            if user_id:
-                forum_users.add(user_id)
-            if thread_id:
-                forum_threads.add(thread_id)
-
-    praise_rows = data.get("daily_praise_rewards", {}).get(f"{guild_id}:{report_date}", {})
-    praise_users = {
-        str(key).split(":", 1)[0]
-        for key, row in (praise_rows.items() if isinstance(praise_rows, dict) else [])
-        if isinstance(row, dict)
-    }
-    return {
-        "signin_users": len(signin_users),
-        "forum_users": len(forum_users),
-        "forum_posts": len(forum_threads),
-        "praise_users": len(praise_users),
-    }
+    return get_daily_activity_stats(guild_id, report_date)
 
 
 def build_daily_report_embed(

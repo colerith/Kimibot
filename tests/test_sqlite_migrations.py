@@ -1,0 +1,129 @@
+import concurrent.futures
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+
+def _load_module(name: str, relative_path: str):
+    path = Path(__file__).parents[1] / relative_path
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+points = _load_module("points_storage_test", "cogs/points/storage.py")
+roles = _load_module("roles_storage_test", "cogs/roles/storage.py")
+
+
+class PointsSQLiteMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        points.POINTS_DATA_FILE = str(root / "user_points.json")
+        points.POINTS_DB_FILE = str(root / "user_points.sqlite3")
+        points._POINTS_DB_READY = False
+        legacy = points._empty_points_data()
+        legacy["users"]["99:1"] = {"shells": 12.5, "streak_days": 3}
+        Path(points.POINTS_DATA_FILE).write_text(
+            json.dumps(legacy, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def tearDown(self):
+        points._POINTS_DB_READY = False
+        self.temp_dir.cleanup()
+
+    def test_json_migrates_once_and_keeps_backup(self):
+        self.assertEqual(points.get_user_points(1, 99), 12.5)
+        self.assertTrue(Path(f"{points.POINTS_DATA_FILE}.pre_sqlite.bak").exists())
+        points.modify_user_points(1, 2.0, 99, source="test")
+        self.assertEqual(points.get_user_points(1, 99), 14.5)
+
+        points._POINTS_DB_READY = False
+        self.assertEqual(points.get_user_points(1, 99), 14.5)
+
+    def test_concurrent_signins_are_unique_and_ranked(self):
+        user_ids = list(range(100, 150))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            results = list(executor.map(lambda uid: points.sign_in_user(uid, 99, 1.0), user_ids))
+
+        self.assertTrue(all(result["success"] for result in results))
+        self.assertEqual(sorted(result["rank"] for result in results), list(range(1, 51)))
+        self.assertEqual(points.get_daily_signin_summary(99)["count"], 50)
+        self.assertEqual(points.get_daily_activity_stats(99, points._today())["signin_users"], 50)
+        self.assertFalse(points.sign_in_user(user_ids[0], 99, 1.0)["success"])
+
+    def test_idempotent_reward_uses_indexed_lookup(self):
+        first = points.grant_monthly_eligible_reward(
+            1, 99, 3.0, source="test_reward", idempotency_key="same-event"
+        )
+        second = points.grant_monthly_eligible_reward(
+            1, 99, 3.0, source="test_reward", idempotency_key="same-event"
+        )
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(points.get_user_points(1, 99), 15.5)
+
+    def test_atomic_spend_never_overdraws(self):
+        spent = points.spend_user_points(1, 10.0, 99, source="test_spend")
+        rejected = points.spend_user_points(1, 10.0, 99, source="test_spend")
+        self.assertTrue(spent["success"])
+        self.assertFalse(rejected["success"])
+        self.assertEqual(points.get_user_points(1, 99), 2.5)
+
+    def test_legacy_snapshot_writer_remains_compatible(self):
+        result = points.claim_daily_task_bonus(1, 99, "basic", 10.0)
+        self.assertTrue(result["success"])
+        self.assertEqual(points.get_user_points(1, 99), 22.5)
+        snapshot = points.get_user_daily_snapshot(1, 99)
+        self.assertEqual(snapshot["users"]["99:1"]["shells"], 22.5)
+
+    def test_monthly_card_uses_indexed_candidate_marker(self):
+        points.update_monthly_card_config(
+            price=1.0, duration_days=3, daily_reward=2.0, reward_multiplier=1.5
+        )
+        purchase = points.purchase_monthly_card(1, 99)
+        self.assertTrue(purchase["success"])
+        self.assertEqual(purchase["daily_reward"], 2.0)
+        settlement = points.settle_monthly_card_daily_rewards()
+        self.assertEqual(settlement["rewarded_users"], 0)
+
+
+class RoleStateSQLiteMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        roles.COLLECTIONS_DATA_FILE = str(root / "collections.json")
+        roles.REDEEM_OWNERSHIP_DATA_FILE = str(root / "redeem.json")
+        roles.LOTTERY_STATS_DATA_FILE = str(root / "stats.json")
+        roles.ROLE_STATE_DB_FILE = str(root / "role_state.sqlite3")
+        roles._role_state_ready = False
+        Path(roles.COLLECTIONS_DATA_FILE).write_text('{"7":[101]}', encoding="utf-8")
+        Path(roles.REDEEM_OWNERSHIP_DATA_FILE).write_text("{}", encoding="utf-8")
+        Path(roles.LOTTERY_STATS_DATA_FILE).write_text("{}", encoding="utf-8")
+
+    def tearDown(self):
+        roles._role_state_ready = False
+        self.temp_dir.cleanup()
+
+    def test_collection_batch_and_lottery_stats_are_targeted(self):
+        self.assertEqual(roles.get_user_collection(7), [101])
+        self.assertEqual(roles.add_many_to_collection(7, [102, 103, 102]), [101, 102, 103])
+        result = roles.record_lottery_draw(
+            7,
+            99,
+            results=[{"type": "empty"}, {"type": "shells"}],
+            spent_shells=2,
+            refund_shells=0,
+            reward_shells=0.5,
+            drawn_at="2026-08-20T00:00:00+08:00",
+        )
+        self.assertEqual(result["total_draws"], 2)
+        self.assertEqual(roles.get_lottery_stats(7, 99)["shell_hits"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

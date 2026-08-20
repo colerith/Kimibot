@@ -13,6 +13,7 @@ from .storage import (
     load_role_data,
     save_role_data,
     add_to_collection,
+    add_many_to_collection,
     get_user_collection,
     get_lottery_pools_by_kind_and_rarity,
     get_lottery_config,
@@ -41,10 +42,18 @@ from .storage import (
     LOTTERY_OUTCOME_SHELLS,
     LOTTERY_OUTCOME_EMPTY,
 )
-from cogs.points.storage import format_shells, get_user_points, get_user_summary, modify_user_points, sign_in_user
+from cogs.points.storage import (
+    format_shells,
+    get_user_points,
+    get_user_summary,
+    modify_user_points,
+    sign_in_user,
+    spend_user_points,
+)
 from cogs.points.storage import (
     get_acceleration_tiers,
     get_daily_signin_summary,
+    get_user_daily_snapshot,
     load_points_data,
     load_random_events,
     load_praise_rules,
@@ -821,7 +830,11 @@ class RoleLotteryView(discord.ui.View):
         else:
             cost = cost_single * draw_count
 
-        current_points = await asyncio.to_thread(get_user_points, user.id, guild_id)
+        current_points, collection_ids, stats_before = await asyncio.gather(
+            asyncio.to_thread(get_user_points, user.id, guild_id),
+            asyncio.to_thread(get_user_collection, user.id),
+            asyncio.to_thread(get_lottery_stats, user.id, guild_id),
+        )
         if current_points < cost:
             return await self._show_lottery_notice(
                 interaction,
@@ -859,14 +872,22 @@ class RoleLotteryView(discord.ui.View):
                 color=0x747F8D,
             )
 
-        await asyncio.to_thread(
-            modify_user_points,
+        spend_result = await asyncio.to_thread(
+            spend_user_points,
             user.id,
-            -cost,
+            cost,
             guild_id,
             source="role_lottery",
             reason=f"draw_count={draw_count}",
         )
+        if not spend_result.get("success"):
+            return await self._show_lottery_notice(
+                interaction,
+                "💸 蛋壳余额刚刚发生了变化",
+                f"本次抽奖需要 **{format_shells(cost)}** 蛋壳，"
+                f"你当前剩余 **{format_shells(spend_result.get('balance', 0))}**。",
+                color=0xF0B232,
+            )
 
         outcome_cfg = cfg.get("outcome_weights", {})
         outcome_pool = [LOTTERY_OUTCOME_ROLE, LOTTERY_OUTCOME_SHELLS, LOTTERY_OUTCOME_EMPTY]
@@ -897,7 +918,7 @@ class RoleLotteryView(discord.ui.View):
             legendary_index = rarity_pool.index(RARITY_LEGENDARY)
             weights[legendary_index] = max(1, weights[legendary_index])
 
-        user_collection_ids = set(await asyncio.to_thread(get_user_collection, user.id))
+        user_collection_ids = set(collection_ids)
         refund_cfg = cfg.get("refund", {})
         shell_reward_cfg = cfg.get("shell_reward", {})
         shell_reward_min = max(0.0, float(shell_reward_cfg.get("min", 0.1)))
@@ -907,7 +928,6 @@ class RoleLotteryView(discord.ui.View):
         granted_roles = []
         total_refund = 0
         total_shell_reward = 0.0
-        stats_before = await asyncio.to_thread(get_lottery_stats, user.id, guild_id)
         empty_streak = int(stats_before.get("empty_streak", 0))
         no_role_streak = int(stats_before.get("no_role_streak", 0))
         no_legendary_streak = int(stats_before.get("no_legendary_streak", 0))
@@ -970,13 +990,15 @@ class RoleLotteryView(discord.ui.View):
                 total_refund += refund_amt
                 results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": True, "refund": refund_amt, "shell_reward": 0})
             else:
-                await asyncio.to_thread(add_to_collection, user.id, won_role.id)
                 user_collection_ids.add(won_role.id)
                 granted_roles.append(won_role)
                 results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": False, "refund": 0, "shell_reward": 0})
             empty_streak = 0
             no_role_streak = 0
             no_legendary_streak = 0 if rarity == RARITY_LEGENDARY else no_legendary_streak + 1
+
+        if granted_roles:
+            await asyncio.to_thread(add_many_to_collection, user.id, [role.id for role in granted_roles])
 
         if total_refund > 0:
             await asyncio.to_thread(
@@ -2087,7 +2109,7 @@ def _task_line(done: bool, label: str, detail: str) -> str:
 
 
 async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id: int) -> discord.Embed:
-    points_data = await asyncio.to_thread(load_points_data)
+    points_data = await asyncio.to_thread(get_user_daily_snapshot, user.id, guild_id)
     tx_rows = _today_user_transactions(points_data, user.id, guild_id)
     record = _user_points_record(points_data, user.id, guild_id)
     today = _today_cn()
@@ -4435,13 +4457,13 @@ def build_data_overview_embed() -> discord.Embed:
 
     embed = discord.Embed(
         title="📊 数据总览",
-        description="当前版本使用 JSON 文件作为数据表；下面是关键表与追踪字段检查。",
+        description="蛋壳、签到与抽卡用户状态已使用 SQLite/WAL；其余低频模块保留独立数据文件。",
         color=0x6AA9FF,
     )
     embed.add_field(
         name="蛋壳/用户",
         value="\n".join([
-            _schema_line("user_points", point_ok, f"`data/user_points.json`，用户 **{user_rows}**，流水 **{len(transactions) if isinstance(transactions, list) else 0}**"),
+            _schema_line("user_points", point_ok, f"`data/user_points.sqlite3`，用户 **{user_rows}**，流水 **{len(transactions) if isinstance(transactions, list) else 0}**"),
             _schema_line("acceleration", isinstance(accel_purchases, list), f"已加速用户 **{accel_users}**，顶层购卡流水 **{len(accel_purchases) if isinstance(accel_purchases, list) else 0}**"),
             _schema_line("monthly_card", isinstance(monthly_purchases, list), f"启用/叠加用户 **{monthly_users}**，月卡购买流水 **{len(monthly_purchases) if isinstance(monthly_purchases, list) else 0}**"),
             _schema_line("daily_signins", isinstance(points.get("daily_signins", {}), dict), f"签到日表 **{len(points.get('daily_signins', {})) if isinstance(points.get('daily_signins', {}), dict) else 0}**"),
@@ -4456,7 +4478,7 @@ def build_data_overview_embed() -> discord.Embed:
         ]),
         inline=False,
     )
-    embed.set_footer(text="如某项显示警告，通常表示 JSON 文件缺失或结构被手动改坏。")
+    embed.set_footer(text="SQLite 首次启用会自动导入旧 JSON，并保留 .pre_sqlite.bak 迁移备份。")
     return embed
 
 

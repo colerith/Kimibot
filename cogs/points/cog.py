@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import config
 from .storage import (
     format_shells,
+    initialize_points_storage,
     get_successful_praise_scan_record,
     record_message_activity,
     record_praise_scan_log,
@@ -84,6 +85,11 @@ class PointListener(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
+        try:
+            await asyncio.to_thread(initialize_points_storage)
+        except Exception as error:
+            print(f"[蛋壳系统] SQLite 初始化失败 error={error!r}")
+            return
         if not self.praise_scanner_started:
             self.praise_scanner_started = True
             self.praise_reward_rescan.change_interval(minutes=PRAISE_RESCAN_MINUTES)
