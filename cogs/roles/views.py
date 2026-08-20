@@ -2597,25 +2597,6 @@ class RoleClaimView(discord.ui.View):
         embed = await build_daily_tasks_embed(interaction.user, interaction.guild_id)
         await self._complete_private_response(interaction, embed=embed)
 
-    @discord.ui.button(label="一键移除", style=discord.ButtonStyle.danger, emoji="🧹", custom_id="role_main_remove_all", row=1)
-    async def remove_all_callback(self, button, interaction: discord.Interaction):
-        if not interaction.guild_id:
-            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
-        if not await self._begin_private_response(interaction, "🧹 正在帮你收好身上的装饰……"):
-            return
-        # 调用我们的全局移除函数
-        removed = await remove_all_decorations(interaction.user, interaction.guild)
-        if removed:
-            await self._complete_private_response(
-                interaction,
-                content=f"🧹 已清空身上的 {len(removed)} 个装饰！",
-            )
-        else:
-            await self._complete_private_response(
-                interaction,
-                content="❔ 你身上本来就很干净哦。",
-            )
-
 # --- 用户端：通知订阅 ---
 class NotificationSelect(discord.ui.Select):
     """
@@ -4552,7 +4533,7 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
         }
     elif exclusive_type == "collection_reward":
         target_ids = set(get_collection_reward_role_ids(data))
-    # 如果没有指定类型 (例如“一键移除”按钮)，则清理所有装饰
+    # 如果没有指定类型，则清理所有装饰（供换装面板的清空入口使用）
     else:
         target_ids = set(data.get("claimable_roles", []) + data.get("lottery_roles", []) + data.get("redeem_roles", []))
         target_ids.update(get_collection_reward_role_ids(data))
