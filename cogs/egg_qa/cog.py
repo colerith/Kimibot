@@ -6,8 +6,21 @@ from discord.ext import commands
 import config
 from cogs.points.storage import grant_monthly_eligible_reward
 
-from .storage import claim_reply_reward, find_question_by_message, list_panels, remove_panel, revoke_reply_reward
-from .views import EggQAEntryView, EggQAPanelView, deploy_egg_qa_panel, refresh_bottom_egg_qa_panel
+from .storage import (
+    claim_reply_reward,
+    find_question_by_message,
+    get_question_notification_subscribers,
+    list_panels,
+    remove_panel,
+    revoke_reply_reward,
+)
+from .views import (
+    EggQAEntryView,
+    EggQAPanelView,
+    EggQuestionSubscriptionView,
+    deploy_egg_qa_panel,
+    refresh_bottom_egg_qa_panel,
+)
 
 
 REWARD_NUMBER_EMOJIS = {
@@ -44,6 +57,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
     async def on_ready(self):
         self.bot.add_view(EggQAPanelView())
         self.bot.add_view(EggQAEntryView())
+        self.bot.add_view(EggQuestionSubscriptionView())
         print("[EggQA] Cog loaded and persistent view registered.")
         if not self.panels_refreshed:
             self.panels_refreshed = True
@@ -116,6 +130,81 @@ class EggQACog(commands.Cog, name="小蛋问答"):
             return
         self.bottom_refresh_task = self.bot.loop.create_task(self._delayed_bottom_refresh())
 
+    @staticmethod
+    def _quoted_preview(text: str, limit: int) -> str:
+        cleaned = str(text or "").strip()
+        quoted = "\n".join(f"> {line}" if line else ">" for line in cleaned.splitlines())
+        if len(quoted) > limit:
+            quoted = quoted[: limit - 1].rstrip() + "…"
+        return quoted
+
+    async def _send_answer_notification(self, user_id: int, message: discord.Message, question: dict):
+        if user_id == message.author.id:
+            return
+        user = self.bot.get_user(user_id)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(user_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
+
+        answer = message.content.strip()
+        if not answer:
+            answer = f"📎 发送了 {len(message.attachments)} 个附件"
+        question_text = self._quoted_preview(question.get("content", ""), 700)
+        answer_text = self._quoted_preview(answer, 1800)
+        embed = discord.Embed(
+            title="💌 订阅的问题有新回答",
+            description=f"### 💬 回复内容\n{answer_text}",
+            color=0xF4B7C7,
+            timestamp=message.created_at,
+        )
+        embed.set_author(
+            name=f"{message.author.display_name} 回复了问题",
+            icon_url=message.author.display_avatar.url,
+        )
+        embed.add_field(name="🥚 原问题", value=question_text or "> （内容不可用）", inline=False)
+        embed.add_field(
+            name="📍 来自",
+            value=f"**{message.guild.name}** · {message.channel.mention}",
+            inline=False,
+        )
+        if message.attachments:
+            attachment = message.attachments[0]
+            content_type = str(getattr(attachment, "content_type", "") or "")
+            if content_type.startswith("image/"):
+                embed.set_image(url=attachment.url)
+            else:
+                embed.add_field(
+                    name="📎 附件",
+                    value=f"[{attachment.filename}]({attachment.url})"
+                    + (f" 等 {len(message.attachments)} 个附件" if len(message.attachments) > 1 else ""),
+                    inline=False,
+                )
+        embed.set_footer(text="小蛋问答 · 不想继续接收时，可回到问题卡片取消追踪")
+        jump_view = discord.ui.View()
+        jump_view.add_item(
+            discord.ui.Button(
+                label="一键跳转到回复",
+                emoji="↗️",
+                style=discord.ButtonStyle.link,
+                url=message.jump_url,
+            )
+        )
+        try:
+            await user.send(embed=embed, view=jump_view)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _notify_answer_subscribers(self, message: discord.Message, question: dict):
+        subscriber_ids = await asyncio.to_thread(get_question_notification_subscribers, question["id"])
+        if not subscriber_ids:
+            return
+        await asyncio.gather(
+            *(self._send_answer_notification(user_id, message, question) for user_id in subscriber_ids),
+            return_exceptions=True,
+        )
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if not message.guild:
@@ -140,6 +229,8 @@ class EggQACog(commands.Cog, name="小蛋问答"):
         if question.get("channel_id") != str(message.channel.id):
             return
         is_self_answer = question.get("author_id") == str(message.author.id)
+
+        await self._notify_answer_subscribers(message, question)
 
         reward = await asyncio.to_thread(
             claim_reply_reward,

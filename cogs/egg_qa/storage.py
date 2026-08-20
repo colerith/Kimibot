@@ -37,7 +37,7 @@ def _today() -> str:
 
 
 def _empty_data() -> dict:
-    return {"version": 1, "questions": {}, "panels": {}}
+    return {"version": 2, "questions": {}, "panels": {}, "author_subscriptions": {}}
 
 
 @_synchronized
@@ -53,7 +53,15 @@ def load_data() -> dict:
     panels = raw.get("panels", {})
     if not isinstance(panels, dict):
         panels = {}
-    return {"version": 1, "questions": raw["questions"], "panels": panels}
+    author_subscriptions = raw.get("author_subscriptions", {})
+    if not isinstance(author_subscriptions, dict):
+        author_subscriptions = {}
+    return {
+        "version": 2,
+        "questions": raw["questions"],
+        "panels": panels,
+        "author_subscriptions": author_subscriptions,
+    }
 
 
 @_synchronized
@@ -180,6 +188,71 @@ def find_question_by_message(message_id: int) -> dict | None:
         if isinstance(record, dict) and record.get("message_id") == target:
             return record
     return None
+
+
+def _author_subscription_key(user_id: int | str, guild_id: int | str) -> str:
+    return f"{guild_id}:{user_id}"
+
+
+@_synchronized
+def toggle_author_subscription(*, user_id: int, guild_id: int) -> bool:
+    """切换用户对自己所发问题的自动私信订阅，返回切换后的状态。"""
+    data = load_data()
+    subscriptions = data["author_subscriptions"]
+    key = _author_subscription_key(user_id, guild_id)
+    if key in subscriptions:
+        subscriptions.pop(key, None)
+        enabled = False
+    else:
+        subscriptions[key] = {"enabled_at": _now_iso()}
+        enabled = True
+    save_data(data)
+    return enabled
+
+
+@_synchronized
+def toggle_question_subscription(*, question_id: str, user_id: int) -> bool | None:
+    """切换指定问题的追踪订阅；问题不存在时返回 None。"""
+    data = load_data()
+    record = data["questions"].get(str(question_id))
+    if not isinstance(record, dict):
+        return None
+
+    subscribers = record.setdefault("subscribers", {})
+    if not isinstance(subscribers, dict):
+        subscribers = {}
+        record["subscribers"] = subscribers
+    uid = str(user_id)
+    if uid in subscribers:
+        subscribers.pop(uid, None)
+        enabled = False
+    else:
+        subscribers[uid] = {"subscribed_at": _now_iso()}
+        enabled = True
+    save_data(data)
+    return enabled
+
+
+@_synchronized
+def get_question_notification_subscribers(question_id: str) -> list[int]:
+    """返回单题追踪者，以及开启了“我的提问自动订阅”的题主。"""
+    data = load_data()
+    record = data["questions"].get(str(question_id))
+    if not isinstance(record, dict):
+        return []
+
+    subscriber_ids = set()
+    subscribers = record.get("subscribers", {})
+    if isinstance(subscribers, dict):
+        subscriber_ids.update(str(uid) for uid in subscribers)
+
+    author_id = str(record.get("author_id") or "")
+    guild_id = str(record.get("guild_id") or "")
+    key = _author_subscription_key(author_id, guild_id)
+    if author_id and key in data["author_subscriptions"]:
+        subscriber_ids.add(author_id)
+
+    return [int(uid) for uid in subscriber_ids if uid.isdigit()]
 
 
 @_synchronized

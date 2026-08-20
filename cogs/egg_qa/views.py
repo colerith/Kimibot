@@ -12,6 +12,9 @@ from .storage import (
     get_daily_usage,
     get_panel,
     save_panel,
+    find_question_by_message,
+    toggle_author_subscription,
+    toggle_question_subscription,
 )
 
 
@@ -101,6 +104,7 @@ class EggQuestionModal(discord.ui.Modal):
         try:
             message = await interaction.channel.send(
                 embed=embed,
+                view=EggQuestionSubscriptionView(),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (discord.Forbidden, discord.HTTPException):
@@ -141,6 +145,72 @@ class EggQAPanelView(discord.ui.View):
                 return
             raise
 
+    @discord.ui.button(
+        label="订阅回答",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔔",
+        custom_id="egg_qa_author_subscription",
+    )
+    async def toggle_answer_subscription(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        if not await _defer_ephemeral(interaction, "小蛋问答订阅"):
+            return
+        enabled = await asyncio.to_thread(
+            toggle_author_subscription,
+            user_id=interaction.user.id,
+            guild_id=interaction.guild_id,
+        )
+        if enabled:
+            message = (
+                "🔔 **回答订阅已开启**\n"
+                "今后你发布的问题收到别人的回复时，我会把回复人、回复内容和跳转入口送到你的私信。"
+            )
+        else:
+            message = "🔕 **回答订阅已取消**\n你发布的问题有新回复时，将不再自动推送私信。"
+        await interaction.followup.send(message, ephemeral=True)
+
+
+class EggQuestionSubscriptionView(discord.ui.View):
+    """每条公开问题共用的持久化追踪按钮。"""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="追踪订阅",
+        style=discord.ButtonStyle.secondary,
+        emoji="📡",
+        custom_id="egg_qa_question_subscription",
+    )
+    async def toggle_question_tracking(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id or not interaction.message:
+            return await interaction.response.send_message("❌ 无法识别这条问题。", ephemeral=True)
+        if not await _defer_ephemeral(interaction, "小蛋问答追踪"):
+            return
+
+        question = await asyncio.to_thread(find_question_by_message, interaction.message.id)
+        if (
+            not question
+            or question.get("guild_id") != str(interaction.guild_id)
+            or question.get("channel_id") != str(interaction.channel_id)
+        ):
+            return await interaction.followup.send("❌ 这条问题已失效或不再支持追踪。", ephemeral=True)
+
+        enabled = await asyncio.to_thread(
+            toggle_question_subscription,
+            question_id=question["id"],
+            user_id=interaction.user.id,
+        )
+        if enabled:
+            message = (
+                "📡 **已追踪这个问题**\n"
+                "后续有人直接回复问题卡片时，我会通过私信通知你；再次点击按钮即可取消。"
+            )
+        else:
+            message = "📴 **已取消追踪**\n这个问题的后续回复将不再推送给你。"
+        await interaction.followup.send(message, ephemeral=True)
+
 
 class EggQAEntryView(discord.ui.View):
     """固定频道中的轻量入口；完整面板仅对点击者可见。"""
@@ -169,7 +239,9 @@ def build_panel_embed() -> discord.Embed:
             "有想听听大家意见的问题？按下按钮，把话筒递给整个社区吧！\n\n"
             "### 📖 使用说明\n"
             "**发起问题**　点击下方 **🙋‍♀️ 发起问答**，填写问题后公开发布。\n"
+            "**订阅回答**　开启后，你发布的问题收到新回复会自动推送私信。\n"
             "**参与回答**　对问题卡片使用 Discord 自带的 **回复** 功能。\n"
+            "**追踪问题**　点击问题卡片下方的 **📡 追踪订阅**，跟进其他人的问题。\n"
             "**领取彩蛋**　首次有效回答可随机获得 **3～15 蛋壳**，大奖更稀有。\n\n"
             "**自问自答**　提问者自己回复问题时，可随机获得 **1～3 蛋壳**。\n\n"
             f"> 每位用户每天最多发起 **{DAILY_QUESTION_LIMIT} 次**；每题每人只可领取一次奖励；"
