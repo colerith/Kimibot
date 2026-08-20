@@ -1,12 +1,11 @@
-import json
 import asyncio
-from pathlib import Path
 
 import discord
 from discord.ext import commands
 from discord import Option
 
 from ..shared.utils import is_super_egg
+from ..shared.sqlite_store import load_json_namespace, save_json_namespace
 from .complaint_views import (
     ComplaintPanelView,
     EditComplaintNoticeModal,
@@ -17,7 +16,8 @@ from .complaint_views import (
 
 
 PANEL_CHANNEL_ID = 1506134402659254403
-CACHE_FILE = Path("data/manage_complaint_notice_cache.json")
+CACHE_FILE = "data/manage_complaint_notice_cache.json"
+CACHE_NAMESPACE = "manage_complaint_notice_cache"
 
 
 class ComplaintCog(commands.Cog, name="投诉面板"):
@@ -27,20 +27,16 @@ class ComplaintCog(commands.Cog, name="投诉面板"):
         self.notice_cache = self._load_cache()
 
     def _load_cache(self):
-        if not CACHE_FILE.exists():
-            return {}
-        try:
-            return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        data = load_json_namespace(
+            CACHE_NAMESPACE,
+            legacy_file=CACHE_FILE,
+            default={},
+        )
+        return data if isinstance(data, dict) else {}
 
     def _save_cache(self):
         try:
-            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            CACHE_FILE.write_text(
-                json.dumps(self.notice_cache, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            save_json_namespace(CACHE_NAMESPACE, self.notice_cache)
         except Exception:
             pass
 

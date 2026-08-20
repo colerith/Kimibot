@@ -5,6 +5,8 @@ import threading
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
+
 
 DATA_FILE = "data/egg_qa.json"
 TZ_CN = timezone(timedelta(hours=8))
@@ -42,11 +44,7 @@ def _empty_data() -> dict:
 
 @_synchronized
 def load_data() -> dict:
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as file:
-            raw = json.load(file)
-    except (OSError, json.JSONDecodeError):
-        return _empty_data()
+    raw = load_json_namespace("egg_qa", legacy_file=DATA_FILE, default=_empty_data())
 
     if not isinstance(raw, dict) or not isinstance(raw.get("questions"), dict):
         return _empty_data()
@@ -66,20 +64,7 @@ def load_data() -> dict:
 
 @_synchronized
 def save_data(data: dict) -> None:
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    temp_file = f"{DATA_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        with open(temp_file, "w", encoding="utf-8") as file:
-            json.dump(data, file, indent=4, ensure_ascii=False)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp_file, DATA_FILE)
-    finally:
-        if os.path.exists(temp_file):
-            try:
-                os.remove(temp_file)
-            except OSError:
-                pass
+    save_json_namespace("egg_qa", data)
 
 
 @_synchronized

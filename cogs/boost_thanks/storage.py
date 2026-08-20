@@ -1,12 +1,25 @@
 import json
 import os
 import random
+import threading
+from functools import wraps
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 
 THANKS_MESSAGES_FILE = Path(__file__).with_name("thanks_messages.json")
 BOOST_THANKS_DATA_FILE = "data/boost_thanks.json"
 TZ_CN = timezone(timedelta(hours=8))
+_DATA_LOCK = threading.RLock()
+
+
+def _locked(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with _DATA_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
 
 DIGIT_EMOJI_IDS = {
     "1": "1093887092507021332",
@@ -94,7 +107,10 @@ def format_digit_emojis(number: int, bot=None) -> str:
 
 
 def load_boost_thanks_data() -> dict:
-    raw = _load_json(BOOST_THANKS_DATA_FILE, {"version": 1, "processed": {}})
+    raw = load_json_namespace(
+        "boost_thanks", legacy_file=BOOST_THANKS_DATA_FILE,
+        default={"version": 1, "processed": {}},
+    )
     if not isinstance(raw, dict):
         return {"version": 1, "processed": {}}
     processed = raw.get("processed", {})
@@ -103,6 +119,7 @@ def load_boost_thanks_data() -> dict:
     return {"version": 1, "processed": processed}
 
 
+@_locked
 def mark_processed(message_id: int, payload: dict) -> bool:
     data = load_boost_thanks_data()
     key = str(message_id)
@@ -112,14 +129,15 @@ def mark_processed(message_id: int, payload: dict) -> bool:
         **payload,
         "processed_at": _now_iso(),
     }
-    _save_json(BOOST_THANKS_DATA_FILE, data)
+    save_json_namespace("boost_thanks", data)
     return True
 
 
+@_locked
 def update_processed_message(message_id: int, payload: dict) -> None:
     data = load_boost_thanks_data()
     key = str(message_id)
     if key not in data["processed"]:
         return
     data["processed"][key].update(payload)
-    _save_json(BOOST_THANKS_DATA_FILE, data)
+    save_json_namespace("boost_thanks", data)

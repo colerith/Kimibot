@@ -2,14 +2,27 @@ import json
 import os
 import random
 import math
+import threading
+from functools import wraps
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
+
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 
 QUESTION_BANK_FILE = Path(__file__).with_name("question_bank.json")
 PREQUIZ_DATA_FILE = "data/prequiz_attempts.json"
 TZ_CN = timezone(timedelta(hours=8))
 RETRY_COOLDOWN_SECONDS = 5 * 60
+_ATTEMPTS_LOCK = threading.RLock()
+
+
+def _locked(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with _ATTEMPTS_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 def _now_iso() -> str:
@@ -96,7 +109,10 @@ def draw_prequiz_questions() -> dict | None:
 
 
 def load_attempts() -> dict:
-    raw = _load_json_file(PREQUIZ_DATA_FILE, {"version": 1, "attempts": {}})
+    raw = load_json_namespace(
+        "prequiz_attempts", legacy_file=PREQUIZ_DATA_FILE,
+        default={"version": 1, "attempts": {}},
+    )
     if not isinstance(raw, dict):
         return {"version": 1, "attempts": {}}
     attempts = raw.get("attempts", {})
@@ -106,7 +122,7 @@ def load_attempts() -> dict:
 
 
 def save_attempts(data: dict):
-    _save_json_file(PREQUIZ_DATA_FILE, data)
+    save_json_namespace("prequiz_attempts", data)
 
 
 def get_attempt(user_id: int, guild_id: int | None) -> dict | None:
@@ -141,6 +157,7 @@ def get_prequiz_access(user_id: int, guild_id: int | None) -> dict:
     return {"allowed": True, "reason": "retry", "attempt": attempt}
 
 
+@_locked
 def save_attempt(
     *,
     user_id: int,

@@ -9,6 +9,8 @@ import uuid
 from contextlib import contextmanager
 from typing import Dict, List
 
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
+
 ROLES_DATA_FILE = "data/general_roles.json"
 COLLECTIONS_DATA_FILE = "data/user_collections.json"
 LOTTERY_STATS_DATA_FILE = "data/role_lottery_stats.json"
@@ -516,13 +518,9 @@ def get_collection_reward_role_ids(role_data: dict | None = None) -> list[int]:
 
 
 def load_collection_reward_claims() -> dict:
-    if not os.path.exists(COLLECTION_REWARDS_DATA_FILE):
-        return {}
-    try:
-        with open(COLLECTION_REWARDS_DATA_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
+    raw = load_json_namespace(
+        "role_collection_rewards", legacy_file=COLLECTION_REWARDS_DATA_FILE, default={}
+    )
     if not isinstance(raw, dict):
         return {}
     return {str(uid): {"groups": [str(v) for v in rec.get("groups", [])], "full": bool(rec.get("full", False))}
@@ -530,9 +528,7 @@ def load_collection_reward_claims() -> dict:
 
 
 def _save_collection_reward_claims(data: dict) -> None:
-    os.makedirs(os.path.dirname(COLLECTION_REWARDS_DATA_FILE), exist_ok=True)
-    with open(COLLECTION_REWARDS_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    save_json_namespace("role_collection_rewards", data)
 
 
 def claim_completed_collection_rewards(user_id: int, owned_role_ids, role_data: dict | None = None) -> list[dict]:

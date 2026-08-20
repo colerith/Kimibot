@@ -2,13 +2,26 @@ import json
 import os
 import random
 import secrets
+import threading
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 
 DATA_FILE = "data/red_packets.json"
 TZ_CN = timezone(timedelta(hours=8))
 SHELL_PRECISION = 1
 EXPIRE_HOURS = 24
+_DATA_LOCK = threading.RLock()
+
+
+def _locked(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with _DATA_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 def now_cn() -> datetime:
@@ -45,13 +58,9 @@ def format_shells(value: float | int | str) -> str:
 
 
 def load_data() -> dict[str, Any]:
-    if not os.path.exists(DATA_FILE):
-        return {"version": 1, "packets": {}}
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {"version": 1, "packets": {}}
+    data = load_json_namespace(
+        "red_packets", legacy_file=DATA_FILE, default={"version": 1, "packets": {}}
+    )
 
     if not isinstance(data, dict):
         return {"version": 1, "packets": {}}
@@ -63,9 +72,7 @@ def load_data() -> dict[str, Any]:
 
 
 def save_data(data: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    save_json_namespace("red_packets", data)
 
 
 def generate_allocations(total_amount: float, count: int) -> list[float]:
@@ -81,6 +88,7 @@ def generate_allocations(total_amount: float, count: int) -> list[float]:
     return [round(u / 10, SHELL_PRECISION) for u in units]
 
 
+@_locked
 def create_packet(
     *,
     guild_id: int,
@@ -123,6 +131,7 @@ def create_packet(
     return packet
 
 
+@_locked
 def set_packet_message(packet_id: str, message_id: int) -> None:
     data = load_data()
     packet = data["packets"].get(packet_id)
@@ -138,6 +147,7 @@ def get_packet(packet_id: str) -> dict[str, Any] | None:
     return packet if isinstance(packet, dict) else None
 
 
+@_locked
 def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
     data = load_data()
     packet = data["packets"].get(packet_id)
@@ -186,6 +196,7 @@ def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
     return {"success": True, "amount": amount, "packet": packet}
 
 
+@_locked
 def mark_packet_cancelled(packet_id: str) -> None:
     data = load_data()
     packet = data["packets"].get(packet_id)
@@ -195,6 +206,7 @@ def mark_packet_cancelled(packet_id: str) -> None:
     save_data(data)
 
 
+@_locked
 def expire_due_packets() -> list[dict[str, Any]]:
     data = load_data()
     expired = []
@@ -219,6 +231,7 @@ def expire_due_packets() -> list[dict[str, Any]]:
     return expired
 
 
+@_locked
 def mark_refunded(packet_id: str) -> None:
     data = load_data()
     packet = data["packets"].get(packet_id)

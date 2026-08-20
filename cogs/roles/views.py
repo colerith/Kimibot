@@ -2563,9 +2563,14 @@ class RoleClaimView(discord.ui.View):
                 f"{rules_text}"
             )
         else:
+            rank_line = (
+                f"今日排名：第 **{result['rank']}** 位\n"
+                if int(result.get("rank", 0) or 0) > 0 else ""
+            )
             text = (
                 f"🕒 今日已经报到过啦。\n"
                 f"连续报到：**{result['streak_days']}** 天\n"
+                f"{rank_line}"
                 f"🥚 当前余额：**{format_shells(result['balance'])}** 蛋壳\n\n"
                 f"{rules_text}"
             )

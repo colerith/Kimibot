@@ -1558,9 +1558,14 @@ def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
         connection.execute("BEGIN IMMEDIATE")
         record, key = _db_get_user(connection, user_id, guild_id)
         if record.get("last_sign_date", "") == today:
+            daily_key = f"{guild_id}:{today}"
+            signers = _db_get_section(connection, "daily_signins", daily_key, [])
+            uid = str(user_id)
+            rank = signers.index(uid) + 1 if uid in signers else 0
             return {
                 "success": False, "balance": _round_shells(record.get("shells", 0)),
-                "streak_days": int(record.get("streak_days", 0)), "message": "今日已报到",
+                "streak_days": int(record.get("streak_days", 0)), "rank": rank,
+                "message": "今日已报到",
             }
         streak_days = _calculate_streak(
             str(record.get("last_sign_date", "")), today, int(record.get("streak_days", 0))

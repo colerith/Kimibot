@@ -6,9 +6,11 @@ import traceback
 import os
 
 from dotenv import load_dotenv
+from cogs.shared.sqlite_store import migrate_runtime_json_namespaces
 
 
 load_dotenv()
+migrate_runtime_json_namespaces()
 # 从环境变量读取 Bot Token
 BOT_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
 

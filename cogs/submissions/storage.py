@@ -5,6 +5,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 
 import config
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 
 
 DATA_FILE = "data/submissions.json"
@@ -122,13 +123,7 @@ def grant_comment_reward(
 
 def load_data() -> dict:
     with _DATA_LOCK:
-        if not os.path.exists(DATA_FILE):
-            return _empty_data()
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return _empty_data()
+        raw = load_json_namespace("submissions", legacy_file=DATA_FILE, default=_empty_data())
         if not isinstance(raw, dict):
             return _empty_data()
         data = _empty_data()
@@ -144,17 +139,7 @@ def load_data() -> dict:
 
 def save_data(data: dict) -> None:
     with _DATA_LOCK:
-        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-        temp_file = f"{DATA_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
-        try:
-            with open(temp_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temp_file, DATA_FILE)
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+        save_json_namespace("submissions", data)
 
 
 def set_panel_info(channel_id: int, message_id: int) -> None:

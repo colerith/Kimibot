@@ -6,6 +6,7 @@ import datetime
 
 # 相对导入可能在Cog加载时会有问题，建议从项目根目录绝对导入配置
 from config import IDS, QUOTA, STYLE
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 
 # --- 常量 ---
 SPECIFIC_REVIEWER_ID = 1452321798308888776
@@ -122,13 +123,14 @@ def get_ticket_info(channel: discord.TextChannel):
 
 # --- 额度管理 ---
 def load_quota_data():
-    try:
-        with open(QUOTA["QUOTA_FILE_PATH"], 'r') as f: return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"last_reset_date": "2000-01-01", "daily_quota_left": QUOTA["DAILY_TICKET_LIMIT"]}
+    default = {"last_reset_date": "2000-01-01", "daily_quota_left": QUOTA["DAILY_TICKET_LIMIT"]}
+    raw = load_json_namespace(
+        "ticket_quota", legacy_file=QUOTA["QUOTA_FILE_PATH"], default=default
+    )
+    return raw if isinstance(raw, dict) else default
 
 def save_quota_data(data):
-    with open(QUOTA["QUOTA_FILE_PATH"], 'w') as f: json.dump(data, f, indent=4)
+    save_json_namespace("ticket_quota", data)
 
 # --- 通用归档逻辑 ---
 async def execute_archive(bot, interaction, channel, note, is_timeout=True, log_title_override=None):

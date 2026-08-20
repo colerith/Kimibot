@@ -3,6 +3,8 @@ import os
 import threading
 from datetime import date, datetime, timedelta
 
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
+
 
 REPORT_DATA_FILE = "data/server_daily_reports.json"
 _REPORT_DATA_LOCK = threading.RLock()
@@ -37,31 +39,14 @@ def _normalize_day(raw) -> dict:
 
 
 def _load_unlocked() -> dict:
-    if not os.path.exists(REPORT_DATA_FILE):
-        return _empty_data()
-    try:
-        with open(REPORT_DATA_FILE, "r", encoding="utf-8") as file:
-            raw = json.load(file)
-    except (OSError, json.JSONDecodeError):
-        return _empty_data()
+    raw = load_json_namespace(
+        "server_daily_reports", legacy_file=REPORT_DATA_FILE, default=_empty_data()
+    )
     return raw if isinstance(raw, dict) else _empty_data()
 
 
 def _save_unlocked(data: dict) -> None:
-    os.makedirs(os.path.dirname(REPORT_DATA_FILE), exist_ok=True)
-    temp_file = f"{REPORT_DATA_FILE}.{os.getpid()}.tmp"
-    try:
-        with open(temp_file, "w", encoding="utf-8") as file:
-            json.dump(data, file, indent=2, ensure_ascii=False)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp_file, REPORT_DATA_FILE)
-    finally:
-        if os.path.exists(temp_file):
-            try:
-                os.remove(temp_file)
-            except OSError:
-                pass
+    save_json_namespace("server_daily_reports", data)
 
 
 def _guild_record(data: dict, guild_id: int) -> dict:

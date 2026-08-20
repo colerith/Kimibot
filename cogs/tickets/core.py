@@ -11,6 +11,7 @@ import json
 import os
 
 from config import IDS, QUOTA, STYLE
+from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 from .utils import (
     STRINGS, SPECIFIC_REVIEWER_ID, TIMEOUT_HOURS_ARCHIVE, TIMEOUT_HOURS_REMIND,
     is_reviewer_egg, get_ticket_info, load_quota_data, save_quota_data, execute_archive,
@@ -145,24 +146,14 @@ def build_ticket_approved_link_view(channel: discord.TextChannel) -> discord.ui.
 
 
 def load_audit_schedule():
-    if not os.path.exists(AUDIT_SCHEDULE_FILE):
-        return {
-            "suspended": False,
-            "reason": None,
-            "start_dt": None, # 存时间戳
-            "end_dt": None
-        }
-    try:
-        with open(AUDIT_SCHEDULE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {"suspended": False, "reason": None, "start_dt": None, "end_dt": None}
+    default = {"suspended": False, "reason": None, "start_dt": None, "end_dt": None}
+    raw = load_json_namespace(
+        "ticket_audit_schedule", legacy_file=AUDIT_SCHEDULE_FILE, default=default
+    )
+    return raw if isinstance(raw, dict) else default
 
 def save_audit_schedule(data):
-    # 确保存储目录存在
-    os.makedirs(os.path.dirname(AUDIT_SCHEDULE_FILE), exist_ok=True)
-    with open(AUDIT_SCHEDULE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    save_json_namespace("ticket_audit_schedule", data)
 
 class TicketPanelView(discord.ui.View):
     def __init__(self, cog):

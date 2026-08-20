@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cogs.shared import sqlite_store as app_store
+
 
 def _load_module(name: str, relative_path: str):
     path = Path(__file__).parents[1] / relative_path
@@ -17,6 +19,7 @@ def _load_module(name: str, relative_path: str):
 
 points = _load_module("points_storage_test", "cogs/points/storage.py")
 roles = _load_module("roles_storage_test", "cogs/roles/storage.py")
+red_packets = _load_module("red_packets_storage_test", "cogs/red_packets/storage.py")
 
 
 class PointsSQLiteMigrationTests(unittest.TestCase):
@@ -54,7 +57,9 @@ class PointsSQLiteMigrationTests(unittest.TestCase):
         self.assertEqual(sorted(result["rank"] for result in results), list(range(1, 51)))
         self.assertEqual(points.get_daily_signin_summary(99)["count"], 50)
         self.assertEqual(points.get_daily_activity_stats(99, points._today())["signin_users"], 50)
-        self.assertFalse(points.sign_in_user(user_ids[0], 99, 1.0)["success"])
+        repeated = points.sign_in_user(user_ids[0], 99, 1.0)
+        self.assertFalse(repeated["success"])
+        self.assertGreater(repeated["rank"], 0)
 
     def test_idempotent_reward_uses_indexed_lookup(self):
         first = points.grant_monthly_eligible_reward(
@@ -123,6 +128,32 @@ class RoleStateSQLiteMigrationTests(unittest.TestCase):
         )
         self.assertEqual(result["total_draws"], 2)
         self.assertEqual(roles.get_lottery_stats(7, 99)["shell_hits"], 1)
+
+
+class AppStateSQLiteMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        app_store.APP_STATE_DB_FILE = str(root / "app_state.sqlite3")
+        app_store._SCHEMA_READY = False
+        red_packets.DATA_FILE = str(root / "red_packets.json")
+        Path(red_packets.DATA_FILE).write_text(
+            json.dumps({"version": 1, "packets": {"legacy": {"id": "legacy"}}}),
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        app_store._SCHEMA_READY = False
+        self.temp_dir.cleanup()
+
+    def test_namespace_migration_is_one_time_and_backed_up(self):
+        migrated = red_packets.load_data()
+        self.assertIn("legacy", migrated["packets"])
+        self.assertTrue(Path(f"{red_packets.DATA_FILE}.pre_sqlite.bak").exists())
+        migrated["packets"]["new"] = {"id": "new"}
+        red_packets.save_data(migrated)
+        Path(red_packets.DATA_FILE).write_text("{}", encoding="utf-8")
+        self.assertIn("new", red_packets.load_data()["packets"])
 
 
 if __name__ == "__main__":
