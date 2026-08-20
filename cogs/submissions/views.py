@@ -155,14 +155,6 @@ def _spoiler(text: str, enabled: bool) -> str:
     return f"||{text.replace('||', '')}||"
 
 
-def _embedded_attachment_url(attachments) -> str | None:
-    """Return an attachment:// URL so Discord hides the hero image from the file list."""
-    if not attachments:
-        return None
-    filename = str(getattr(attachments[0], "filename", "") or "")
-    return f"attachment://{filename}" if filename else None
-
-
 def _clamp_comment_page(record: dict, comments: list[dict]) -> int:
     max_page = max(0, (len(comments) - 1) // COMMENTS_PER_PAGE)
     try:
@@ -218,7 +210,7 @@ def build_panel_embed() -> discord.Embed:
     return embed
 
 
-def build_submission_embed(record: dict, *, image_url: str | None = None) -> discord.Embed:
+def build_submission_embed(record: dict) -> discord.Embed:
     kind = record.get("kind", "")
     fields = record.get("fields", {})
     content_type = str(fields.get("content_type", "sfw")).lower()
@@ -258,16 +250,6 @@ def build_submission_embed(record: dict, *, image_url: str | None = None) -> dis
         embed.add_field(name="🗂️ 安利领域", value=str(fields.get("domain", "其他类型")), inline=True)
     content = str(fields.get("content", "") or "没有填写内容")
     embed.add_field(name="📝 投稿内容", value=_content_preview(content, is_nsfw)[:1024], inline=False)
-    image_urls = record.get("attachments", [])
-    # Discord does not reliably preserve the spoiler cover for images rendered
-    # inside an embed. Keep every NSFW image as a SPOILER_ attachment instead;
-    # SFW submissions still use the first attachment as the embed hero image.
-    if not is_nsfw:
-        if image_url:
-            embed.set_image(url=image_url)
-        elif isinstance(image_urls, list) and image_urls:
-            embed.set_image(url=str(image_urls[0]))
-
     replies = record.get("replies", [])
     if replies:
         latest = replies[-1]
@@ -360,10 +342,7 @@ async def _publish_or_update_submission_unlocked(client, record: dict, attachmen
     if old_channel_id == channel_id and old_message_id and not force_resend:
         try:
             message = await channel.fetch_message(old_message_id)
-            embed = build_submission_embed(
-                record,
-                image_url=_embedded_attachment_url(message.attachments),
-            )
+            embed = build_submission_embed(record)
             await message.edit(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
             return record, "updated"
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
@@ -377,7 +356,7 @@ async def _publish_or_update_submission_unlocked(client, record: dict, attachmen
         except Exception:
             pass
 
-    embed = build_submission_embed(record, image_url=_embedded_attachment_url(files))
+    embed = build_submission_embed(record)
     message = await channel.send(embed=embed, view=view, files=files, allowed_mentions=discord.AllowedMentions.none())
     record["channel_id"] = str(channel.id)
     record["message_id"] = str(message.id)
@@ -386,10 +365,7 @@ async def _publish_or_update_submission_unlocked(client, record: dict, attachmen
         save_submission(record)
         try:
             await message.edit(
-                embed=build_submission_embed(
-                    record,
-                    image_url=_embedded_attachment_url(message.attachments),
-                ),
+                embed=build_submission_embed(record),
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -412,10 +388,7 @@ async def refresh_all_submission_panels(client) -> dict:
             channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
             message = await channel.fetch_message(message_id)
             await message.edit(
-                embed=build_submission_embed(
-                    record,
-                    image_url=_embedded_attachment_url(message.attachments),
-                ),
+                embed=build_submission_embed(record),
                 view=_view_for_record(record),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -1220,10 +1193,7 @@ class RecommendationActionView(discord.ui.View):
         record["comment_page"] = min(max(page + delta, 0), max_page)
         save_submission(record)
         await interaction.message.edit(
-            embed=build_submission_embed(
-                record,
-                image_url=_embedded_attachment_url(interaction.message.attachments),
-            ),
+            embed=build_submission_embed(record),
             view=RecommendationActionView(record),
             allowed_mentions=discord.AllowedMentions.none(),
         )
