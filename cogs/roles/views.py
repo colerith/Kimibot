@@ -2124,8 +2124,8 @@ def _today_egg_qa_status(user_id: int, guild_id: int, tx_rows: list[dict]) -> tu
 
 
 def _task_line(done: bool, label: str, detail: str) -> str:
-    mark = "✅" if done else "⬜"
-    return f"{mark} **{label}**\n　　└ {detail}"
+    mark = "✅" if done else "▫️"
+    return f"{mark} **{label}**　`{detail}`"
 
 
 async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id: int) -> discord.Embed:
@@ -2190,49 +2190,41 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         bonus_lines.append(f"额外任务未达成，已扣回：-{format_shells(extra_result.get('amount', 0))} 蛋壳")
 
     basic_lines = [
-        _task_line(signed, "小蛋报到", f"{format_shells(sign_amount)} 蛋壳"),
-        _task_line(praised, "赞美奇米蛋", f"{format_shells(praise_amount)} 蛋壳"),
-        _task_line(rec_count >= 1, "安利投稿", f"{rec_count}/1 次 · {format_shells(rec_amount)} 蛋壳"),
-        _task_line(egg_question_done, "小蛋问答提问", f"{egg_usage}/3 次"),
-        _task_line(comment_done, "安利盖楼回复", f"{format_shells(comment_base_amount)}/15 · 实得 {format_shells(comment_amount)} 蛋壳"),
-        _task_line(egg_reply_done, "小蛋问答回复", f"{format_shells(egg_reply_base_amount)}/15 · 实得 {format_shells(egg_reply_amount)} 蛋壳"),
+        _task_line(signed, "小蛋报到", f"+{format_shells(sign_amount)} 蛋壳"),
+        _task_line(praised, "赞美奇米蛋", f"+{format_shells(praise_amount)} 蛋壳"),
+        _task_line(rec_count >= 1, "安利投稿", f"{rec_count}/1 · +{format_shells(rec_amount)}"),
+        _task_line(egg_question_done, "问答提问", f"{egg_usage}/3 次"),
+        _task_line(comment_done, "安利回复", f"{format_shells(comment_base_amount)}/15 · +{format_shells(comment_amount)}"),
+        _task_line(egg_reply_done, "问答回复", f"{format_shells(egg_reply_base_amount)}/15 · +{format_shells(egg_reply_amount)}"),
     ]
     extra_lines = [
         _task_line(msg_done, "有效发言", f"{msg_count}/20 条"),
         _task_line(forum_done, "社区发帖", f"{format_shells(forum_amount)} 蛋壳"),
-        _task_line(repo_done, "Repo 投稿", f"{repo_count}/1 次 · {format_shells(repo_amount)} 蛋壳"),
-        _task_line(ten_draw_done, "至少一次十连", "今日已十连" if ten_draw_done else "今日未十连"),
+        _task_line(repo_done, "Repo 投稿", f"{repo_count}/1 · +{format_shells(repo_amount)}"),
+        _task_line(ten_draw_done, "十连抽奖", "已完成" if ten_draw_done else "未完成"),
     ]
 
     embed = discord.Embed(
         title="🥚 小蛋每日任务",
         description=(
-            f"今天是 `{today}`，奇米蛋把你的任务小本本翻开惹~\n"
-            f"基础任务：**{sum(1 for done in basic_tasks if done)} / {len(basic_tasks)}**　"
-            f"额外任务：**{sum(1 for done in extra_tasks if done)} / {len(extra_tasks)}**"
+            f"`{today}`　全清基础 **+10** 蛋壳 · 额外任选 2 项 **+10** 蛋壳"
         ),
         color=STYLE["KIMI_YELLOW"],
     )
     embed.set_author(name=getattr(user, "display_name", str(user)), icon_url=user.display_avatar.url)
     embed.add_field(
         name=f"🌱 基础任务 · {sum(1 for done in basic_tasks if done)}/{len(basic_tasks)}",
-        value="\n\n".join(basic_lines),
+        value="\n".join(basic_lines),
         inline=False,
     )
     embed.add_field(
         name=f"✨ 额外任务 · {sum(1 for done in extra_tasks if done)}/{len(extra_tasks)}",
-        value="\n\n".join(extra_lines),
+        value="\n".join(extra_lines),
         inline=False,
     )
     if bonus_lines:
-        embed.add_field(name="今日额外奖励", value="\n".join(bonus_lines), inline=False)
-    else:
-        embed.add_field(
-            name="任务奖励",
-            value="基础任务全完成：+10 蛋壳\n额外任务完成任意 2 项：+10 蛋壳",
-            inline=False,
-        )
-    embed.set_footer(text="任务状态按北京时间刷新；奖励每天每档只能领取一次。")
+        embed.add_field(name="🎁 今日任务奖励", value=" · ".join(bonus_lines), inline=False)
+    embed.set_footer(text="北京时间每日刷新 · 每档奖励每天领取一次")
     return embed
 
 
@@ -4011,95 +4003,102 @@ class RoleManagerView(discord.ui.View):
 
     def build_dashboard_embed(self):
         data = load_role_data()
-        embed = discord.Embed(title="⚙️ 身份组管理控制台", color=0x2b2d31)
-        embed.set_footer(text=f"{self.guild.name}", icon_url=self.guild.icon.url if self.guild.icon else None)
-
-        def fmt_roles(key):
-            ids = data.get(key, [])
-            names = []
-            for rid in ids:
-                r = self.guild.get_role(rid)
-                names.append(r.mention if r else f"`{rid} (失效)`")
-            return _preview_lines(names)
-
-        embed.add_field(name="🎰 抽奖模式", value=fmt_roles("lottery_roles"), inline=False)
-        embed.add_field(name="🎨 自选模式", value=fmt_roles("claimable_roles"), inline=False)
-        embed.add_field(name="🥚 蛋壳兑换", value=fmt_roles("redeem_roles"), inline=False)
-        embed.add_field(name="🔔 通知订阅", value=fmt_roles("notification_roles"), inline=False) # 新增展示
-
         cfg = get_lottery_config(data)
-        refunds = cfg.get("refund", {})
-        weights = cfg.get("weights", {})
         outcome_weights = cfg.get("outcome_weights", {})
         shell_reward = cfg.get("shell_reward", {})
 
-        rarity_lines = []
-        kind_color_lines = []
-        kind_icon_lines = []
+        pool_specs = (
+            ("lottery_roles", "🎰 抽奖"),
+            ("claimable_roles", "🎨 普通"),
+            ("redeem_roles", "🥚 兑换"),
+            ("notification_roles", "🔔 通知"),
+        )
+        pool_counts = {}
+        invalid_count = 0
+        for key, _ in pool_specs:
+            ids = data.get(key, [])
+            pool_counts[key] = sum(1 for role_id in ids if self.guild.get_role(role_id))
+            invalid_count += sum(1 for role_id in ids if not self.guild.get_role(role_id))
+
+        rarity_counts = {rarity: 0 for rarity in RARITY_ORDER}
+        color_count = 0
+        icon_count = 0
         for rid in data.get("lottery_roles", []):
             role = self.guild.get_role(rid)
             if not role:
                 continue
             rarity = get_lottery_role_rarity(rid, data)
             kind = get_lottery_role_kind(rid, data)
-            line = f"{_rarity_short(rarity)} {role.mention}"
-            rarity_lines.append(line)
+            rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
             if kind == LOTTERY_KIND_COLOR:
-                kind_color_lines.append(line)
+                color_count += 1
             else:
-                kind_icon_lines.append(line)
+                icon_count += 1
 
-        rarity_text = "\n".join(rarity_lines[:10]) if rarity_lines else "*未配置*"
-        if len(rarity_lines) > 10:
-            rarity_text += "\n..."
+        collection_cfg = get_collection_config(data)
+        groups = collection_cfg.get("groups", [])
+        assigned_ids = {
+            role_id
+            for group in groups
+            for role_id in group.get("role_ids", [])
+            if self.guild.get_role(role_id)
+        }
+        reward_items = list(groups) + [collection_cfg.get("full_reward", {})]
+        configured_rewards = sum(
+            1 for reward in reward_items
+            if float(reward.get("reward_shells", 0) or 0) > 0
+            or int(reward.get("reward_role_id", 0) or 0) > 0
+        )
 
-        embed.add_field(
-            name="⭐ 奖池稀有度",
-            value=rarity_text,
-            inline=False,
+        embed = discord.Embed(
+            title="⚙️ 身份组管理控制台",
+            description=(
+                "这里只展示配置概况。选择下方工作区查看和修改具体身份组。"
+            ),
+            color=0x2B2D31,
         )
         embed.add_field(
-            name="🎨 抽奖池-颜色",
-            value="\n".join(kind_color_lines[:10]) if kind_color_lines else "*空*",
-            inline=False,
-        )
-        embed.add_field(
-            name="🏷️ 抽奖池-图标",
-            value="\n".join(kind_icon_lines[:10]) if kind_icon_lines else "*空*",
-            inline=False,
-        )
-        embed.add_field(
-            name="💳 抽奖参数",
+            name="🎨 身份池概况",
             value=(
-                f"单抽: **{format_shells(cfg.get('cost_single', 1.0))}** 蛋壳 | "
-                f"五抽: **{format_shells(cfg.get('cost_five', 5.0))}** 蛋壳 | "
-                f"十连: **{format_shells(cfg.get('cost_ten', 10.0))}** 蛋壳\n"
-                f"结果(抽空/蛋壳/身份): **{int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 45))}/{int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 32))}/{int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 23))}**\n"
-                f"蛋壳结果: **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
-                f"概率(☆/★/★★/★★★): **{int(weights.get(str(RARITY_JUNK), 52))}/{int(weights.get(str(RARITY_NORMAL), 38))}/{int(weights.get(str(RARITY_RARE), 7))}/{int(weights.get(str(RARITY_LEGENDARY), 3))}**\n"
-                f"补偿(☆/★/★★/★★★): **{format_shells(refunds.get(str(RARITY_JUNK), 0.5))}/{format_shells(refunds.get(str(RARITY_NORMAL), 1.0))}/{format_shells(refunds.get(str(RARITY_RARE), 2.0))}/{format_shells(refunds.get(str(RARITY_LEGENDARY), 5.0))}** 蛋壳"
+                "　".join(f"{label} **{pool_counts[key]}**" for key, label in pool_specs)
+                + (f"\n⚠️ 失效配置 **{invalid_count}** 项" if invalid_count else "")
             ),
             inline=False,
         )
-
-        collection_cfg = get_collection_config(data)
-        collection_lines = []
-        for group in collection_cfg.get("groups", []):
-            reward_role = self.guild.get_role(int(group.get("reward_role_id", 0) or 0))
-            collection_lines.append(
-                f"{group.get('emoji', '📚')} **{group.get('name', '未命名')}** · {len(group.get('role_ids', []))} 项 · "
-                f"{format_shells(group.get('reward_shells', 0))} 蛋壳" + (f" · {reward_role.mention}" if reward_role else "")
-            )
-        full = collection_cfg.get("full_reward", {})
-        full_role = self.guild.get_role(int(full.get("reward_role_id", 0) or 0))
-        collection_lines.append(f"{full.get('emoji', '👑')} **{full.get('name', '图鉴大师')}** · 全图鉴 · "
-                                f"{format_shells(full.get('reward_shells', 0))} 蛋壳" + (f" · {full_role.mention}" if full_role else ""))
-        embed.add_field(name="📚 图鉴分组 / 收集奖励", value=_preview_lines(collection_lines), inline=False)
-
-        embed.description = (
-            "选择下方工作区进行配置。\n"
-            "身份组的添加、查看与移除已整合进「身份池管理」，操作过程中会保留当前池与分页。"
+        embed.add_field(
+            name="🎰 奖池概况",
+            value=(
+                f"🎨 颜色 **{color_count}**　🏷️ 图标 **{icon_count}**\n"
+                f"☆ **{rarity_counts.get(RARITY_JUNK, 0)}**　"
+                f"★ **{rarity_counts.get(RARITY_NORMAL, 0)}**　"
+                f"★★ **{rarity_counts.get(RARITY_RARE, 0)}**　"
+                f"★★★ **{rarity_counts.get(RARITY_LEGENDARY, 0)}**"
+            ),
+            inline=False,
         )
+        embed.add_field(
+            name="💳 核心参数",
+            value=(
+                f"消耗　单抽 **{format_shells(cfg.get('cost_single', 1.0))}** · "
+                f"五抽 **{format_shells(cfg.get('cost_five', 5.0))}** · "
+                f"十连 **{format_shells(cfg.get('cost_ten', 10.0))}**\n"
+                f"结果权重　抽空/蛋壳/身份 **{int(outcome_weights.get(LOTTERY_OUTCOME_EMPTY, 45))}/"
+                f"{int(outcome_weights.get(LOTTERY_OUTCOME_SHELLS, 32))}/"
+                f"{int(outcome_weights.get(LOTTERY_OUTCOME_ROLE, 23))}**\n"
+                f"蛋壳结果　**{format_shells(shell_reward.get('min', 0.1))}–"
+                f"{format_shells(shell_reward.get('max', 1.0))}** 蛋壳"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="📚 图鉴概况",
+            value=(
+                f"分组 **{len(groups)}** 个　已分组身份组 **{len(assigned_ids)}/{pool_counts['lottery_roles']}**\n"
+                f"已配置奖励 **{configured_rewards}/{len(reward_items)}** 项"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text=self.guild.name, icon_url=self.guild.icon.url if self.guild.icon else None)
         return embed
 
     async def refresh_callback(self, interaction: discord.Interaction):
