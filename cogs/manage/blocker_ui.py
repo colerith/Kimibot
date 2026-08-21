@@ -7,26 +7,45 @@ def build_notice_embed(
     target_mention: str,
     reason: str,
     deleted_count: int,
+    role_removed: bool = True,
     muted_text: str | None = None,
 ) -> discord.Embed:
-    deleted_text = (
-        f"移除身份组并清理了 {deleted_count} 条广告痕迹。"
-        if deleted_count > 0
-        else "已移除身份组，未发现可清理历史广告消息。"
-    )
-    muted_line = f"{muted_text}\n" if muted_text else ""
-
     embed = discord.Embed(
-        title=f"{target_name} 已被广告拦截",
+        title="🚨 广告风险处置通告",
         description=(
-            f"**目标**: {target_mention}\n"
-            f"**原因**: {reason}\n"
-            f"{deleted_text}\n"
-            f"{muted_line}\n"
-            "请提高警惕，不要点击不明链接。"
+            "检测到疑似盗号或恶意广告行为，系统已完成拦截与清理。\n"
+            "> 🔒 请勿点击陌生链接，也不要向他人提供账号验证码。"
         ),
-        color=0xFF2233,
+        color=0xED4245,
     )
+    embed.add_field(
+        name="👤 处理对象",
+        value=f"**{target_name}**\n{target_mention}",
+        inline=True,
+    )
+    embed.add_field(
+        name="⚠️ 处罚原因",
+        value=str(reason)[:1024],
+        inline=True,
+    )
+
+    action_lines = []
+    if role_removed:
+        action_lines.append("✅ 已移除可操作身份组")
+    action_lines.append(
+        f"🧹 已清理 **{deleted_count}** 条广告痕迹"
+        if deleted_count > 0
+        else "🧹 未发现可清理的历史广告消息"
+    )
+    if muted_text:
+        mute_icon = "⏳" if not str(muted_text).startswith("禁言失败") else "⚠️"
+        action_lines.append(f"{mute_icon} {muted_text}")
+    embed.add_field(
+        name="🛡️ 执行结果",
+        value="\n".join(action_lines),
+        inline=False,
+    )
+    embed.set_footer(text="奇米蛋安全中心 · 处罚记录已归档")
     embed.timestamp = discord.utils.utcnow()
     return embed
 

@@ -231,6 +231,7 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
                     target_mention=target_mention,
                     reason=reason,
                     deleted_count=result["deleted_count"],
+                    role_removed=bool(result.get("role_removed")),
                     muted_text=result.get("mute_text") or None,
                 )
                 msg = await notice_ch.send(embed=notice_embed)
