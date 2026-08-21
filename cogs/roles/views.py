@@ -306,6 +306,19 @@ def _collection_select_emoji(raw, fallback: str = "📚"):
         return fallback
 
 
+def _roles_in_server_order(guild: discord.Guild, roles) -> list[discord.Role]:
+    """按服务器设置页从上到下的身份组层级排序。"""
+    unique = {role.id: role for role in roles or [] if isinstance(role, discord.Role)}
+    return sorted(unique.values(), key=lambda role: (role.position, role.id), reverse=True)
+
+
+def _role_ids_in_server_order(guild: discord.Guild, role_ids) -> list[int]:
+    return [role.id for role in _roles_in_server_order(
+        guild,
+        [guild.get_role(int(role_id)) for role_id in role_ids or []],
+    )]
+
+
 def build_collection_embed(
     guild: discord.Guild,
     user_id: int,
@@ -314,11 +327,14 @@ def build_collection_embed(
 ) -> discord.Embed:
     data = load_role_data()
     cfg = get_collection_config(data)
-    pool_ids = [rid for rid in data.get("lottery_roles", []) if guild.get_role(rid)]
+    pool_ids = _role_ids_in_server_order(guild, data.get("lottery_roles", []))
     owned = set(get_user_collection(user_id))
     groups = cfg.get("groups", [])
     selected = next((g for g in groups if g.get("id") == selected_group_id), None)
-    shown_ids = pool_ids if selected is None else [rid for rid in selected.get("role_ids", []) if rid in pool_ids]
+    shown_ids = pool_ids if selected is None else _role_ids_in_server_order(
+        guild,
+        [rid for rid in selected.get("role_ids", []) if rid in pool_ids],
+    )
     shown_owned = len(set(shown_ids) & owned)
     total_pages = max(1, math.ceil(len(shown_ids) / COLLECTION_CATALOG_PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
@@ -431,9 +447,12 @@ class CollectionCatalogView(discord.ui.View):
         data = load_role_data()
         cfg = get_collection_config(data)
         groups = cfg.get("groups", [])
-        pool_ids = [rid for rid in data.get("lottery_roles", []) if self.guild.get_role(rid)]
+        pool_ids = _role_ids_in_server_order(self.guild, data.get("lottery_roles", []))
         selected = next((group for group in groups if group.get("id") == self.selected_group_id), None)
-        shown_ids = pool_ids if selected is None else [rid for rid in selected.get("role_ids", []) if rid in pool_ids]
+        shown_ids = pool_ids if selected is None else _role_ids_in_server_order(
+            self.guild,
+            [rid for rid in selected.get("role_ids", []) if rid in pool_ids],
+        )
         self.total_pages = max(1, math.ceil(len(shown_ids) / COLLECTION_CATALOG_PAGE_SIZE))
         self.page = max(0, min(self.page, self.total_pages - 1))
         self.add_item(CollectionFilterSelect(groups, self.selected_group_id))
@@ -1184,10 +1203,7 @@ class RoleClaimSelect(discord.ui.Select):
     """
     def __init__(self, guild_roles, *, page: int = 0, total_pages: int = 1):
         options = []
-        # 按名称排序
-        sorted_roles = sorted(guild_roles, key=lambda r: r.name)
-
-        for role in sorted_roles:
+        for role in guild_roles:
             emoji = "🎨"
             if "色" in role.name or "color" in role.name.lower(): emoji = "🌈"
             elif "男" in role.name or "女" in role.name: emoji = "🚻"
@@ -1279,7 +1295,11 @@ class RoleSelectionView(discord.ui.View):
         unique_roles = {}
         for role in guild_roles or []:
             unique_roles[role.id] = role
-        self.guild_roles = sorted(unique_roles.values(), key=lambda r: r.name.lower())
+        self.guild_roles = sorted(
+            unique_roles.values(),
+            key=lambda role: (role.position, role.id),
+            reverse=True,
+        )
         self.page_size = 25
         self.total_pages = max(1, math.ceil(len(self.guild_roles) / self.page_size)) if self.guild_roles else 1
         self.page = max(0, min(page, self.total_pages - 1))
@@ -2105,7 +2125,7 @@ def _today_egg_qa_status(user_id: int, guild_id: int, tx_rows: list[dict]) -> tu
 
 def _task_line(done: bool, label: str, detail: str) -> str:
     mark = "✅" if done else "⬜"
-    return f"{mark} **{label}**　{detail}"
+    return f"{mark} **{label}**\n　　└ {detail}"
 
 
 async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id: int) -> discord.Embed:
@@ -2145,7 +2165,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     basic_tasks = [
         signed,
         praised,
-        rec_count >= 5,
+        rec_count >= 1,
         comment_done,
         egg_question_done,
         egg_reply_done,
@@ -2172,16 +2192,16 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     basic_lines = [
         _task_line(signed, "小蛋报到", f"{format_shells(sign_amount)} 蛋壳"),
         _task_line(praised, "赞美奇米蛋", f"{format_shells(praise_amount)} 蛋壳"),
-        _task_line(rec_count >= 5, "安利投稿", f"{rec_count}/5 次 · {format_shells(rec_amount)} 蛋壳"),
-        _task_line(comment_done, "安利盖楼回复", f"{format_shells(comment_base_amount)}/15 · 实得 {format_shells(comment_amount)} 蛋壳"),
+        _task_line(rec_count >= 1, "安利投稿", f"{rec_count}/1 次 · {format_shells(rec_amount)} 蛋壳"),
         _task_line(egg_question_done, "小蛋问答提问", f"{egg_usage}/3 次"),
+        _task_line(comment_done, "安利盖楼回复", f"{format_shells(comment_base_amount)}/15 · 实得 {format_shells(comment_amount)} 蛋壳"),
         _task_line(egg_reply_done, "小蛋问答回复", f"{format_shells(egg_reply_base_amount)}/15 · 实得 {format_shells(egg_reply_amount)} 蛋壳"),
     ]
     extra_lines = [
-        _task_line(repo_done, "至少一次 repo 投稿", f"{repo_count}/1 次 · {format_shells(repo_amount)} 蛋壳"),
+        _task_line(msg_done, "有效发言", f"{msg_count}/20 条"),
         _task_line(forum_done, "社区发帖", f"{format_shells(forum_amount)} 蛋壳"),
+        _task_line(repo_done, "Repo 投稿", f"{repo_count}/1 次 · {format_shells(repo_amount)} 蛋壳"),
         _task_line(ten_draw_done, "至少一次十连", "今日已十连" if ten_draw_done else "今日未十连"),
-        _task_line(msg_done, "有效发言 20 条", f"{msg_count}/20 条"),
     ]
 
     embed = discord.Embed(
@@ -2194,8 +2214,16 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         color=STYLE["KIMI_YELLOW"],
     )
     embed.set_author(name=getattr(user, "display_name", str(user)), icon_url=user.display_avatar.url)
-    embed.add_field(name="基础任务", value="\n".join(basic_lines), inline=False)
-    embed.add_field(name="额外任务", value="\n".join(extra_lines), inline=False)
+    embed.add_field(
+        name=f"🌱 基础任务 · {sum(1 for done in basic_tasks if done)}/{len(basic_tasks)}",
+        value="\n\n".join(basic_lines),
+        inline=False,
+    )
+    embed.add_field(
+        name=f"✨ 额外任务 · {sum(1 for done in extra_tasks if done)}/{len(extra_tasks)}",
+        value="\n\n".join(extra_lines),
+        inline=False,
+    )
     if bonus_lines:
         embed.add_field(name="今日额外奖励", value="\n".join(bonus_lines), inline=False)
     else:
@@ -3265,10 +3293,12 @@ class RedeemConfigSelect(discord.ui.Select):
     def __init__(self, parent_view: "RedeemManagerView"):
         data = load_role_data()
         options = []
-        for rid in data.get("redeem_roles", []):
-            role = parent_view.guild.get_role(rid)
-            if not role:
-                continue
+        roles = _roles_in_server_order(
+            parent_view.guild,
+            [parent_view.guild.get_role(rid) for rid in data.get("redeem_roles", [])],
+        )
+        for role in roles:
+            rid = role.id
             meta = get_redeem_role_config(rid, data)
             price, active = _effective_redeem_price(meta)
             available, status = _redeem_availability(meta)
@@ -3401,7 +3431,15 @@ class RedeemConfigModal(discord.ui.Modal):
             return await interaction.response.send_message("❌ 该身份组不在兑换池中。", ephemeral=True)
 
         mode_note = "限时上架（仅显示原价）" if sale_mode == "limited" else "常驻上架"
-        await interaction.response.send_message(f"✅ 兑换配置已保存：{mode_note}。重新打开兑换配置即可看到最新内容。", ephemeral=True)
+        self.parent_view.refresh_items()
+        if interaction.message is not None:
+            await interaction.response.edit_message(
+                embed=self.parent_view.build_embed(),
+                view=self.parent_view,
+            )
+            await interaction.followup.send(f"✅ 兑换配置已保存：{mode_note}。", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"✅ 兑换配置已保存：{mode_note}。", ephemeral=True)
 
 
 class RedeemBackButton(discord.ui.Button):
@@ -3448,11 +3486,12 @@ class RedeemManagerView(discord.ui.View):
     def build_embed(self) -> discord.Embed:
         data = load_role_data()
         lines = []
-        for rid in data.get("redeem_roles", []):
-            role = self.guild.get_role(rid)
-            if not role:
-                lines.append(f"`{rid} (失效)`")
-                continue
+        roles = _roles_in_server_order(
+            self.guild,
+            [self.guild.get_role(rid) for rid in data.get("redeem_roles", [])],
+        )
+        for role in roles:
+            rid = role.id
             meta = get_redeem_role_config(rid, data)
             lines.append(f"{role.mention} - {_redeem_price_line(meta)}")
 
@@ -3682,14 +3721,248 @@ class LotteryConfigHubView(discord.ui.View):
         await self.parent_view.refresh_content(interaction)
 
 
+ROLE_POOL_META = {
+    "lottery": {"key": "lottery_roles", "label": "抽奖身份组", "emoji": "🎰"},
+    "claimable": {"key": "claimable_roles", "label": "普通换装", "emoji": "🎨"},
+    "notification": {"key": "notification_roles", "label": "通知订阅", "emoji": "🔔"},
+}
+
+
+class RolePoolCategorySelect(discord.ui.Select):
+    def __init__(self, panel: "RolePoolManagerView"):
+        options = [
+            discord.SelectOption(
+                label=meta["label"],
+                value=pool_type,
+                emoji=meta["emoji"],
+                default=pool_type == panel.pool_type,
+            )
+            for pool_type, meta in ROLE_POOL_META.items()
+        ]
+        super().__init__(placeholder="① 选择要管理的身份池", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, RolePoolManagerView):
+            return await interaction.response.defer()
+        panel.pool_type = self.values[0]
+        panel.page = 0
+        panel.selected_role_ids = []
+        panel.rebuild()
+        await interaction.response.edit_message(embed=panel.build_embed(), view=panel)
+
+
+class RolePoolAddSelect(discord.ui.Select):
+    def __init__(self, panel: "RolePoolManagerView"):
+        meta = ROLE_POOL_META[panel.pool_type]
+        super().__init__(
+            placeholder=f"② 选择服务器身份组，添加到「{meta['label']}」",
+            min_values=1,
+            max_values=25,
+            row=1,
+            select_type=discord.ComponentType.role_select,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, RolePoolManagerView):
+            return await interaction.response.defer()
+        selected_ids = [int(value) for value in interaction.data.get("values", [])]
+        data = load_role_data()
+        target_key = ROLE_POOL_META[panel.pool_type]["key"]
+        all_keys = [meta["key"] for meta in ROLE_POOL_META.values()] + ["redeem_roles"]
+        added, skipped = [], []
+        target = data.setdefault(target_key, [])
+        for role_id in selected_ids:
+            role = interaction.guild.get_role(role_id)
+            if not role:
+                skipped.append(f"{role_id}（已失效）")
+                continue
+            current_key = next((key for key in all_keys if role_id in data.get(key, [])), None)
+            if current_key:
+                current_label = next(
+                    (meta["label"] for meta in ROLE_POOL_META.values() if meta["key"] == current_key),
+                    "兑换身份组",
+                )
+                skipped.append(f"{role.name}（已在{current_label}）")
+                continue
+            target.append(role_id)
+            added.append(role.name)
+        if added:
+            save_role_data(data)
+        panel.rebuild()
+        await interaction.response.edit_message(embed=panel.build_embed(), view=panel)
+        await interaction.followup.send(
+            f"✅ 已添加 **{len(added)}** 个身份组" +
+            (f"\n⚠️ 跳过 **{len(skipped)}** 个：{', '.join(skipped[:8])}" if skipped else ""),
+            ephemeral=True,
+        )
+
+
+class RolePoolConfiguredSelect(discord.ui.Select):
+    def __init__(self, panel: "RolePoolManagerView", roles: list[discord.Role]):
+        data = load_role_data()
+        options = []
+        for role in roles:
+            if panel.pool_type == "lottery":
+                detail = f"{_lottery_kind_label(get_lottery_role_kind(role.id, data))} · {_rarity_label(get_lottery_role_rarity(role.id, data))}"
+            else:
+                detail = f"服务器层级 #{role.position} · ID {role.id}"
+            options.append(discord.SelectOption(
+                label=role.name[:100],
+                value=str(role.id),
+                description=detail[:100],
+                default=role.id in panel.selected_role_ids,
+            ))
+        super().__init__(
+            placeholder=f"③ 查看或勾选当前身份组（第 {panel.page + 1}/{panel.total_pages} 页）",
+            options=options,
+            min_values=1,
+            max_values=min(25, len(options)),
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, RolePoolManagerView):
+            return await interaction.response.defer()
+        panel.selected_role_ids = [int(value) for value in self.values]
+        panel.rebuild()
+        await interaction.response.edit_message(embed=panel.build_embed(), view=panel)
+
+
+class RolePoolActionButton(discord.ui.Button):
+    def __init__(self, action: str, *, label: str, emoji: str | None = None,
+                 style=discord.ButtonStyle.secondary, disabled: bool = False):
+        super().__init__(label=label, emoji=emoji, style=style, disabled=disabled, row=3)
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = self.view
+        if not isinstance(panel, RolePoolManagerView):
+            return await interaction.response.defer()
+        if self.action == "back":
+            return await panel.parent_view.refresh_content(interaction)
+        if self.action in {"prev", "next"}:
+            panel.page = max(0, min(
+                panel.page + (-1 if self.action == "prev" else 1),
+                panel.total_pages - 1,
+            ))
+            panel.selected_role_ids = []
+            panel.rebuild()
+            return await interaction.response.edit_message(embed=panel.build_embed(), view=panel)
+        if self.action == "remove":
+            if not panel.selected_role_ids:
+                return await interaction.response.send_message("请先在第 ③ 步勾选要移除的身份组。", ephemeral=True)
+            data = load_role_data()
+            target_key = ROLE_POOL_META[panel.pool_type]["key"]
+            selected = set(panel.selected_role_ids)
+            before = data.get(target_key, [])
+            data[target_key] = [role_id for role_id in before if role_id not in selected]
+            removed_count = len(before) - len(data[target_key])
+            if removed_count:
+                save_role_data(data)
+            panel.selected_role_ids = []
+            panel.rebuild()
+            await interaction.response.edit_message(embed=panel.build_embed(), view=panel)
+            return await interaction.followup.send(f"🗑️ 已从当前身份池移除 **{removed_count}** 项。", ephemeral=True)
+        await interaction.response.defer()
+
+
+class RolePoolManagerView(discord.ui.View):
+    def __init__(self, parent_view: "RoleManagerView", pool_type: str = "lottery"):
+        super().__init__(timeout=600)
+        self.parent_view = parent_view
+        self.guild = parent_view.guild
+        self.pool_type = pool_type if pool_type in ROLE_POOL_META else "lottery"
+        self.page = 0
+        self.page_size = 25
+        self.total_pages = 1
+        self.selected_role_ids: list[int] = []
+        self.page_roles: list[discord.Role] = []
+        self.rebuild()
+
+    def _configured_roles(self) -> list[discord.Role]:
+        data = load_role_data()
+        ids = data.get(ROLE_POOL_META[self.pool_type]["key"], [])
+        return _roles_in_server_order(self.guild, [self.guild.get_role(role_id) for role_id in ids])
+
+    def rebuild(self):
+        self.clear_items()
+        roles = self._configured_roles()
+        self.total_pages = max(1, math.ceil(len(roles) / self.page_size)) if roles else 1
+        self.page = max(0, min(self.page, self.total_pages - 1))
+        self.page_roles = roles[self.page * self.page_size:(self.page + 1) * self.page_size]
+        valid_ids = {role.id for role in self.page_roles}
+        self.selected_role_ids = [role_id for role_id in self.selected_role_ids if role_id in valid_ids]
+        self.add_item(RolePoolCategorySelect(self))
+        self.add_item(RolePoolAddSelect(self))
+        if self.page_roles:
+            self.add_item(RolePoolConfiguredSelect(self, self.page_roles))
+        else:
+            self.add_item(discord.ui.Button(label="当前身份池为空", disabled=True, row=2))
+        self.add_item(RolePoolActionButton(
+            "remove", label=f"移除所选 {len(self.selected_role_ids)}", emoji="🗑️",
+            style=discord.ButtonStyle.danger, disabled=not self.selected_role_ids,
+        ))
+        self.add_item(RolePoolActionButton("prev", label="上一页", emoji="⬅️", disabled=self.page <= 0))
+        self.add_item(discord.ui.Button(label=f"{self.page + 1}/{self.total_pages}", disabled=True, row=3))
+        self.add_item(RolePoolActionButton("next", label="下一页", emoji="➡️", disabled=self.page >= self.total_pages - 1))
+        self.add_item(RolePoolActionButton("back", label="返回", emoji="↩️"))
+
+    def build_embed(self) -> discord.Embed:
+        data = load_role_data()
+        meta = ROLE_POOL_META[self.pool_type]
+        counts = []
+        for pool_type, pool_meta in ROLE_POOL_META.items():
+            count = sum(1 for role_id in data.get(pool_meta["key"], []) if self.guild.get_role(role_id))
+            marker = "▸" if pool_type == self.pool_type else "·"
+            counts.append(f"{marker} {pool_meta['emoji']} **{pool_meta['label']}** {count}")
+        embed = discord.Embed(
+            title=f"{meta['emoji']} 身份池管理 · {meta['label']}",
+            description=(
+                "按 **① 选择池 → ② 添加身份组 → ③ 查看/勾选** 连续操作；"
+                "切换池和翻页都在当前面板完成。\n\n" + "　".join(counts)
+            ),
+            color=0x5865F2,
+        )
+        page_lines = [
+            f"`{self.page * self.page_size + index:02d}` {role.mention}　`层级 {role.position}`"
+            for index, role in enumerate(self.page_roles, start=1)
+        ]
+        embed.add_field(
+            name=f"当前配置 · 第 {self.page + 1}/{self.total_pages} 页",
+            value="\n".join(page_lines) if page_lines else "*当前身份池还没有配置身份组。*",
+            inline=False,
+        )
+        selected_roles = [self.guild.get_role(role_id) for role_id in self.selected_role_ids]
+        selected_roles = [role for role in selected_roles if role]
+        if selected_roles:
+            detail_lines = []
+            for role in selected_roles[:8]:
+                detail = (
+                    f"{role.mention}\n"
+                    f"└ ID `{role.id}` · 层级 `{role.position}` · 成员 `{len(role.members)}`"
+                )
+                if self.pool_type == "lottery":
+                    detail += f" · {_lottery_kind_label(get_lottery_role_kind(role.id, data))} · {_rarity_label(get_lottery_role_rarity(role.id, data))}"
+                detail_lines.append(detail)
+            embed.add_field(name=f"已选择 {len(selected_roles)} 项", value="\n".join(detail_lines), inline=False)
+        embed.set_footer(text="身份组按服务器层级从上到下排列；兑换池请使用独立的「兑换配置」。")
+        return embed
+
+
 class AdminActionButton(discord.ui.Button):
     def __init__(self, parent_view: "RoleManagerView", action: str, *, label: str, emoji: str):
-        super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary, row=4)
+        super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary, row=0)
         self.parent_view = parent_view
         self.action = action
 
     async def callback(self, interaction: discord.Interaction):
         cfg = get_lottery_config(load_role_data())
+        if self.action == "pools":
+            pool_view = RolePoolManagerView(self.parent_view)
+            return await interaction.response.edit_message(embed=pool_view.build_embed(), view=pool_view)
         if self.action == "hub":
             return await interaction.response.edit_message(
                 embed=discord.Embed(title="🎰 奖池与图鉴配置", description="请选择要管理的内容。", color=0x2B2D31),
@@ -3730,37 +4003,11 @@ class RoleManagerView(discord.ui.View):
 
     def setup_ui(self):
         self.clear_items()
-        data = load_role_data()
-        role_map = {}
-
-        # 构建 {Role: Type} 字典
-        def load_to_map(key_name, type_name):
-            for rid in data.get(key_name, []):
-                r = self.guild.get_role(rid)
-                if r: role_map[r] = type_name
-
-        load_to_map("claimable_roles", "claimable")
-        load_to_map("lottery_roles", "lottery")
-        load_to_map("notification_roles", "notification") # 新增
-        load_to_map("redeem_roles", "redeem")
-
-        total_remove_items = len(role_map)
-        self.remove_total_pages = max(1, math.ceil(total_remove_items / self.remove_page_size)) if total_remove_items > 0 else 1
-        if self.remove_page >= self.remove_total_pages:
-            self.remove_page = max(0, self.remove_total_pages - 1)
-
-        # 添加组件
-        self.add_item(AdminAddRoleSelect(self, pool_type="lottery"))      # Row 0
-        self.add_item(AdminAddRoleSelect(self, pool_type="claimable"))    # Row 1
-        self.add_item(AdminAddRoleSelect(self, pool_type="notification")) # Row 2 (新增)
-        self.add_item(AdminRemoveSelect(role_map, self, page=self.remove_page, page_size=self.remove_page_size))  # Row 3
-
-        # 功能按钮 Row 4
+        self.add_item(AdminActionButton(self, "pools", label="身份池管理", emoji="🎨"))
         self.add_item(AdminActionButton(self, "hub", label="奖池/图鉴", emoji="📚"))
         self.add_item(AdminActionButton(self, "cost", label="抽奖消耗", emoji="💳"))
         self.add_item(AdminActionButton(self, "weights", label="概率/补偿", emoji="🎚️"))
         self.add_item(AdminActionButton(self, "redeem", label="兑换配置", emoji="🥚"))
-        self.add_item(AdminRemovePageButton(self))
 
     def build_dashboard_embed(self):
         data = load_role_data()
@@ -3849,7 +4096,10 @@ class RoleManagerView(discord.ui.View):
                                 f"{format_shells(full.get('reward_shells', 0))} 蛋壳" + (f" · {full_role.mention}" if full_role else ""))
         embed.add_field(name="📚 图鉴分组 / 收集奖励", value=_preview_lines(collection_lines), inline=False)
 
-        embed.description = "⬇️ **使用下方菜单配置你的社区身份组系统**"
+        embed.description = (
+            "选择下方工作区进行配置。\n"
+            "身份组的添加、查看与移除已整合进「身份池管理」，操作过程中会保留当前池与分页。"
+        )
         return embed
 
     async def refresh_callback(self, interaction: discord.Interaction):
