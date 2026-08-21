@@ -221,6 +221,7 @@ def create_submission_once(
             "useful_user_ids": [],
             "useful_reward_tiers": [],
             "comments": [],
+            "notifications_enabled": True,
             "created_at": now,
             "updated_at": now,
             "deleted_at": "",
@@ -241,6 +242,31 @@ def save_submission(record: dict) -> dict:
 def get_submission(submission_id: str) -> dict | None:
     record = load_data().get("submissions", {}).get(str(submission_id))
     return record if isinstance(record, dict) else None
+
+
+def submission_notifications_enabled(record: dict | None) -> bool:
+    """旧投稿没有该字段时保持原有提醒行为。"""
+    return bool(record is not None and record.get("notifications_enabled", True))
+
+
+def set_submission_notifications(
+    submission_id: str,
+    author_id: int,
+    enabled: bool,
+) -> dict | None:
+    """仅投稿者可修改单条投稿的提醒状态。"""
+    with _DATA_LOCK:
+        data = load_data()
+        record = data.get("submissions", {}).get(str(submission_id))
+        if not isinstance(record, dict):
+            return None
+        if record.get("author_id") != str(author_id) or record.get("status") == STATUS_DELETED:
+            return None
+        record["notifications_enabled"] = bool(enabled)
+        record["updated_at"] = _now_iso()
+        data["submissions"][str(submission_id)] = record
+        save_data(data)
+        return record
 
 
 def find_by_message_id(message_id: int) -> dict | None:

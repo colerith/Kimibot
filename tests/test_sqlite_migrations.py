@@ -20,6 +20,7 @@ def _load_module(name: str, relative_path: str):
 points = _load_module("points_storage_test", "cogs/points/storage.py")
 roles = _load_module("roles_storage_test", "cogs/roles/storage.py")
 red_packets = _load_module("red_packets_storage_test", "cogs/red_packets/storage.py")
+submissions = _load_module("submissions_storage_test", "cogs/submissions/storage.py")
 
 
 class PointsSQLiteMigrationTests(unittest.TestCase):
@@ -137,6 +138,7 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         app_store.APP_STATE_DB_FILE = str(root / "app_state.sqlite3")
         app_store._SCHEMA_READY = False
         red_packets.DATA_FILE = str(root / "red_packets.json")
+        submissions.DATA_FILE = str(root / "submissions.json")
         Path(red_packets.DATA_FILE).write_text(
             json.dumps({"version": 1, "packets": {"legacy": {"id": "legacy"}}}),
             encoding="utf-8",
@@ -154,6 +156,27 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         red_packets.save_data(migrated)
         Path(red_packets.DATA_FILE).write_text("{}", encoding="utf-8")
         self.assertIn("new", red_packets.load_data()["packets"])
+
+    def test_submission_notification_subscription_is_owned_and_persistent(self):
+        record, created = submissions.create_submission_once(
+            guild_id=99,
+            author_id=7,
+            author_name="tester",
+            kind=submissions.KIND_RECOMMENDATION,
+            fields={"target": "测试投稿", "content": "正文"},
+            base_reward=1.0,
+            request_id="notification-test",
+        )
+        self.assertTrue(created)
+        self.assertTrue(submissions.submission_notifications_enabled(record))
+        self.assertIsNone(submissions.set_submission_notifications(record["id"], 8, False))
+        updated = submissions.set_submission_notifications(record["id"], 7, False)
+        self.assertIsNotNone(updated)
+        self.assertFalse(submissions.submission_notifications_enabled(updated))
+        self.assertFalse(
+            submissions.submission_notifications_enabled(submissions.get_submission(record["id"]))
+        )
+        self.assertTrue(submissions.submission_notifications_enabled({"id": "legacy"}))
 
 
 if __name__ == "__main__":

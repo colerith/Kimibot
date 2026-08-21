@@ -27,6 +27,8 @@ from .storage import (
     random_reward,
     save_submission,
     set_panel_info,
+    set_submission_notifications,
+    submission_notifications_enabled,
     toggle_useful,
     update_submission_fields,
 )
@@ -292,12 +294,95 @@ def _view_for_record(record: dict) -> discord.ui.View:
     return OwnerReplyView(record)
 
 
-async def _notify_user(client, record: dict, message: str) -> None:
+def _submission_title(record: dict) -> str:
+    fields = record.get("fields", {}) if isinstance(record.get("fields"), dict) else {}
+    return str(fields.get("title") or fields.get("target") or "未命名投稿")
+
+
+def _submission_jump_url(record: dict) -> str | None:
+    guild_id = str(record.get("guild_id") or "")
+    channel_id = str(record.get("channel_id") or "")
+    message_id = str(record.get("message_id") or "")
+    if not guild_id or not channel_id or not message_id:
+        return None
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+class SubmissionNotificationView(discord.ui.View):
+    def __init__(self, record: dict):
+        super().__init__(timeout=86400)
+        self.record_id = str(record.get("id", ""))
+        self.author_id = int(record.get("author_id") or 0)
+        jump_url = _submission_jump_url(record)
+        if jump_url:
+            self.add_item(discord.ui.Button(
+                label="查看我的投稿",
+                emoji="🔗",
+                style=discord.ButtonStyle.link,
+                url=jump_url,
+            ))
+
+    @discord.ui.button(label="取消此投稿提醒", emoji="🔕", style=discord.ButtonStyle.secondary)
+    async def unsubscribe(self, button, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("只有投稿者可以修改这条投稿的提醒。", ephemeral=True)
+        record = set_submission_notifications(self.record_id, self.author_id, False)
+        if not record:
+            return await interaction.response.send_message("投稿不存在或已经删除。", ephemeral=True)
+        button.label = "提醒已取消"
+        button.emoji = "🔕"
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+
+async def _notify_submission_event(
+    client,
+    record: dict,
+    *,
+    event: str,
+    actor,
+    content: str = "",
+    reward: float = 0.0,
+) -> bool:
+    if not submission_notifications_enabled(record):
+        return False
+    if actor and str(getattr(actor, "id", "")) == str(record.get("author_id")):
+        return False
+
+    event_config = {
+        "useful": ("👍 你的投稿被点赞啦", 0x73C991, "觉得这条投稿很有用"),
+        "comment": ("💬 你的投稿收到了新回复", 0x6EA8E5, "在楼里留下了回复"),
+        "owner_reply": ("💌 你收到了一封电波回信", 0xB58BE2, "回复了你的投稿"),
+    }
+    title, color, action = event_config.get(event, ("🔔 投稿有了新动态", PANEL_COLOR, "与你的投稿产生了互动"))
+    actor_name = str(getattr(actor, "display_name", None) or getattr(actor, "name", None) or "一位小饱饱")
+    actor_id = str(getattr(actor, "id", "") or "")
+    actor_text = f"**{actor_name}**" + (f"（<@{actor_id}>）" if actor_id else "")
+    embed = discord.Embed(
+        title=title,
+        description=(
+            f"你的 **{_kind_label(record.get('kind', ''))}投稿 · {_submission_title(record)[:100]}** 有了新动态。"
+        ),
+        color=color,
+    )
+    embed.add_field(name="✨ 互动来自", value=f"{actor_text}\n{action}", inline=False)
+    if content:
+        is_nsfw = str(record.get("fields", {}).get("content_type", "sfw")).lower() == "nsfw"
+        preview = _quote_comment(content, limit=700)
+        embed.add_field(name="📝 回复预览", value=_spoiler(preview, is_nsfw), inline=False)
+    if event == "useful":
+        useful_count = len(record.get("useful_user_ids", []) if isinstance(record.get("useful_user_ids"), list) else [])
+        embed.add_field(name="👍 当前点赞", value=f"**{useful_count}** 人觉得有用", inline=True)
+    if reward > 0:
+        embed.add_field(name="🥚 追加奖励", value=f"**+{format_shells(reward)}** 蛋壳", inline=True)
+    embed.set_footer(text=f"投稿 #{record.get('id')} · 可在下方直接查看或取消提醒")
+
     try:
         user = await client.fetch_user(int(record.get("author_id")))
-        await user.send(message)
+        await user.send(embed=embed, view=SubmissionNotificationView(record))
+        return True
     except Exception:
-        return
+        return False
 
 
 async def _attachments_to_files(attachments, *, spoiler: bool = False) -> list[discord.File]:
@@ -570,10 +655,13 @@ class OwnerReplyModal(discord.ui.Modal):
             record["extra_reward"] = round(float(record.get("extra_reward", 0) or 0) + monthly_bonus, 1)
             record = save_submission(record)
         await publish_or_update_submission(interaction.client, record)
-        await _notify_user(
+        await _notify_submission_event(
             interaction.client,
             record,
-            f"🥚 你的{_kind_label(record.get('kind', ''))}投稿收到了服主回复，并追加 **{format_shells(reward)}** 蛋壳！",
+            event="owner_reply",
+            actor=interaction.user,
+            content=self.children[0].value.strip(),
+            reward=reward,
         )
         await interaction.followup.send(f"✅ 已回复并追加 **{format_shells(reward)}** 蛋壳。", ephemeral=True)
 
@@ -593,6 +681,13 @@ class CommentModal(discord.ui.Modal):
         record["comment_page"] = max(0, (len(comments) - 1) // COMMENTS_PER_PAGE)
         save_submission(record)
         await publish_or_update_submission(interaction.client, record)
+        await _notify_submission_event(
+            interaction.client,
+            record,
+            event="comment",
+            actor=interaction.user,
+            content=self.children[0].value.strip(),
+        )
         reward_result = grant_comment_reward(guild_id=interaction.guild_id, user_id=interaction.user.id)
         awarded = float(reward_result.get("awarded", 0.0))
         if awarded > 0:
@@ -1166,9 +1261,15 @@ class RecommendationActionView(discord.ui.View):
                 reason=f"submission_id={record['id']};useful_count={tier['count']}",
             ))
         await publish_or_update_submission(interaction.client, record)
-        if result["new_tier_rewards"]:
-            reward_text = format_shells(sum(float(x.get("amount", 0)) for x in credited_rewards))
-            await _notify_user(interaction.client, record, f"🥚 你的安利被大家觉得有用，追加 **{reward_text}** 蛋壳！")
+        if result["added"]:
+            reward_amount = sum(float(x.get("amount", 0)) for x in credited_rewards)
+            await _notify_submission_event(
+                interaction.client,
+                record,
+                event="useful",
+                actor=interaction.user,
+                reward=reward_amount,
+            )
         status = "已计入" if result["added"] else "已取消"
         await interaction.followup.send(f"✅ {status}觉得有用。", ephemeral=True)
 
@@ -1249,6 +1350,12 @@ class SubmissionEditView(discord.ui.View):
     def __init__(self, record: dict):
         super().__init__(timeout=300)
         self.record_id = str(record["id"])
+        enabled = submission_notifications_enabled(record)
+        for child in self.children:
+            if getattr(child, "custom_id", "") == "submission_manage_notifications":
+                child.label = "取消提醒" if enabled else "订阅提醒"
+                child.emoji = "🔔" if enabled else "🔕"
+                child.style = discord.ButtonStyle.secondary if enabled else discord.ButtonStyle.success
 
     async def _record_for_user(self, interaction: discord.Interaction) -> dict | None:
         record = get_submission(self.record_id)
@@ -1269,6 +1376,29 @@ class SubmissionEditView(discord.ui.View):
                 ephemeral=True,
             )
         await interaction.response.send_modal(SubmissionModal(kind, record))
+
+    @discord.ui.button(
+        label="订阅提醒",
+        emoji="🔕",
+        style=discord.ButtonStyle.success,
+        custom_id="submission_manage_notifications",
+    )
+    async def notifications(self, button, interaction: discord.Interaction):
+        record = await self._record_for_user(interaction)
+        if not record:
+            return await interaction.response.send_message("投稿不存在，或这不是你的投稿。", ephemeral=True)
+        enabled = not submission_notifications_enabled(record)
+        record = set_submission_notifications(self.record_id, interaction.user.id, enabled)
+        if not record:
+            return await interaction.response.send_message("提醒状态修改失败，请稍后再试。", ephemeral=True)
+        await interaction.response.edit_message(
+            embed=build_submission_embed(record),
+            view=SubmissionEditView(record),
+        )
+        await interaction.followup.send(
+            "🔔 已订阅这条投稿的点赞与回复提醒。" if enabled else "🔕 已取消这条投稿的互动提醒。",
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="删除投稿", style=discord.ButtonStyle.danger)
     async def delete(self, button, interaction: discord.Interaction):
