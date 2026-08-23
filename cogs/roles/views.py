@@ -84,6 +84,7 @@ from discord.ui import Select
 
 EMBED_FIELD_VALUE_LIMIT = 1024
 MONTHLY_ROLE_PAGE_SIZE = 10
+RARITY_ORDER = (RARITY_JUNK, RARITY_NORMAL, RARITY_RARE, RARITY_LEGENDARY)
 
 # The points store serializes one JSON file internally. Without this async
 # gate, a sign-in burst can occupy every executor worker waiting on the same
@@ -4510,9 +4511,13 @@ class CommunityPanelManageView(discord.ui.View):
 
     @discord.ui.button(label="身份管理", style=discord.ButtonStyle.primary, emoji="🎨", custom_id="community_admin_roles")
     async def role_manage_callback(self, button, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         view = RoleManagerView(interaction)
-        embed = view.build_dashboard_embed()
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        embed = await asyncio.to_thread(view.build_dashboard_embed)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="事件刷新", style=discord.ButtonStyle.secondary, emoji="🔄", custom_id="community_admin_events")
     async def event_refresh_callback(self, button, interaction: discord.Interaction):
