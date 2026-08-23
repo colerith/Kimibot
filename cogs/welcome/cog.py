@@ -232,16 +232,14 @@ class WelcomeCog(commands.Cog):
             )
             asyncio.create_task(log_channel.send(embed=log_embed))
 
-    # --- 答题管理命令 (保持不变) ---
-    @discord.slash_command(name="入站答题面板", description="（管理员）发送入站答题面板")
-    @commands.has_role(IDS.get("SUPER_EGG_ROLE_ID"))
-    async def setup_quiz_panel(self, ctx: discord.ApplicationContext):
+    async def deploy_quiz_panel(self) -> tuple[bool, str]:
+        """供 /社区面板 管理 统一调用。"""
         channel_id = IDS.get("QUIZ_CHANNEL_ID")
         if not channel_id:
-            return await ctx.respond("❌ 未在 config.py 中配置 `QUIZ_CHANNEL_ID`！", ephemeral=True)
+            return False, "未在 config.py 中配置 QUIZ_CHANNEL_ID"
         channel = self.bot.get_channel(channel_id)
         if not channel:
-            return await ctx.respond(f"❌ 找不到配置的频道 (ID: {channel_id})！", ephemeral=True)
+            return False, f"找不到配置的频道（ID: {channel_id}）"
         embed = discord.Embed(
             title="📝 新兵蛋子入站答题",
             description=(
@@ -259,4 +257,4 @@ class WelcomeCog(commands.Cog):
         )
         # ✨ 修改点：发送面板时，将 Cog 自身实例传入
         await channel.send(embed=embed, view=QuizStartView(self))
-        await ctx.respond("✅ 答题面板已成功发送！", ephemeral=True)
+        return True, "✅ 入站答题面板已成功发送。"

@@ -5,8 +5,6 @@ from discord.ext import commands, tasks
 import asyncio
 import datetime
 import random
-import io
-import zipfile
 import json
 import os
 
@@ -15,7 +13,7 @@ from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 from .utils import (
     STRINGS, SPECIFIC_REVIEWER_ID, TIMEOUT_HOURS_ARCHIVE, TIMEOUT_HOURS_REMIND,
     is_reviewer_egg, get_ticket_info, load_quota_data, save_quota_data, execute_archive,
-    send_approved_archive_dm,
+    ApprovedTicketArchiveView, ARCHIVE_KIND_APPROVED, ARCHIVE_KIND_REJECTED, ARCHIVE_KIND_TIMEOUT,
 )
 from .views import (
     TicketActionView, TimeoutOptionView, ArchiveRequestView,
@@ -24,6 +22,7 @@ from .views import (
 
 # --- 持久化工具函数 (新增) ---
 AUDIT_SCHEDULE_FILE = "data/audit_schedule.json"
+UPLOAD_WINDOW_MINUTES = 10
 
 
 def build_ticket_created_dm(
@@ -53,16 +52,16 @@ def build_ticket_created_dm(
         name="📝 接下来这样做",
         value=(
             "**1.** 进入工单，仔细阅读完整审核要求\n"
-            "**2.** 按要求准备截图、录屏与语音材料\n"
-            "**3.** 确认材料无误后，在工单内通知审核小蛋"
+            "**2.** 先在本地准备好截图、录屏与语音材料\n"
+            "**3.** 点击 **开始上传**，并在 10 分钟内一次性上传完毕"
         ),
         inline=False,
     )
     embed.add_field(
         name="⏰ 提交时间",
         value=(
-            "建议在创建后 **6 小时内**提交，当日最晚提交时间为 **北京时间 23:30**。\n"
-            "暂时无法完成时，可在工单内选择 **放弃审核**；以后仍可重新申请。"
+            "请先准备材料，再开启仅有一次的 **10 分钟上传窗口**。\n"
+            "截止后将停止补充材料；若没有上传任何附件，工单会自动按超时归档。"
         ),
         inline=False,
     )
@@ -181,6 +180,7 @@ class Tickets(commands.Cog):
         self.bot.add_view(TicketPanelView(self))
         self.bot.add_view(ArchiveRequestView())
         self.bot.add_view(NotifyReviewerView(SPECIFIC_REVIEWER_ID))
+        self.bot.add_view(ApprovedTicketArchiveView())
 
         print("Tickets Cog Loaded & Views Registered.")
         print(f"当前审核暂停状态: {self.schedule_data.get('suspended')}")
@@ -188,19 +188,21 @@ class Tickets(commands.Cog):
         # 启动定时任务
         if not self.reset_daily_quota.is_running(): self.reset_daily_quota.start()
         if not self.check_inactive_tickets.is_running(): self.check_inactive_tickets.start()
+        if not self.check_upload_windows.is_running(): self.check_upload_windows.start()
         if not self.close_tickets_at_night.is_running(): self.close_tickets_at_night.start()
 
     # ======================================================================================
     # --- 核心逻辑方法 (供 View 调用) ---
     # ======================================================================================
 
-    async def create_ticket_logic(self, interaction: discord.Interaction):
+    async def create_ticket_logic(self, interaction: discord.Interaction, *, test_mode: bool = False):
         user = interaction.user
 
         # 必须在所有资格检查和频道扫描之前确认交互，否则繁忙时会超过
         # Discord 的首次响应窗口并得到 10062 Unknown interaction。
         try:
-            await interaction.response.defer(ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
 
@@ -214,7 +216,7 @@ class Tickets(commands.Cog):
 
         try:
             # 1. 检查暂停状态 (使用持久化数据)
-            if self.schedule_data.get("suspended", False):
+            if not test_mode and self.schedule_data.get("suspended", False):
                 now = datetime.datetime.now(QUOTA["TIMEZONE"])
                 is_active_suspension = False
 
@@ -257,7 +259,7 @@ class Tickets(commands.Cog):
 
             # 2. 检查时间
             now = datetime.datetime.now(QUOTA["TIMEZONE"])
-            if not (17 <= now.hour < 23):
+            if not test_mode and not (17 <= now.hour < 23):
                 self.creating_lock.discard(user.id)
                 return await interaction.followup.send(STRINGS["messages"]["err_time_limit"], ephemeral=True)
 
@@ -267,7 +269,7 @@ class Tickets(commands.Cog):
                     (IDS["SUPER_EGG_ROLE_ID"] in user_roles) or \
                     (interaction.user.id == SPECIFIC_REVIEWER_ID)
 
-            if not has_perm:
+            if not test_mode and not has_perm:
                 self.creating_lock.discard(user.id)
                 return await interaction.followup.send(STRINGS["messages"]["err_perm_create"], ephemeral=True)
 
@@ -300,30 +302,39 @@ class Tickets(commands.Cog):
                     # 检查 Topic 里的 ID，且排除归档区（允许归档后重建，但这里根据需求，如果归档区还要查重，可以加上）
                     # 通常如果之前工单没删（在归档区），也不让建新的？看你的需求。
                     # 之前的代码是 "除非该工单被删除才能重新申请"，意味着归档了（没删）也不能申请。
-                    if ch.topic and str(interaction.user.id) in ch.topic:
+                    if not test_mode and ch.topic and str(interaction.user.id) in ch.topic:
                         # 再次确认不是误判（检查topic格式）
                         if f"创建者ID: {interaction.user.id}" in ch.topic:
                             self.creating_lock.discard(user.id)
                             return await interaction.followup.send(STRINGS["messages"]["err_already_has"].format(channel=ch.mention), ephemeral=True)
 
             # 检查额度
-            q_data = load_quota_data()
-            if q_data["daily_quota_left"] <= 0:
-                self.creating_lock.discard(user.id)
-                return await interaction.followup.send(STRINGS["messages"]["err_quota_limit"], ephemeral=True)
+            if not test_mode:
+                q_data = load_quota_data()
+                if q_data["daily_quota_left"] <= 0:
+                    self.creating_lock.discard(user.id)
+                    return await interaction.followup.send(STRINGS["messages"]["err_quota_limit"], ephemeral=True)
 
-            # 扣除额度
-            q_data["daily_quota_left"] -= 1
-            save_quota_data(q_data)
-            quota_deducted = True
-            await self.update_panel_message()
+                # 测试工单不占用每日名额；真实工单保持原有扣减逻辑。
+                q_data["daily_quota_left"] -= 1
+                save_quota_data(q_data)
+                quota_deducted = True
+                await self.update_panel_message()
 
             tid = random.randint(100000, 999999)
-            c_name = f"审核中-{tid}-{interaction.user.name}"
+            c_name = (
+                f"测试工单-{tid}-{interaction.user.name}"
+                if test_mode
+                else f"审核中-{tid}-{interaction.user.name}"
+            )
 
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                interaction.user: discord.PermissionOverwrite(
+                    read_messages=True,
+                    send_messages=False,
+                    attach_files=False,
+                ),
             }
             staff = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
             if staff: overwrites[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -332,7 +343,10 @@ class Tickets(commands.Cog):
 
             ch = await interaction.guild.create_text_channel(
                 name=c_name, category=target_category, overwrites=overwrites,
-                topic=f"创建者ID: {interaction.user.id} | 创建者: {interaction.user.name} | 工单ID: {tid}"
+                topic=(
+                    f"创建者ID: {interaction.user.id} | 创建者: {interaction.user.name} | "
+                    f"工单ID: {tid}" + (" | 测试模式: 是" if test_mode else "")
+                ),
             )
 
             # 发送初始消息
@@ -368,7 +382,12 @@ class Tickets(commands.Cog):
                 print(f"发送工单创建私信失败: user={interaction.user.id} error={error!r}")
                 msg_status = STRINGS["messages"]["dm_status_fail"]
 
-            await interaction.followup.send(f"好惹！你的审核频道 {ch.mention} 已经创建好惹！审核要求已发送到频道内~ {msg_status}", ephemeral=True)
+            prefix = "🧪 测试工单" if test_mode else "好惹！你的审核频道"
+            cleanup_tip = "\n测试完成后可使用频道内的管理按钮归档清理。" if test_mode else ""
+            await interaction.followup.send(
+                f"{prefix} {ch.mention} 已经创建，审核要求已发送到频道内。\n{msg_status}{cleanup_tip}",
+                ephemeral=True,
+            )
 
         except Exception as e:
             print(f"创建工单逻辑出错: {e}")
@@ -390,21 +409,75 @@ class Tickets(commands.Cog):
             self.creating_lock.discard(user.id)
 
 
+    async def start_upload_window(self, interaction, view, button):
+        """开启持久化的十分钟上传窗口，截止处理由后台任务接管。"""
+        channel = interaction.channel
+        info = get_ticket_info(channel)
+        if info.get("上传状态"):
+            return await interaction.response.send_message(
+                "ℹ️ 本工单已经开启过上传窗口，不能重复开始。",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True)
+        now = discord.utils.utcnow()
+        deadline = now + datetime.timedelta(minutes=UPLOAD_WINDOW_MINUTES)
+        info["上传状态"] = "进行中"
+        info["上传开始"] = str(int(now.timestamp()))
+        info["上传截止"] = str(int(deadline.timestamp()))
+        new_topic = " | ".join(f"{key}: {value}" for key, value in info.items())
+
+        overwrite = channel.overwrites_for(interaction.user)
+        overwrite.read_messages = True
+        overwrite.send_messages = True
+        overwrite.attach_files = True
+        try:
+            await channel.set_permissions(
+                interaction.user,
+                overwrite=overwrite,
+                reason="人工审核材料上传窗口已开启",
+            )
+            await channel.edit(topic=new_topic, reason="记录人工审核材料上传窗口")
+        except (discord.Forbidden, discord.HTTPException) as error:
+            overwrite.send_messages = False
+            overwrite.attach_files = False
+            try:
+                await channel.set_permissions(interaction.user, overwrite=overwrite)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return await interaction.followup.send(f"❌ 无法开启上传窗口：{error}", ephemeral=True)
+
+        button.disabled = True
+        button.label = "⏳ 上传进行中"
+        await interaction.message.edit(view=view)
+        embed = discord.Embed(
+            title="📤 材料上传已开始",
+            description=(
+                f"{interaction.user.mention} 请在 **{UPLOAD_WINDOW_MINUTES} 分钟内**一次性上传完全部审核材料。\n\n"
+                f"截止时间：<t:{int(deadline.timestamp())}:F>（<t:{int(deadline.timestamp())}:R>）\n"
+                "到时系统会自动关闭你的发送权限，并通知审核小蛋开始审核。\n"
+                "若截止时没有检测到任何附件，本工单会按超时自动归档。"
+            ),
+            color=0x5B8DEF,
+        )
+        embed.set_footer(text="上传窗口仅可开启一次 · 截止后不能补充材料")
+        await channel.send(embed=embed)
+        await interaction.followup.send("✅ 十分钟上传窗口已开启，请立即上传全部材料。", ephemeral=True)
+
+
 
     async def approve_ticket_logic(self, interaction_or_ctx):
         """核心过审逻辑"""
-        # 兼容 ctx 和 interaction
-        respond = interaction_or_ctx.respond if hasattr(interaction_or_ctx, 'respond') else interaction_or_ctx.response.send_message
         channel = interaction_or_ctx.channel
         guild = interaction_or_ctx.guild
-        user_op = interaction_or_ctx.author if hasattr(interaction_or_ctx, 'author') else interaction_or_ctx.user
 
         info = get_ticket_info(channel)
         uid = info.get("创建者ID")
         user = guild.get_member(int(uid)) if uid else None
+        test_mode = info.get("测试模式") == "是"
 
         # 1. 给身份
-        if user:
+        if user and not test_mode:
             r_new = guild.get_role(IDS["VERIFICATION_ROLE_ID"])
             r_done = guild.get_role(IDS["HATCHED_ROLE_ID"])
             roles_updated = False
@@ -415,51 +488,23 @@ class Tickets(commands.Cog):
             except Exception as e:
                 print(f"审核通过后更新身份失败: user={user.id} error={e!r}")
 
-            if roles_updated:
-                try:
-                    ticket_id = str(info.get("工单ID") or "未知")
-                    await user.send(
-                        embed=build_ticket_approved_dm(user, guild, channel, ticket_id),
-                        view=build_ticket_approved_link_view(channel),
-                    )
-                except discord.Forbidden:
-                    print(f"无法发送审核通过私信: user={user.id} reason=dm_closed")
-                except discord.HTTPException as error:
-                    print(f"发送审核通过私信失败: user={user.id} error={error!r}")
+            if not roles_updated:
+                return await interaction_or_ctx.followup.send(
+                    "❌ 身份组更新失败，工单已保留，请检查机器人权限后重试。",
+                    ephemeral=True,
+                )
 
-        # 2. 移动频道到二审(已过审)分类
-        cat2 = guild.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
-        if cat2:
-            new_name = f"已过审-{info.get('工单ID')}-{info.get('创建者')}"
-            try:
-                # 保持用户可见以便确认，但也给管理权限
-                overwrites = {
-                    guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                }
-                if user: overwrites[user] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-                spec = guild.get_member(SPECIFIC_REVIEWER_ID)
-                if spec: overwrites[spec] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-                super_egg = guild.get_role(IDS.get("SUPER_EGG_ROLE_ID", 0))
-                if super_egg: overwrites[super_egg] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-                await channel.edit(name=new_name, category=cat2, overwrites=overwrites)
-            except Exception as e:
-                print(f"移动频道失败: {e}")
-
-        # 3. 发送过审面板
-        ap_data = STRINGS["embeds"]["approved"]
-        em = discord.Embed(title=ap_data["title"], description=ap_data["desc"], color=STYLE.get("KIMI_YELLOW", 0xFFFF00))
-        em.set_image(url=ap_data["image"])
-        em.set_footer(text=ap_data["footer"])
-
-        c_text = f"恭喜 {user.mention} 通过审核！" if user else "恭喜通过审核！(用户已不在服务器)"
-        await channel.send(c_text, embed=em, view=ArchiveRequestView(user_op))
-
-        # 反馈
-        msg = "✅ 已执行过审流程！"
-        if hasattr(interaction_or_ctx, 'followup'): await interaction_or_ctx.followup.send(msg, ephemeral=True)
-        else: await respond(msg, ephemeral=True)
+        # 2. 归档记录成功后立即删除原工单，不再进入二审待清理区。
+        await execute_archive(
+            self.bot,
+            interaction_or_ctx,
+            channel,
+            "管理员测试工单已完成" if test_mode else "人工审核通过",
+            is_timeout=False,
+            archive_kind=ARCHIVE_KIND_APPROVED,
+            automatic=False,
+            notify_user=True,
+        )
 
 
     async def update_panel_message(self):
@@ -547,6 +592,87 @@ class Tickets(commands.Cog):
         await self.bot.wait_until_ready()
         await self.update_panel_message()
 
+    @tasks.loop(seconds=30)
+    async def check_upload_windows(self):
+        """处理已到期上传窗口；状态存于 Topic，重启后仍可恢复。"""
+        await self.bot.wait_until_ready()
+        now = discord.utils.utcnow()
+        categories = [
+            self.bot.get_channel(IDS.get("FIRST_REVIEW_CHANNEL_ID")),
+            self.bot.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID")),
+            self.bot.get_channel(IDS.get("SECOND_REVIEW_CHANNEL_ID")),
+        ]
+        for category in categories:
+            if not category:
+                continue
+            for channel in list(category.text_channels):
+                info = get_ticket_info(channel)
+                if info.get("上传状态") != "进行中":
+                    continue
+                try:
+                    started_at = int(info.get("上传开始", "0"))
+                    deadline_at = int(info.get("上传截止", "0"))
+                    creator_id = int(info.get("创建者ID", "0"))
+                except (TypeError, ValueError):
+                    continue
+                if not started_at or not deadline_at or not creator_id or now.timestamp() < deadline_at:
+                    continue
+
+                attachment_count = 0
+                after = datetime.datetime.fromtimestamp(started_at, tz=datetime.timezone.utc)
+                async for message in channel.history(limit=None, after=after, oldest_first=True):
+                    if message.author.id == creator_id:
+                        attachment_count += len(message.attachments)
+
+                if attachment_count <= 0:
+                    await execute_archive(
+                        self.bot,
+                        None,
+                        channel,
+                        f"开始上传后 {UPLOAD_WINDOW_MINUTES} 分钟内未检测到任何材料",
+                        is_timeout=True,
+                        archive_kind=ARCHIVE_KIND_TIMEOUT,
+                        automatic=True,
+                    )
+                    continue
+
+                member = channel.guild.get_member(creator_id)
+                if member:
+                    overwrite = channel.overwrites_for(member)
+                    overwrite.send_messages = False
+                    overwrite.attach_files = False
+                    try:
+                        await channel.set_permissions(
+                            member,
+                            overwrite=overwrite,
+                            reason="人工审核材料上传时间已截止",
+                        )
+                    except (discord.Forbidden, discord.HTTPException) as error:
+                        print(f"锁定工单上传权限失败: channel={channel.id} error={error!r}")
+                        continue
+
+                info["上传状态"] = "已截止"
+                info["上传材料数"] = str(attachment_count)
+                new_topic = " | ".join(f"{key}: {value}" for key, value in info.items())
+                try:
+                    await channel.edit(topic=new_topic, reason="人工审核材料上传已截止")
+                    embed = discord.Embed(
+                        title="🔒 材料上传已截止",
+                        description=(
+                            f"已收集 **{attachment_count} 个附件**，"
+                            f"{member.mention if member else f'<@{creator_id}>'} 现已停止补充材料。\n"
+                            "审核小蛋请开始审核。"
+                        ),
+                        color=0xF0A45D,
+                    )
+                    await channel.send(
+                        f"<@{SPECIFIC_REVIEWER_ID}>",
+                        embed=embed,
+                        allowed_mentions=discord.AllowedMentions(users=True, roles=False),
+                    )
+                except (discord.Forbidden, discord.HTTPException) as error:
+                    print(f"发送上传截止通知失败: channel={channel.id} error={error!r}")
+
     @tasks.loop(hours=1)
     async def check_inactive_tickets(self):
         await self.bot.wait_until_ready()
@@ -557,9 +683,6 @@ class Tickets(commands.Cog):
             self.bot.get_channel(IDS["FIRST_REVIEW_CHANNEL_ID"]), 
             self.bot.get_channel(IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID")),
             self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])]
-        # 获取归档分类
-        archive_cat = self.bot.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
-
         for cat in cats:
             if not cat: continue
             for channel in cat.text_channels:
@@ -569,13 +692,9 @@ class Tickets(commands.Cog):
 
                 try:
                     info = get_ticket_info(channel)
-                    tid = info.get("工单ID")
+                    if info.get("上传状态") == "进行中":
+                        continue
                     creator_id = info.get("创建者ID")
-
-                    # 获取该频道的Member对象
-                    member = None
-                    if creator_id:
-                        member = channel.guild.get_member(int(creator_id))
 
                     # 扫描历史消息 & 收集状态
                     last_active = channel.created_at
@@ -614,45 +733,23 @@ class Tickets(commands.Cog):
 
                     if not last_msg_time: continue
 
-                    diff_approved = now - last_msg_time
                     diff_active = now - last_active
                     is_name_approved = "已过审" in channel.name
 
 
                     # --- 逻辑分支 ---
 
-                    # 1. 处理：已过审但在等待确认 (1小时处理)
-                    if is_approved_waiting and diff_approved > datetime.timedelta(hours=1):
-
-                        # a. 频道内提示
-                        await channel.send("✅ **自动完成**\n检测到通过审核后超过 **1小时** 未操作，系统已默认处理并归档。")
-
-                        # b. 锁定权限
-                        if member:
-                            try:
-                                await channel.set_permissions(member, send_messages=False)
-                            except Exception as e:
-                                print(f"锁定权限失败 {channel.name}: {e}")
-
-                        # c. 移动到归档分类
-                        archive_completed = False
-                        if archive_cat:
-                            try:
-                                await channel.edit(category=archive_cat, reason="已过审1小时无响应自动完成")
-                                archive_completed = True
-                            except Exception as e:
-                                print(f"移动频道失败 {channel.name}: {e}")
-
-                        # d. 归档完成后发送统一私信通知
-                        if member and archive_completed:
-                            await send_approved_archive_dm(
-                                member,
-                                channel.guild,
-                                tid,
-                                automatic=True,
-                            )
-
-                        # 保持原名，不发归档报告
+                    # 1. 兼容升级前遗留的已过审频道：超过 1 小时自动生成记录并清理。
+                    if is_name_approved and diff_active > datetime.timedelta(hours=1):
+                        await execute_archive(
+                            self.bot,
+                            None,
+                            channel,
+                            "已过审工单超过 1 小时未完成旧流程，系统自动归档",
+                            is_timeout=False,
+                            archive_kind=ARCHIVE_KIND_APPROVED,
+                            automatic=True,
+                        )
                         continue
 
 
@@ -680,6 +777,39 @@ class Tickets(commands.Cog):
 
                 except Exception as e:
                     print(f"检查频道 {channel.name} 错误: {e}")
+
+        # 升级后自动接管旧归档分类，补写新版记录并清理历史积压频道。
+        legacy_archive_cat = self.bot.get_channel(IDS.get("ARCHIVE_CHANNEL_ID"))
+        if legacy_archive_cat:
+            for channel in list(legacy_archive_cat.text_channels):
+                info = get_ticket_info(channel)
+                if not info.get("工单ID"):
+                    continue
+                if "超时" in channel.name:
+                    archive_kind = ARCHIVE_KIND_TIMEOUT
+                    reason = "旧超时归档工单自动迁移"
+                elif "已过审" in channel.name:
+                    archive_kind = ARCHIVE_KIND_APPROVED
+                    reason = "旧已过审工单自动迁移"
+                elif "归档" in channel.name or "未过审" in channel.name:
+                    archive_kind = ARCHIVE_KIND_REJECTED
+                    reason = "旧未过审工单自动迁移"
+                else:
+                    continue
+                try:
+                    await execute_archive(
+                        self.bot,
+                        None,
+                        channel,
+                        reason,
+                        is_timeout=archive_kind == ARCHIVE_KIND_TIMEOUT,
+                        archive_kind=archive_kind,
+                        automatic=True,
+                        notify_user=False,
+                    )
+                    await asyncio.sleep(0)
+                except Exception as error:
+                    print(f"迁移旧归档工单失败: channel={channel.id} error={error!r}")
 
     # ======================================================================================
     # --- 命令组 (Slash Commands) ---
@@ -894,158 +1024,6 @@ class Tickets(commands.Cog):
 
         await channel.delete(reason=f"管理员 {ctx.author.name} 删除并返还名额")
 
-    @ticket.command(name="发送过审祝贺", description="手动发送过审消息")
-    @is_reviewer_egg()
-    async def send_approved(self, ctx: discord.ApplicationContext):
-        await ctx.defer()
-        ap_data = STRINGS["embeds"]["approved"]
-        em = discord.Embed(title=ap_data["title"], description=ap_data["desc"], color=STYLE["KIMI_YELLOW"])
-        em.set_image(url=ap_data["image"])
-        em.set_footer(text=ap_data["footer"])
-        await ctx.send(embed=em, view=ArchiveRequestView(ctx.author))
-
-    @ticket.command(name="批量导出", description="（服主用）将二审区已过审的频道打包并删除！")
-    @is_reviewer_egg()
-    async def bulk_export_and_archive(self, ctx: discord.ApplicationContext):
-        await ctx.defer(ephemeral=True)
-
-        target_category = self.bot.get_channel(IDS["SECOND_REVIEW_CHANNEL_ID"])
-        log_channel = self.bot.get_channel(IDS["TICKET_LOG_CHANNEL_ID"])
-
-        if not target_category:
-            await ctx.followup.send("呜...找不到配置的【二审】分类！请检查 ID 配置。", ephemeral=True); return
-        if not log_channel:
-            await ctx.followup.send("呜...找不到存放日志的频道！", ephemeral=True); return
-
-        await ctx.followup.send(f"收到！开始扫描 “{target_category.name}” 中带 “已过审” 的频道...", ephemeral=True)
-
-        # 在目标分类下筛选名字里包含 "已过审" 的文字频道
-        channels_to_process = [ch for ch in target_category.text_channels if "已过审" in ch.name]
-
-        if not channels_to_process:
-            await ctx.followup.send(f"在 {target_category.name} 里没找到带“已过审”的频道哦~", ephemeral=True); return
-
-        # 按创建时间排序
-        channels_to_process.sort(key=lambda x: x.created_at)
-
-        exported_count = 0
-        current_date_header = ""
-
-        for channel in channels_to_process:
-            try:
-                # 获取频道创建日期用于日志分割
-                channel_date = channel.created_at.astimezone(QUOTA["TIMEZONE"]).strftime('%Y%m%d')
-                if channel_date != current_date_header:
-                    current_date_header = channel_date
-                    await log_channel.send(f"## 📅 {current_date_header}")
-
-                # 提取工单信息
-                info = get_ticket_info(channel)
-                qq_number = info.get("QQ", "未录入")
-                ticket_id = info.get("工单ID", "未知")
-                creator_name = info.get("创建者", "未知")
-
-                # HTML 模板构建
-                html_template = """
-                <!DOCTYPE html><html><head><title>Log for {channel_name}</title><meta charset="UTF-8"><style>
-                body {{ background-color: #313338; color: #dbdee1; font-family: 'Whitney', 'Helvetica Neue', sans-serif; padding: 20px; }}
-                .info-box {{ background-color: #2b2d31; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid #F1C40F; }}
-                .info-item {{ margin: 5px 0; font-size: 1.1em; }}
-                .message-group {{ display: flex; margin-bottom: 20px; }} .avatar img {{ width: 40px; height: 40px; border-radius: 50%; margin-right: 20px; }}
-                .message-content .author {{ font-weight: 500; color: #f2f3f5; }} .message-content .timestamp {{ font-size: 0.75rem; color: #949ba4; margin-left: 10px; }}
-                .message-content .text {{ margin-top: 5px; line-height: 1.375rem; }} .attachment img {{ max-width: 400px; border-radius: 5px; margin-top: 10px; }}
-                .embed {{ background-color: #2b2d31; border-left: 4px solid {embed_color}; padding: 10px; border-radius: 5px; margin-top: 10px; }}
-                .embed-title {{ font-weight: bold; color: white; }} .embed-description {{ font-size: 0.9rem; }}
-                </style></head><body>
-                <h1>工单日志: {channel_name}</h1>
-                <div class="info-box">
-                    <div class="info-item">🎫 <b>工单编号:</b> {ticket_id}</div>
-                    <div class="info-item">👤 <b>申请用户:</b> {creator_name}</div>
-                    <div class="info-item">🐧 <b>绑定QQ:</b> {qq_number}</div>
-                </div>
-                <hr>
-                """
-                html_content = html_template.format(
-                    channel_name=channel.name,
-                    embed_color=hex(STYLE['KIMI_YELLOW']).replace('0x', '#'),
-                    ticket_id=ticket_id,
-                    creator_name=creator_name,
-                    qq_number=qq_number
-                )
-
-                # 读取历史消息
-                async for message in channel.history(limit=None, oldest_first=True):
-                    message_text = message.clean_content.replace('\n', '<br>')
-                    timestamp = message.created_at.astimezone(QUOTA["TIMEZONE"]).strftime('%Y-%m-%d %H:%M:%S')
-                    html_content += f'<div class="message-group"><div class="avatar"><img src="{message.author.display_avatar.url}"></div>'
-                    html_content += f'<div class="message-content"><span class="author">{message.author.display_name}</span><span class="timestamp">{timestamp}</span>'
-                    html_content += f'<div class="text">{message_text}</div>'
-
-                    # 处理附件
-                    for attachment in message.attachments:
-                        if "image" in attachment.content_type:
-                            html_content += f'<div class="attachment"><img src="{attachment.url}"></div>'
-
-                    # 处理 Embed
-                    for embed in message.embeds:
-                        html_content += f'<div class="embed">'
-                        if embed.title: html_content += f'<div class="embed-title">{embed.title}</div>'
-                        if embed.description:
-                            description_text = embed.description.replace("\n", "<br>")
-                            html_content += f'<div class="embed-description">{description_text}</div>'
-                        html_content += '</div>'
-                    html_content += '</div></div>'
-                html_content += "</body></html>"
-
-                # 压缩为 ZIP
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    zip_file.writestr(f'{channel.name}.html', html_content.encode('utf-8'))
-                zip_buffer.seek(0)
-
-                # 发送日志
-                await log_channel.send(f"📄 归档记录: `{channel.name}` (QQ: {qq_number})")
-                await log_channel.send(file=discord.File(zip_buffer, filename=f"{channel.name}.zip"))
-
-                # 删除原频道
-                await channel.delete(reason="批量导出并归档")
-                exported_count += 1
-                await asyncio.sleep(1) 
-
-            except Exception as e:
-                print(f"批量导出频道 {channel.name} 时出错: {e}")
-                await log_channel.send(f"❌ 导出频道 `{channel.name}` 时出错: {e}")
-
-        await ctx.followup.send(f"批量导出完成！成功处理了 **{exported_count}/{len(channels_to_process)}** 个频道！", ephemeral=True)
-
-    @ticket.command(name="录入qq", description="录入QQ号")
-    @is_reviewer_egg()
-    async def record_qq(self, ctx: discord.ApplicationContext, qq_number: str):
-        channel = ctx.channel
-        if not channel.topic: return
-        await ctx.defer(ephemeral=True)
-        info = get_ticket_info(channel)
-        info["QQ"] = qq_number
-        new_topic = " | ".join([f"{k}: {v}" for k, v in info.items()])
-        await channel.edit(topic=new_topic)
-        await ctx.followup.send(f"✅ QQ已录入: {qq_number}", ephemeral=True)
-
-    @ticket.command(name="批量清理超时", description="清除超时归档频道")
-    @is_reviewer_egg()
-    async def bulk_clean_timeouts(self, ctx: discord.ApplicationContext):
-        await ctx.defer(ephemeral=True)
-        cat = self.bot.get_channel(IDS["ARCHIVE_CHANNEL_ID"])
-        if not cat: return
-
-        chs = [c for c in cat.text_channels if "超时归档" in c.name]
-        if not chs: return await ctx.followup.send("没有超时归档", ephemeral=True)
-
-        await ctx.followup.send(f"开始清理 {len(chs)} 个频道...", ephemeral=True)
-        for c in chs:
-            await c.delete(reason="批量清理")
-            await asyncio.sleep(1)
-        await ctx.followup.send("清理完成", ephemeral=True)
-    
     @ticket.command(name="批量更名", description="（管理用）一键将【一审中】前缀修正为【审核中】")
     @is_reviewer_egg()
     async def bulk_rename_tickets(self, ctx: discord.ApplicationContext):
@@ -1193,10 +1171,3 @@ class Tickets(commands.Cog):
         d = load_quota_data(); d["daily_quota_left"] += amount
         save_quota_data(d); await self.update_panel_message()
         await ctx.followup.send(f"已增加，当前: {d['daily_quota_left']}", ephemeral=True)
-
-    @discord.slash_command(name="刷新工单创建面板", description="（仅限审核小蛋）手动发送或刷新工单创建面板！")
-    @is_reviewer_egg()
-    async def setup_ticket_panel(self, ctx: discord.ApplicationContext):
-        await ctx.defer(ephemeral=True)
-        await self.update_panel_message()
-        await ctx.followup.send("已刷新面板", ephemeral=True)

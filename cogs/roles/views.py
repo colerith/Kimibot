@@ -4417,12 +4417,80 @@ class MonthlyCardAdminView(discord.ui.View):
         await interaction.response.edit_message(embed=build_monthly_card_admin_embed(), view=self)
 
 
+class CommunityPanelRefreshSelect(discord.ui.Select):
+    def __init__(self, bot):
+        self.bot = bot
+        options = [
+            discord.SelectOption(label="创建测试工单", value="ticket_test", emoji="🧪", description="不占名额，不修改管理员身份"),
+            discord.SelectOption(label="工单创建面板", value="tickets", emoji="🎫"),
+            discord.SelectOption(label="许愿池面板", value="wish_pool", emoji="🌠"),
+            discord.SelectOption(label="投诉面板", value="complaint", emoji="📮"),
+            discord.SelectOption(label="入站答题面板", value="welcome_quiz", emoji="📝"),
+            discord.SelectOption(label="助力鸣谢消息", value="boost_thanks", emoji="💎"),
+            discord.SelectOption(label="论坛统计面板", value="forum_stats", emoji="📊"),
+        ]
+        super().__init__(placeholder="选择要刷新或重发的其他面板…", options=options, row=4)
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        target = self.values[0]
+        try:
+            if target == "ticket_test":
+                cog = self.bot.get_cog("Tickets")
+                if not cog:
+                    raise RuntimeError("工单模块未加载")
+                await cog.create_ticket_logic(interaction, test_mode=True)
+                return
+            elif target == "tickets":
+                cog = self.bot.get_cog("Tickets")
+                if not cog:
+                    raise RuntimeError("工单模块未加载")
+                await cog.update_panel_message()
+                message = "✅ 工单创建面板已刷新。"
+            elif target == "wish_pool":
+                cog = self.bot.get_cog("WishPoolCog")
+                if not cog:
+                    raise RuntimeError("许愿池模块未加载")
+                await cog.check_and_post_wish_panel()
+                message = "✅ 许愿池面板已刷新。"
+            elif target == "complaint":
+                cog = self.bot.get_cog("投诉面板")
+                if not cog:
+                    raise RuntimeError("投诉模块未加载")
+                await cog.ensure_panel()
+                message = "✅ 投诉面板已刷新。"
+            elif target == "welcome_quiz":
+                cog = self.bot.get_cog("WelcomeCog")
+                if not cog:
+                    raise RuntimeError("入站答题模块未加载")
+                ok, message = await cog.deploy_quiz_panel()
+                if not ok:
+                    raise RuntimeError(message)
+            elif target == "boost_thanks":
+                cog = self.bot.get_cog("BoostThanksCog")
+                if not cog:
+                    raise RuntimeError("助力鸣谢模块未加载")
+                channel = await cog._get_configured_target_channel(interaction.guild) or interaction.channel
+                updated, scanned, skipped = await cog._refresh_channel_boost_embeds(channel, limit=1000)
+                message = f"✅ 助力鸣谢已刷新：扫描 {scanned} 条，更新 {updated} 条，跳过 {skipped} 条。"
+            else:
+                cog = self.bot.get_cog("ForumTrackerCog")
+                if not cog:
+                    raise RuntimeError("论坛统计模块未加载")
+                await cog.refresh_all_panels()
+                message = "✅ 所有论坛统计面板已刷新。"
+        except Exception as error:
+            return await interaction.followup.send(f"❌ 刷新失败：{error}", ephemeral=True)
+        await interaction.followup.send(message, ephemeral=True)
+
+
 class CommunityPanelManageView(discord.ui.View):
     def __init__(self, ctx, bot):
         super().__init__(timeout=600)
         self.ctx = ctx
         self.bot = bot
         self.owner_id = ctx.author.id if getattr(ctx, "author", None) else None
+        self.add_item(CommunityPanelRefreshSelect(bot))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.owner_id and interaction.user.id != self.owner_id:
@@ -4555,7 +4623,8 @@ def build_community_manage_embed(guild: discord.Guild | None):
         title="⚙️ 社区面板管理台",
         description=(
             "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
-            "预答题、投稿、小蛋问答、识别字段奖励、加速卡、蛋壳月卡、红包与数据追踪入口已统一接入这里。\n"
+            "预答题、投稿、小蛋问答及各类面板刷新入口已统一接入这里。\n"
+            "需要创建测试工单，或维护工单、许愿池、投诉、入站答题、助力鸣谢及论坛统计时，请使用下拉菜单。\n"
             f"当前识别奖励规则：**{len(load_praise_rules())}** 条。"
         ),
         color=0x2B2D31,

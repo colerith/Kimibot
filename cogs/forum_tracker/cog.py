@@ -209,15 +209,8 @@ class ForumTrackerCog(commands.Cog):
         status = 1 if valid else 0
         db.update_post_status(target_id, status)
         action = "✅ 已计入统计" if valid else "🚫 已从统计移除"
-        await ctx.respond(f"操作成功！帖子 `{target_id}` {action}。\n如有需要请 `/论坛统计 手动刷新`。", ephemeral=True)
+        await ctx.respond(f"操作成功！帖子 `{target_id}` {action}。\n如有需要请前往 `/社区面板 管理` 刷新论坛统计。", ephemeral=True)
 
-    @stats.command(name="手动刷新", description="立即刷新所有统计面板")
-    @is_super_egg()
-    async def manual_refresh(self, ctx):
-        await ctx.defer(ephemeral=True)
-        await self.refresh_all_panels()
-        await ctx.followup.send("✅ 所有统计面板已刷新！", ephemeral=True)
-        
     @stats.command(name="手动录入", description="在当前帖子内使用，将其加入指定任务")
     @is_super_egg()
     async def manual_add(self, ctx,

@@ -132,13 +132,6 @@ class ComplaintCog(commands.Cog, name="投诉面板"):
         current_notice = self.get_notice_for_message(message.id)
         await ctx.send_modal(EditComplaintNoticeModal(self, message, current_notice))
 
-    @discord.slash_command(name="刷新投诉面板", description="手动刷新投诉面板消息")
-    @is_super_egg()
-    async def refresh_complaint_panel(self, ctx: discord.ApplicationContext):
-        await ctx.defer(ephemeral=True)
-        await self.ensure_panel()
-        await ctx.followup.send("✅ 已刷新投诉面板。", ephemeral=True)
-
     @discord.slash_command(name="投诉归档", description="关闭当前投诉工单（10秒倒计时）")
     @is_super_egg()
     async def archive_complaint_ticket(

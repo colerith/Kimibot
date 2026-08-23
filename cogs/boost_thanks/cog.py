@@ -2,7 +2,6 @@ import re
 import random
 
 import discord
-from discord import Option
 from discord.ext import commands
 
 import config
@@ -338,29 +337,6 @@ class BoostThanksCog(commands.Cog):
             except discord.HTTPException:
                 skipped += 1
         return updated, scanned, skipped
-
-    @discord.slash_command(name="刷新助力鸣谢", description="强制刷新助力鸣谢面板的数字表情显示")
-    @is_super_egg()
-    async def refresh_boost_thanks(
-        self,
-        ctx: discord.ApplicationContext,
-        扫描数量: Option(int, "扫描最近多少条消息，0 表示尽量扫描全部", required=False, default=1000),  # pyright: ignore[reportInvalidTypeForm]
-    ):
-        await ctx.defer(ephemeral=True)
-        if not ctx.guild:
-            return await ctx.followup.send("❌ 该命令只能在服务器内使用。", ephemeral=True)
-
-        channel = await self._get_configured_target_channel(ctx.guild) or ctx.channel
-        if channel is None:
-            return await ctx.followup.send("❌ 找不到助力鸣谢频道。", ephemeral=True)
-
-        limit = None if int(扫描数量 or 0) <= 0 else max(1, int(扫描数量))
-        updated, scanned, skipped = await self._refresh_channel_boost_embeds(channel, limit=limit)
-
-        await ctx.followup.send(
-            f"✅ 已刷新助力鸣谢面板。\n扫描：**{scanned}** 条\n更新：**{updated}** 条\n跳过：**{skipped}** 条",
-            ephemeral=True,
-        )
 
     @discord.slash_command(name="检查助力表情", description="检查 bot 是否能定位助力数字表情 ID")
     @is_super_egg()

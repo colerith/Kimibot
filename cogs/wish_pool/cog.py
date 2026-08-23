@@ -6,7 +6,6 @@ import asyncio
 
 from .views import WishPanelView, WishActionView
 from config import STYLE, WISH_CHANNEL_ID
-from cogs.shared.utils import is_super_egg
 
 class WishPoolCog(commands.Cog):
     """管理许愿池相关功能的 Cog。"""
@@ -92,10 +91,3 @@ class WishPoolCog(commands.Cog):
         # 发送新面板
         await self.post_wish_panel()
         print("已成功发送全新的许愿面板到频道底部。")
-
-    @discord.slash_command(name="刷新许愿面板", description="（仅限超级小蛋）手动发送或刷新许愿面板！")
-    @is_super_egg()
-    async def setup_wish_panel(self, ctx: discord.ApplicationContext):
-        await ctx.defer(ephemeral=True)
-        await self.check_and_post_wish_panel()
-        await ctx.followup.send("✨ 许愿面板已经成功刷新惹！", ephemeral=True)

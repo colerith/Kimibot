@@ -1,10 +1,10 @@
 import discord
-import asyncio
 import datetime
 from config import IDS, STYLE, QUOTA
 from .utils import (
     STRINGS, SPECIFIC_REVIEWER_ID, get_ticket_info,
-    execute_archive, load_quota_data, save_quota_data, send_approved_archive_dm
+    ARCHIVE_KIND_APPROVED, ARCHIVE_KIND_REJECTED,
+    execute_archive, load_quota_data, save_quota_data,
 )
 
 # --- 模态框: 填写归档备注 ---
@@ -60,35 +60,16 @@ class ArchiveRequestView(discord.ui.View):
         for item in self.children: item.disabled = True
         await interaction.message.edit(view=self)
 
-        # 通知
-        msg = f"📢 {interaction.user.mention} 选择了：**{choice}**\n"
-        mention = f"<@&{SPECIFIC_REVIEWER_ID}>"
-        if self.reviewer: mention += f" {self.reviewer.mention}"
-        msg += f"{mention}，请处理归档！"
-        await interaction.channel.send(msg)
-
-        # 10秒后自动锁定
-        await interaction.channel.send("⏳ 30秒后自动锁定频道...")
-        await asyncio.sleep(30)
-
-        # 移除用户权限
         info = get_ticket_info(interaction.channel)
-        cid = info.get("创建者ID")
-        archived_member = None
-        if cid:
-            mem = interaction.guild.get_member(int(cid))
-            if mem:
-                await interaction.channel.set_permissions(mem, read_messages=False)
-                await interaction.channel.send("🔒 频道已锁定。")
-                archived_member = mem
-
-        if archived_member:
-            await send_approved_archive_dm(
-                archived_member,
-                interaction.guild,
-                info.get("工单ID"),
-                automatic=False,
-            )
+        await execute_archive(
+            interaction.client,
+            interaction,
+            interaction.channel,
+            f"审核通过；用户最终选择：{choice}",
+            is_timeout=False,
+            archive_kind=ARCHIVE_KIND_APPROVED,
+            automatic=False,
+        )
 
     @discord.ui.button(label="已申请加群", style=discord.ButtonStyle.primary, custom_id="req_archive_1")
     async def btn_Applied(self, button, interaction): await self.process(interaction, "已申请加群")
@@ -108,54 +89,46 @@ class ConfirmAbandonView(discord.ui.View):
         user = interaction.user
         info = get_ticket_info(channel)
         
-        # 1. 返还名额
+        # 1. 写入统一归档记录后自动清理工单。
+        archived = await execute_archive(
+            interaction.client,
+            interaction,
+            channel,
+            "用户主动放弃审核",
+            is_timeout=False,
+            archive_kind=ARCHIVE_KIND_REJECTED,
+        )
+        if not archived:
+            return
+
+        # 2. 只有归档成功后才返还名额，避免失败重试时重复增加。
         q_data = load_quota_data()
         q_data["daily_quota_left"] += 1
         save_quota_data(q_data)
-        
-        # 更新面板
         cog = interaction.client.get_cog("Tickets")
         if cog:
             await cog.update_panel_message()
-            
-        # 2. 记录日志
-        log_channel_id = IDS.get("TICKET_LOG_CHANNEL_ID")
-        if log_channel_id:
-            log_channel = interaction.client.get_channel(log_channel_id)
-            if log_channel:
-                embed = discord.Embed(
-                    title="🚫 用户放弃审核",
-                    description=f"**用户:** {user.mention} ({user.name})\n**工单ID:** {info.get('工单ID', '未知')}\n**频道名:** {channel.name}",
-                    color=discord.Color.red()
-                )
-                await log_channel.send(embed=embed)
-                
-        # 3. 删除频道
-        try:
-            await channel.delete(reason=f"用户 {user.name} 主动放弃审核")
-        except Exception as e:
-            print(f"删除频道失败: {e}")
 
     @discord.ui.button(label="❌ 取消", style=discord.ButtonStyle.secondary)
     async def cancel(self, button, interaction):
         await interaction.response.edit_message(content="已取消放弃操作。", view=None)
 
-# --- 视图: 呼叫审核员 ---
+# --- 视图: 开启限时材料上传 ---
 class NotifyReviewerView(discord.ui.View):
     def __init__(self, reviewer_id: int):
         super().__init__(timeout=None)
         self.rid = reviewer_id
 
-    @discord.ui.button(label="✅ 材料已备齐，呼叫审核小蛋", style=discord.ButtonStyle.primary, custom_id="notify_reviewer_button")
+    @discord.ui.button(label="📤 开始上传", style=discord.ButtonStyle.primary, custom_id="notify_reviewer_button")
     async def notify(self, button, interaction):
         info = get_ticket_info(interaction.channel)
         if str(interaction.user.id) != info.get("创建者ID"):
-            return await interaction.response.send_message("只有创建者能呼叫哦！", ephemeral=True)
+            return await interaction.response.send_message("只有工单创建者可以开始上传材料。", ephemeral=True)
 
-        button.disabled = True
-        button.label = "✅ 已呼叫"
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message(f"<@&{self.rid}> 材料已备齐，请查看！")
+        cog = interaction.client.get_cog("Tickets")
+        if not cog:
+            return await interaction.response.send_message("❌ 工单模块尚未加载，请稍后重试。", ephemeral=True)
+        await cog.start_upload_window(interaction, self, button)
 
     @discord.ui.button(label="🚫 放弃审核", style=discord.ButtonStyle.danger, custom_id="abandon_ticket_button")
     async def abandon(self, button, interaction):
