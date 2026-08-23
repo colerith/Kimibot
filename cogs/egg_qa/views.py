@@ -6,6 +6,7 @@ import discord
 from .storage import (
     DAILY_REPLY_REWARD_CAP,
     DAILY_QUESTION_LIMIT,
+    MIN_QUESTION_CHARACTERS,
     cancel_question,
     create_question,
     finalize_question,
@@ -15,6 +16,7 @@ from .storage import (
     find_question_by_message,
     toggle_author_subscription,
     toggle_question_subscription,
+    validate_question_content,
 )
 
 
@@ -50,7 +52,7 @@ class EggQuestionModal(discord.ui.Modal):
             label="你想问大家什么？",
             placeholder="把问题写清楚，更容易收到有趣的回答哦～",
             style=discord.InputTextStyle.paragraph,
-            min_length=2,
+            min_length=MIN_QUESTION_CHARACTERS,
             max_length=1000,
             required=True,
         )
@@ -61,21 +63,25 @@ class EggQuestionModal(discord.ui.Modal):
             return await interaction.response.send_message("❌ 该功能仅支持在服务器频道中使用。", ephemeral=True)
 
         question = str(self.question_input.value or "").strip()
-        if len(question) < 2:
-            return await interaction.response.send_message("问题至少需要 2 个字符。", ephemeral=True)
+        validation_error = validate_question_content(question)
+        if validation_error:
+            return await interaction.response.send_message(f"❌ {validation_error}", ephemeral=True)
 
         # Discord requires an initial response within a few seconds.  Persist
         # the question only after acknowledging the modal submission.
         if not await _defer_ephemeral(interaction, "小蛋问答"):
             return
 
-        record = await asyncio.to_thread(
-            create_question,
-            author_id=interaction.user.id,
-            guild_id=interaction.guild_id,
-            channel_id=interaction.channel.id,
-            content=question,
-        )
+        try:
+            record = await asyncio.to_thread(
+                create_question,
+                author_id=interaction.user.id,
+                guild_id=interaction.guild_id,
+                channel_id=interaction.channel.id,
+                content=question,
+            )
+        except ValueError as error:
+            return await interaction.followup.send(f"❌ {error}", ephemeral=True)
         if not record:
             return await interaction.followup.send(
                 f"🥚 你今天已经发起了 **{DAILY_QUESTION_LIMIT} 次**问答，明天再来吧！",
@@ -243,7 +249,8 @@ def build_panel_embed() -> discord.Embed:
             "**参与回答**　对问题卡片使用 Discord 自带的 **回复** 功能。\n"
             "**追踪问题**　点击问题卡片下方的 **📡 追踪订阅**，跟进其他人的问题。\n"
             "**领取彩蛋**　首次有效回答可随机获得 **3～15 蛋壳**，大奖更稀有。\n\n"
-            "**自问自答**　提问者自己回复问题时，可随机获得 **1～3 蛋壳**。\n\n"
+            "**自问自答**　提问者自己回复问题时，可随机获得 **1～3 蛋壳**。\n"
+            f"**提问规范**　至少 **{MIN_QUESTION_CHARACTERS} 个有效字符**，禁止凑数、灌水或刷经验。\n\n"
             f"> 每位用户每天最多发起 **{DAILY_QUESTION_LIMIT} 次**；每题每人只可领取一次奖励；"
             f"每天回答奖励最多 **{DAILY_REPLY_REWARD_CAP} 蛋壳**。"
         ),

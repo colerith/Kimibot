@@ -226,11 +226,19 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         self.assertEqual(egg_qa.get_daily_reply_reward_total(7, 99), 7)
         self.assertEqual(egg_qa.load_data()["version"], 3)
 
-        question = egg_qa.create_question(author_id=7, guild_id=99, channel_id=10, content="测试")
+        question = egg_qa.create_question(author_id=7, guild_id=99, channel_id=10, content="这是一个测试问题")
         self.assertIsNotNone(question)
         self.assertEqual(egg_qa.get_daily_usage(7, 99), 1)
         egg_qa.cancel_question(question["id"])
         self.assertEqual(egg_qa.get_daily_usage(7, 99), 0)
+
+    def test_question_content_rejects_short_and_low_effort_posts(self):
+        self.assertIsNotNone(egg_qa.validate_question_content("这是短问题"))
+        self.assertIsNotNone(egg_qa.validate_question_content("凑数凑数凑数凑数"))
+        self.assertIsNotNone(egg_qa.validate_question_content("哈哈哈哈哈哈哈哈"))
+        self.assertIsNone(egg_qa.validate_question_content("大家有哪些好用的耳机推荐？"))
+        with self.assertRaises(ValueError):
+            egg_qa.create_question(author_id=7, guild_id=99, channel_id=10, content="水水水水水水水")
 
 
 if __name__ == "__main__":

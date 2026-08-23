@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 import threading
 from functools import wraps
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,22 @@ DATA_FILE = "data/egg_qa.json"
 TZ_CN = timezone(timedelta(hours=8))
 DAILY_QUESTION_LIMIT = 3
 DAILY_REPLY_REWARD_CAP = 15
+MIN_QUESTION_CHARACTERS = 7
 _DATA_LOCK = threading.RLock()
+
+LOW_EFFORT_QUESTION_PHRASES = (
+    "凑数",
+    "水水",
+    "灌水",
+    "刷经验",
+    "水经验",
+    "混经验",
+    "水一下",
+    "水一水",
+    "随便问问",
+    "测试一下",
+    "不知道问什么",
+)
 
 # 3～5 蛋壳占绝大多数；超过 5 后快速衰减，10～15 为极稀有彩蛋。
 REWARD_AMOUNTS = list(range(3, 16))
@@ -36,6 +52,23 @@ def _now_iso() -> str:
 
 def _today() -> str:
     return datetime.now(TZ_CN).date().isoformat()
+
+
+def validate_question_content(content: str) -> str | None:
+    """返回用户可读的拒绝原因；通过校验时返回 None。"""
+    text = str(content or "").strip()
+    meaningful = "".join(re.findall(r"[\u3400-\u9fffA-Za-z0-9]", text))
+    if len(meaningful) < MIN_QUESTION_CHARACTERS:
+        return f"问题必须大于 6 个字（至少 {MIN_QUESTION_CHARACTERS} 个有效字符），空格和标点不计入。"
+
+    lowered = meaningful.lower()
+    if any(phrase in lowered for phrase in LOW_EFFORT_QUESTION_PHRASES):
+        return "请认真描述问题，不能使用“凑数、灌水、水水、刷经验”等内容。"
+
+    # 拦截“哈哈哈哈哈”“6666666”“abcabcabc”一类纯重复内容。
+    if re.fullmatch(r"(.{1,3})\1{2,}", lowered) or len(set(lowered)) <= 2:
+        return "问题内容重复度过高，请写清楚真正想问的内容。"
+    return None
 
 
 def _daily_key(guild_id: str | int, user_id: str | int, day: str) -> str:
@@ -177,6 +210,11 @@ def remove_panel(channel_id: int, message_id: int | None = None) -> None:
 
 @_synchronized
 def create_question(*, author_id: int, guild_id: int, channel_id: int, content: str) -> dict | None:
+    content = str(content or "").strip()
+    validation_error = validate_question_content(content)
+    if validation_error:
+        raise ValueError(validation_error)
+
     data = load_data()
     uid = str(author_id)
     gid = str(guild_id)
