@@ -138,6 +138,87 @@ class NotifyReviewerView(discord.ui.View):
         
         await interaction.response.send_message("确定要放弃审核吗？此操作将删除当前工单并无法恢复。", view=ConfirmAbandonView(), ephemeral=True)
 
+def build_approve_confirmation_embed(channel) -> discord.Embed:
+    info = get_ticket_info(channel)
+    embed = discord.Embed(
+        title="⚠️ 确认将此工单标记为已过审？",
+        description=(
+            "确认后会立即发放正式身份、发送过审私信、写入归档记录并删除原工单。\n"
+            "此操作会改变用户权限，请再次核对下方信息。"
+        ),
+        color=0xF0A45D,
+    )
+    embed.add_field(name="🧾 工单编号", value=f"`{info.get('工单ID', '未知')}`", inline=True)
+    embed.add_field(name="🆔 用户 DC ID", value=f"`{info.get('创建者ID', '未知')}`", inline=True)
+    embed.add_field(name="👤 用户名", value=info.get("创建者", "未知用户"), inline=True)
+    embed.set_footer(text="仅你可见 · 60 秒内有效 · 请谨慎确认")
+    return embed
+
+
+class ApproveTicketConfirmationView(discord.ui.View):
+    def __init__(self, owner_id: int, *, source_message=None, source_view=None, source_button=None):
+        super().__init__(timeout=60)
+        self.owner_id = owner_id
+        self.source_message = source_message
+        self.source_view = source_view
+        self.source_button = source_button
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("❌ 只有发起确认的管理员可以操作。", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="确认过审", emoji="✅", style=discord.ButtonStyle.danger)
+    async def confirm(self, button, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        for item in self.children:
+            item.disabled = True
+        try:
+            await interaction.edit_original_response(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+        if self.source_button and self.source_message and self.source_view:
+            self.source_button.disabled = True
+            self.source_button.label = "⏳ 过审处理中"
+            try:
+                await self.source_message.edit(view=self.source_view)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+        cog = interaction.client.get_cog("Tickets")
+        if not cog:
+            await interaction.followup.send("❌ 工单模块尚未加载，未执行过审。", ephemeral=True)
+            approved = False
+        else:
+            approved = await cog.approve_ticket_logic(interaction)
+        another_confirmation_is_running = bool(
+            cog and interaction.channel.id in getattr(cog, "approval_lock", set())
+        )
+        if (
+            not approved
+            and not another_confirmation_is_running
+            and self.source_button
+            and self.source_message
+            and self.source_view
+        ):
+            self.source_button.disabled = False
+            self.source_button.label = "🎉 已过审"
+            try:
+                await self.source_message.edit(view=self.source_view)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+    @discord.ui.button(label="取消", emoji="✖️", style=discord.ButtonStyle.secondary)
+    async def cancel(self, button, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="✅ 已取消，本工单没有发生任何变更。",
+            embed=None,
+            view=None,
+        )
+
+
 # --- 视图: 工单内管理面板 ---
 class TicketActionView(discord.ui.View):
     def __init__(self):
@@ -157,15 +238,16 @@ class TicketActionView(discord.ui.View):
 
     @discord.ui.button(label="🎉 已过审", style=discord.ButtonStyle.success, custom_id="ticket_approved")
     async def approved(self, button, interaction):
-        await interaction.response.defer()
-        button.disabled = True
-        await interaction.message.edit(view=self)
-
-        # 调用核心逻辑，需要在 Core 传递进来或者通过 Bot 获取 Cog
-        # 这里为了解耦，我们假设通过 extension 获取 Cog 方法
-        cog = interaction.client.get_cog("Tickets")
-        if cog:
-            await cog.approve_ticket_logic(interaction)
+        await interaction.response.send_message(
+            embed=build_approve_confirmation_embed(interaction.channel),
+            view=ApproveTicketConfirmationView(
+                interaction.user.id,
+                source_message=interaction.message,
+                source_view=self,
+                source_button=button,
+            ),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="📦 工单归档", style=discord.ButtonStyle.secondary, custom_id="ticket_archive")
     async def archive(self, button, interaction):

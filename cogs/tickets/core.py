@@ -16,8 +16,8 @@ from .utils import (
     ApprovedTicketArchiveView, ARCHIVE_KIND_APPROVED, ARCHIVE_KIND_REJECTED, ARCHIVE_KIND_TIMEOUT,
 )
 from .views import (
-    TicketActionView, TimeoutOptionView, ArchiveRequestView,
-    NotifyReviewerView, SuspendAuditModal
+    TicketActionView, TimeoutOptionView, ArchiveRequestView, ApproveTicketConfirmationView,
+    NotifyReviewerView, SuspendAuditModal, build_approve_confirmation_embed,
 )
 
 # --- 持久化工具函数 (新增) ---
@@ -173,6 +173,7 @@ class Tickets(commands.Cog):
         # 内存锁：防止同一用户并发创建
         # 集合中存储正在处理中的 user_id
         self.creating_lock = set()
+        self.approval_lock = set()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -467,6 +468,19 @@ class Tickets(commands.Cog):
 
 
     async def approve_ticket_logic(self, interaction_or_ctx):
+        """带频道级互斥锁的过审入口，防止多个确认窗口重复执行。"""
+        channel_id = interaction_or_ctx.channel.id
+        if channel_id in self.approval_lock:
+            await interaction_or_ctx.followup.send("ℹ️ 此工单正在执行过审，请勿重复操作。", ephemeral=True)
+            return False
+        self.approval_lock.add(channel_id)
+        try:
+            return await self._approve_ticket_logic_unlocked(interaction_or_ctx)
+        finally:
+            self.approval_lock.discard(channel_id)
+
+
+    async def _approve_ticket_logic_unlocked(self, interaction_or_ctx):
         """核心过审逻辑"""
         channel = interaction_or_ctx.channel
         guild = interaction_or_ctx.guild
@@ -489,13 +503,14 @@ class Tickets(commands.Cog):
                 print(f"审核通过后更新身份失败: user={user.id} error={e!r}")
 
             if not roles_updated:
-                return await interaction_or_ctx.followup.send(
+                await interaction_or_ctx.followup.send(
                     "❌ 身份组更新失败，工单已保留，请检查机器人权限后重试。",
                     ephemeral=True,
                 )
+                return False
 
         # 2. 归档记录成功后立即删除原工单，不再进入二审待清理区。
-        await execute_archive(
+        return await execute_archive(
             self.bot,
             interaction_or_ctx,
             channel,
@@ -820,10 +835,13 @@ class Tickets(commands.Cog):
     @ticket.command(name="手动过审", description="（审核小蛋用）一键给身份、发通知、移频道！")
     @is_reviewer_egg()
     async def manual_approve(self, ctx: discord.ApplicationContext):
-        await ctx.defer()
         if not get_ticket_info(ctx.channel).get("工单ID"):
-            await ctx.followup.send("这里不是工单频道哦！", ephemeral=True); return
-        await self.approve_ticket_logic(ctx)
+            return await ctx.respond("这里不是工单频道哦！", ephemeral=True)
+        await ctx.respond(
+            embed=build_approve_confirmation_embed(ctx.channel),
+            view=ApproveTicketConfirmationView(ctx.author.id),
+            ephemeral=True,
+        )
 
     @ticket.command(name="修复按钮", description="（审核小蛋用）按钮没反应？尝试修复当前频道已有的面板！")
     @is_reviewer_egg()
