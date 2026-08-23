@@ -38,8 +38,48 @@ def _today() -> str:
     return datetime.now(TZ_CN).date().isoformat()
 
 
+def _daily_key(guild_id: str | int, user_id: str | int, day: str) -> str:
+    return f"{guild_id}:{user_id}:{day}"
+
+
+def _build_daily_indexes(questions: dict) -> tuple[dict[str, int], dict[str, int]]:
+    """旧数据只在迁移时遍历一次，后续任务面板直接查询日索引。"""
+    question_counts: dict[str, int] = {}
+    reply_totals: dict[str, int] = {}
+    for question in questions.values():
+        if not isinstance(question, dict):
+            continue
+        guild_id = str(question.get("guild_id") or "")
+        author_id = str(question.get("author_id") or "")
+        question_day = str(question.get("date") or question.get("created_at", ""))[:10]
+        if guild_id and author_id and question_day:
+            key = _daily_key(guild_id, author_id, question_day)
+            question_counts[key] = question_counts.get(key, 0) + 1
+
+        rewards = question.get("rewards", {})
+        if not guild_id or not isinstance(rewards, dict):
+            continue
+        for reward_user_id, reward in rewards.items():
+            if not isinstance(reward, dict):
+                continue
+            user_id = str(reward.get("user_id") or reward_user_id or "")
+            reward_day = str(reward.get("date") or reward.get("created_at", ""))[:10]
+            if not user_id or not reward_day:
+                continue
+            key = _daily_key(guild_id, user_id, reward_day)
+            reply_totals[key] = reply_totals.get(key, 0) + max(0, int(reward.get("amount", 0) or 0))
+    return question_counts, reply_totals
+
+
 def _empty_data() -> dict:
-    return {"version": 2, "questions": {}, "panels": {}, "author_subscriptions": {}}
+    return {
+        "version": 3,
+        "questions": {},
+        "panels": {},
+        "author_subscriptions": {},
+        "daily_question_counts": {},
+        "daily_reply_totals": {},
+    }
 
 
 @_synchronized
@@ -54,12 +94,33 @@ def load_data() -> dict:
     author_subscriptions = raw.get("author_subscriptions", {})
     if not isinstance(author_subscriptions, dict):
         author_subscriptions = {}
-    return {
-        "version": 2,
+    needs_index_migration = (
+        int(raw.get("version", 0) or 0) < 3
+        or not isinstance(raw.get("daily_question_counts"), dict)
+        or not isinstance(raw.get("daily_reply_totals"), dict)
+    )
+    if needs_index_migration:
+        daily_question_counts, daily_reply_totals = _build_daily_indexes(raw["questions"])
+    else:
+        daily_question_counts = {
+            str(key): max(0, int(value or 0))
+            for key, value in raw["daily_question_counts"].items()
+        }
+        daily_reply_totals = {
+            str(key): max(0, int(value or 0))
+            for key, value in raw["daily_reply_totals"].items()
+        }
+    normalized = {
+        "version": 3,
         "questions": raw["questions"],
         "panels": panels,
         "author_subscriptions": author_subscriptions,
+        "daily_question_counts": daily_question_counts,
+        "daily_reply_totals": daily_reply_totals,
     }
+    if needs_index_migration:
+        save_json_namespace("egg_qa", normalized)
+    return normalized
 
 
 @_synchronized
@@ -69,17 +130,15 @@ def save_data(data: dict) -> None:
 
 @_synchronized
 def get_daily_usage(user_id: int, guild_id: int) -> int:
-    uid = str(user_id)
-    gid = str(guild_id)
-    today = _today()
-    return sum(
-        1
-        for row in load_data()["questions"].values()
-        if isinstance(row, dict)
-        and row.get("author_id") == uid
-        and row.get("guild_id") == gid
-        and row.get("date") == today
-    )
+    key = _daily_key(guild_id, user_id, _today())
+    return max(0, int(load_data()["daily_question_counts"].get(key, 0) or 0))
+
+
+@_synchronized
+def get_daily_reply_reward_total(user_id: int, guild_id: int, day: str | None = None) -> int:
+    """读取回答任务的权威日累计，不依赖可能归档的蛋壳流水。"""
+    key = _daily_key(guild_id, user_id, str(day or _today()))
+    return max(0, int(load_data()["daily_reply_totals"].get(key, 0) or 0))
 
 
 @_synchronized
@@ -122,14 +181,8 @@ def create_question(*, author_id: int, guild_id: int, channel_id: int, content: 
     uid = str(author_id)
     gid = str(guild_id)
     today = _today()
-    used = sum(
-        1
-        for row in data["questions"].values()
-        if isinstance(row, dict)
-        and row.get("author_id") == uid
-        and row.get("guild_id") == gid
-        and row.get("date") == today
-    )
+    daily_key = _daily_key(gid, uid, today)
+    used = max(0, int(data["daily_question_counts"].get(daily_key, 0) or 0))
     if used >= DAILY_QUESTION_LIMIT:
         return None
 
@@ -146,6 +199,7 @@ def create_question(*, author_id: int, guild_id: int, channel_id: int, content: 
         "rewards": {},
     }
     data["questions"][question_id] = record
+    data["daily_question_counts"][daily_key] = used + 1
     save_data(data)
     return record
 
@@ -162,8 +216,36 @@ def finalize_question(question_id: str, message_id: int) -> None:
 @_synchronized
 def cancel_question(question_id: str) -> None:
     data = load_data()
-    if data["questions"].pop(str(question_id), None) is not None:
-        save_data(data)
+    record = data["questions"].pop(str(question_id), None)
+    if not isinstance(record, dict):
+        return
+
+    question_day = str(record.get("date") or record.get("created_at", ""))[:10]
+    question_key = _daily_key(record.get("guild_id", ""), record.get("author_id", ""), question_day)
+    remaining_questions = max(0, int(data["daily_question_counts"].get(question_key, 0) or 0) - 1)
+    if remaining_questions:
+        data["daily_question_counts"][question_key] = remaining_questions
+    else:
+        data["daily_question_counts"].pop(question_key, None)
+
+    rewards = record.get("rewards", {})
+    if isinstance(rewards, dict):
+        for reward_user_id, reward in rewards.items():
+            if not isinstance(reward, dict):
+                continue
+            user_id = reward.get("user_id") or reward_user_id
+            reward_day = str(reward.get("date") or reward.get("created_at", ""))[:10]
+            reward_key = _daily_key(record.get("guild_id", ""), user_id, reward_day)
+            remaining_reward = max(
+                0,
+                int(data["daily_reply_totals"].get(reward_key, 0) or 0)
+                - max(0, int(reward.get("amount", 0) or 0)),
+            )
+            if remaining_reward:
+                data["daily_reply_totals"][reward_key] = remaining_reward
+            else:
+                data["daily_reply_totals"].pop(reward_key, None)
+    save_data(data)
 
 
 @_synchronized
@@ -260,16 +342,8 @@ def claim_reply_reward(
         return None
 
     today = _today()
-    daily_total = 0
-    for question in data["questions"].values():
-        if not isinstance(question, dict) or question.get("guild_id") != record.get("guild_id"):
-            continue
-        for old_reward in question.get("rewards", {}).values():
-            if not isinstance(old_reward, dict) or old_reward.get("user_id") != uid:
-                continue
-            reward_date = str(old_reward.get("date") or old_reward.get("created_at", ""))[:10]
-            if reward_date == today:
-                daily_total += max(0, int(old_reward.get("amount", 0) or 0))
+    total_key = _daily_key(record.get("guild_id", ""), uid, today)
+    daily_total = max(0, int(data["daily_reply_totals"].get(total_key, 0) or 0))
 
     remaining = max(0, DAILY_REPLY_REWARD_CAP - daily_total)
     if remaining <= 0:
@@ -290,6 +364,7 @@ def claim_reply_reward(
         "created_at": _now_iso(),
     }
     rewards[uid] = reward
+    data["daily_reply_totals"][total_key] = daily_total + amount
     save_data(data)
     return reward
 
@@ -305,4 +380,15 @@ def revoke_reply_reward(*, question_id: str, user_id: int, reply_message_id: int
     reward = rewards.get(str(user_id)) if isinstance(rewards, dict) else None
     if isinstance(reward, dict) and reward.get("reply_message_id") == str(reply_message_id):
         rewards.pop(str(user_id), None)
+        reward_day = str(reward.get("date") or reward.get("created_at", ""))[:10]
+        total_key = _daily_key(record.get("guild_id", ""), user_id, reward_day)
+        remaining = max(
+            0,
+            int(data["daily_reply_totals"].get(total_key, 0) or 0)
+            - max(0, int(reward.get("amount", 0) or 0)),
+        )
+        if remaining:
+            data["daily_reply_totals"][total_key] = remaining
+        else:
+            data["daily_reply_totals"].pop(total_key, None)
         save_data(data)

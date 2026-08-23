@@ -438,10 +438,7 @@ def _append_transaction(
     }
     if idempotency_key:
         tx["idempotency_key"] = str(idempotency_key)
-    record.setdefault("transactions", []).append(tx)
-    record["transactions"] = record["transactions"][-50:]
     data.setdefault("transactions", []).append(tx)
-    data["transactions"] = data["transactions"][-500:]
 
 
 _DICT_SECTIONS = (
@@ -553,7 +550,6 @@ def _replace_database_snapshot(connection: sqlite3.Connection, data: dict) -> No
     normalized = _normalize_points_data(data)
     connection.execute("DELETE FROM point_users")
     connection.execute("DELETE FROM point_sections")
-    connection.execute("DELETE FROM point_transactions")
     connection.executemany(
         "INSERT INTO point_users(user_key, data, has_monthly_card) VALUES (?, ?, ?)",
         (
@@ -580,14 +576,24 @@ def _replace_database_snapshot(connection: sqlite3.Connection, data: dict) -> No
     for tx in normalized.get("transactions", []):
         if not isinstance(tx, dict):
             continue
+        if tx.get("id") is not None:
+            continue
         connection.execute(
-            """INSERT OR IGNORE INTO point_transactions
+            """INSERT INTO point_transactions
                (time, guild_id, user_id, amount, balance, source, reason, idempotency_key)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM point_transactions
+                   WHERE time=? AND guild_id=? AND user_id=? AND amount=?
+                     AND source=? AND reason=? AND idempotency_key=?
+               )""",
             (
                 str(tx.get("time", "")), str(tx.get("guild_id", "")), str(tx.get("user_id", "")),
                 _round_delta(tx.get("amount", 0)), _round_shells(tx.get("balance", 0)),
                 str(tx.get("source", "")), str(tx.get("reason", "")), str(tx.get("idempotency_key", "")),
+                str(tx.get("time", "")), str(tx.get("guild_id", "")), str(tx.get("user_id", "")),
+                _round_delta(tx.get("amount", 0)), str(tx.get("source", "")),
+                str(tx.get("reason", "")), str(tx.get("idempotency_key", "")),
             ),
         )
 
@@ -691,16 +697,11 @@ def _db_append_transaction(
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (tx["time"], tx["guild_id"], tx["user_id"], tx["amount"], tx["balance"], tx["source"], tx["reason"], str(idempotency_key)),
     )
-    record.setdefault("transactions", []).append(tx)
-    record["transactions"] = record["transactions"][-50:]
-    connection.execute(
-        "DELETE FROM point_transactions WHERE id NOT IN (SELECT id FROM point_transactions ORDER BY id DESC LIMIT 500)"
-    )
     return tx
 
 
-def load_points_data():
-    """兼容管理/报表调用的完整快照；高频业务不应调用此函数。"""
+def load_points_data(*, include_transactions: bool = False):
+    """兼容管理/报表快照；默认不遍历完整流水，显式请求时才加载。"""
     _ensure_points_db()
     with _POINTS_DATA_LOCK, _points_connection() as connection:
         data = _empty_points_data()
@@ -716,15 +717,16 @@ def load_points_data():
         for namespace in _LIST_SECTIONS:
             data[namespace] = _db_get_section(connection, namespace, "value", [])
         data["monthly_card_config"] = _db_monthly_config(connection)
-        data["transactions"] = [
-            dict(row) for row in connection.execute(
-                """SELECT time, guild_id, user_id, amount, balance, source, reason, idempotency_key
-                   FROM point_transactions ORDER BY id ASC"""
-            )
-        ]
-        for tx in data["transactions"]:
-            if not tx.get("idempotency_key"):
-                tx.pop("idempotency_key", None)
+        if include_transactions:
+            data["transactions"] = [
+                dict(row) for row in connection.execute(
+                    """SELECT id, time, guild_id, user_id, amount, balance, source, reason, idempotency_key
+                       FROM point_transactions ORDER BY id ASC"""
+                )
+            ]
+            for tx in data["transactions"]:
+                if not tx.get("idempotency_key"):
+                    tx.pop("idempotency_key", None)
         return data
 
 
@@ -894,6 +896,7 @@ def get_user_daily_snapshot(user_id: int, guild_id: int) -> dict:
     today = _today()
     user_key = _make_user_key(user_id, guild_id)
     praise_key = f"{guild_id}:{today}"
+    forum_key = f"user:{guild_id}:{user_id}:{today}"
     with _points_connection() as connection:
         record, _ = _db_get_user(connection, user_id, guild_id)
         transactions = []
@@ -909,11 +912,13 @@ def get_user_daily_snapshot(user_id: int, guild_id: int) -> dict:
                 tx.pop("idempotency_key", None)
             transactions.append(tx)
         praise_rows = _db_get_section(connection, "daily_praise_rewards", praise_key, {})
+        forum_rows = _db_get_section(connection, "daily_forum_rewards", forum_key, [])
     return {
         "version": 3,
         "users": {user_key: record},
         "transactions": transactions,
         "daily_praise_rewards": {praise_key: praise_rows},
+        "daily_forum_rewards": {forum_key: forum_rows},
     }
 
 
@@ -1248,10 +1253,6 @@ def settle_monthly_card_daily_rewards() -> dict:
             _db_put_user(connection, key, record)
             rewarded_users += 1
             total_reward = _round_delta(total_reward + reward)
-        if rewarded_users:
-            connection.execute(
-                "DELETE FROM point_transactions WHERE id NOT IN (SELECT id FROM point_transactions ORDER BY id DESC LIMIT 500)"
-            )
     return {"date": now.date().isoformat(), "rewarded_users": rewarded_users, "total_reward": total_reward}
 
 

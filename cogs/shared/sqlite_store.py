@@ -71,7 +71,18 @@ def migrate_runtime_json_namespaces() -> None:
         quota_file = "quota_data.json"
 
     specs = (
-        ("egg_qa", "data/egg_qa.json", {"version": 2, "questions": {}, "panels": {}, "author_subscriptions": {}}),
+        (
+            "egg_qa",
+            "data/egg_qa.json",
+            {
+                "version": 3,
+                "questions": {},
+                "panels": {},
+                "author_subscriptions": {},
+                "daily_question_counts": {},
+                "daily_reply_totals": {},
+            },
+        ),
         ("submissions", "data/submissions.json", {"version": 1, "panel_info": {}, "submissions": {}, "comment_rewards": {}}),
         ("red_packets", "data/red_packets.json", {"version": 1, "packets": {}}),
         ("prequiz_attempts", "data/prequiz_attempts.json", {"version": 1, "attempts": {}}),

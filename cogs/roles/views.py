@@ -66,8 +66,17 @@ from cogs.points.storage import (
     purchase_monthly_card,
     update_monthly_card_config,
 )
-from cogs.submissions.storage import KIND_BUG, KIND_RECOMMENDATION, KIND_REPO, count_daily_submissions
-from cogs.egg_qa.storage import get_daily_usage as get_egg_qa_daily_usage
+from cogs.submissions.storage import (
+    KIND_BUG,
+    KIND_RECOMMENDATION,
+    KIND_REPO,
+    count_daily_submissions,
+    get_daily_comment_reward_usage,
+)
+from cogs.egg_qa.storage import (
+    get_daily_usage as get_egg_qa_daily_usage,
+    get_daily_reply_reward_total,
+)
 from cogs.shared.utils import get_account_wait_status, has_verification_role
 from config import STYLE
 from discord.ui import Select
@@ -2144,21 +2153,53 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         kind=KIND_RECOMMENDATION,
     )
     rec_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_RECOMMENDATION}"})
-    comment_amount = _sum_tx(tx_rows, prefixes=("submission_comment_",))
-    comment_base_amount = _sum_tx_base(tx_rows, prefixes=("submission_comment_",))
+    comment_amount_from_tx = _sum_tx(tx_rows, prefixes=("submission_comment_",))
+    comment_base_amount = await asyncio.to_thread(
+        get_daily_comment_reward_usage,
+        guild_id=guild_id,
+        user_id=user.id,
+        day=today,
+    )
+    comment_amount = max(comment_base_amount, comment_amount_from_tx)
     comment_done = comment_base_amount >= 15
     _, egg_usage, _ = await asyncio.to_thread(_today_egg_qa_status, user.id, guild_id, tx_rows)
-    egg_reply_amount = _sum_tx(tx_rows, sources={"egg_qa_reply", "egg_qa_self_reply"})
-    egg_reply_base_amount = _sum_tx_base(tx_rows, sources={"egg_qa_reply", "egg_qa_self_reply"})
+    egg_reply_amount_from_tx = _sum_tx(tx_rows, sources={"egg_qa_reply", "egg_qa_self_reply"})
+    egg_reply_base_amount = await asyncio.to_thread(
+        get_daily_reply_reward_total,
+        user.id,
+        guild_id,
+        today,
+    )
+    egg_reply_amount = max(float(egg_reply_base_amount), egg_reply_amount_from_tx)
     egg_question_done = egg_usage >= 3
     egg_reply_done = egg_reply_base_amount >= 15
 
     repo_count = await asyncio.to_thread(count_daily_submissions, guild_id=guild_id, author_id=user.id, kind=KIND_REPO)
     repo_done = repo_count >= 1
     repo_amount = _sum_tx(tx_rows, sources={f"submission_{KIND_REPO}"})
-    forum_amount = _sum_tx(tx_rows, sources={"daily_forum_post", "forum_post"})
-    forum_done = forum_amount > 0
-    ten_draw_done = _has_today_tx(tx_rows, source="role_lottery", reason_contains="draw_count=10")
+    forum_key = f"user:{guild_id}:{user.id}:{today}"
+    forum_rows = points_data.get("daily_forum_rewards", {}).get(forum_key, [])
+    forum_amount_saved = round(sum(
+        float(row.get("amount", 0) or 0)
+        for row in forum_rows
+        if isinstance(row, dict)
+    ), 1) if isinstance(forum_rows, list) else 0.0
+    forum_record_amount = (
+        float(record.get("daily_post_pts", 0) or 0)
+        if str(record.get("daily_post_date", "")) == today
+        else 0.0
+    )
+    forum_amount = max(
+        forum_amount_saved,
+        forum_record_amount,
+        _sum_tx(tx_rows, sources={"daily_forum_post", "forum_post"}),
+    )
+    forum_done = bool(forum_rows) or forum_record_amount > 0 or forum_amount > 0
+    lottery_stats = await asyncio.to_thread(get_lottery_stats, user.id, guild_id)
+    ten_draw_done = (
+        str(lottery_stats.get("last_ten_draw_at", ""))[:10] == today
+        or _has_today_tx(tx_rows, source="role_lottery", reason_contains="draw_count=10")
+    )
     msg_count = int(record.get("daily_msg_count", 0)) if str(record.get("daily_msg_date", "")) == today else 0
     msg_done = msg_count >= 20
 
@@ -2190,7 +2231,11 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         bonus_lines.append(f"额外任务未达成，已扣回：-{format_shells(extra_result.get('amount', 0))} 蛋壳")
 
     basic_lines = [
-        _task_line(signed, "小蛋报到", f"+{format_shells(sign_amount)} 蛋壳"),
+        _task_line(
+            signed,
+            "小蛋报到",
+            f"+{format_shells(sign_amount)} 蛋壳" if sign_amount > 0 else ("已完成" if signed else "未完成"),
+        ),
         _task_line(praised, "赞美奇米蛋", f"+{format_shells(praise_amount)} 蛋壳"),
         _task_line(rec_count >= 1, "安利投稿", f"{rec_count}/1 · +{format_shells(rec_amount)}"),
         _task_line(egg_question_done, "问答提问", f"{egg_usage}/3 次"),
@@ -2207,7 +2252,11 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     embed = discord.Embed(
         title="🥚 小蛋每日任务",
         description=(
-            f"`{today}`　全清基础 **+10** 蛋壳 · 额外任选 2 项 **+10** 蛋壳"
+            f"`{today}`　"
+            f"基础 **{sum(1 for done in basic_tasks if done)}/{len(basic_tasks)}** "
+            f"{'✅ 已领 +10' if basic_result.get('reason') in {'rewarded', 'already_claimed'} else '· 全清 +10'}　"
+            f"额外 **{sum(1 for done in extra_tasks if done)}/{len(extra_tasks)}** "
+            f"{'✅ 已领 +10' if extra_result.get('reason') in {'rewarded', 'already_claimed'} else '· 任 2 项 +10'}"
         ),
         color=STYLE["KIMI_YELLOW"],
     )
@@ -4653,7 +4702,7 @@ def build_data_overview_embed() -> discord.Embed:
     from cogs.prequiz.storage import PREQUIZ_DATA_FILE, load_attempts
     from cogs.red_packets.storage import DATA_FILE as RED_PACKET_DATA_FILE, load_data as load_red_packet_data
 
-    points = load_points_data()
+    points = load_points_data(include_transactions=True)
     users = points.get("users", {})
     transactions = points.get("transactions", [])
     accel_purchases = points.get("acceleration_purchases", [])

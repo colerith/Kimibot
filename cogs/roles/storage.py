@@ -831,6 +831,7 @@ def _empty_lottery_stats() -> dict:
             LOTTERY_KIND_ICON: 0,
         },
         "last_draw_at": "",
+        "last_ten_draw_at": "",
     }
 
 
@@ -872,6 +873,7 @@ def _normalize_lottery_stats(raw: dict | None = None) -> dict:
             pass
 
     base["last_draw_at"] = str(raw.get("last_draw_at", "") or "")
+    base["last_ten_draw_at"] = str(raw.get("last_ten_draw_at", "") or "")
     return base
 
 
@@ -953,6 +955,8 @@ def record_lottery_draw(
                         stats["kind_hits"][kind] += 1
 
             stats["last_draw_at"] = str(drawn_at or "")
+            if len(results or []) >= 10:
+                stats["last_ten_draw_at"] = str(drawn_at or "")
             connection.execute(
                 """INSERT INTO role_user_state(namespace, user_key, data) VALUES ('lottery_stats', ?, ?)
                    ON CONFLICT(namespace, user_key) DO UPDATE SET data=excluded.data""",

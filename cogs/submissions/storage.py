@@ -121,6 +121,12 @@ def grant_comment_reward(
     }
 
 
+def get_daily_comment_reward_usage(*, guild_id: int, user_id: int, day: str | None = None) -> float:
+    """读取盖楼任务的权威日累计，不依赖蛋壳流水。"""
+    key = f"{guild_id}:{user_id}:{day or _today()}"
+    return _round_shells(load_data().get("comment_rewards", {}).get(key, 0.0))
+
+
 def load_data() -> dict:
     with _DATA_LOCK:
         raw = load_json_namespace("submissions", legacy_file=DATA_FILE, default=_empty_data())

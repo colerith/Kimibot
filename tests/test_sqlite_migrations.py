@@ -21,6 +21,7 @@ points = _load_module("points_storage_test", "cogs/points/storage.py")
 roles = _load_module("roles_storage_test", "cogs/roles/storage.py")
 red_packets = _load_module("red_packets_storage_test", "cogs/red_packets/storage.py")
 submissions = _load_module("submissions_storage_test", "cogs/submissions/storage.py")
+egg_qa = _load_module("egg_qa_storage_test", "cogs/egg_qa/storage.py")
 
 
 class PointsSQLiteMigrationTests(unittest.TestCase):
@@ -97,6 +98,15 @@ class PointsSQLiteMigrationTests(unittest.TestCase):
         settlement = points.settle_monthly_card_daily_rewards()
         self.assertEqual(settlement["rewarded_users"], 0)
 
+    def test_transaction_history_is_not_globally_truncated(self):
+        for index in range(510):
+            points.modify_user_points(index + 1000, 0.1, 99, source="retention_test")
+        with points._points_connection() as connection:
+            count = connection.execute("SELECT COUNT(*) FROM point_transactions").fetchone()[0]
+        self.assertGreaterEqual(count, 510)
+        self.assertEqual(points.load_points_data()["transactions"], [])
+        self.assertGreaterEqual(len(points.load_points_data(include_transactions=True)["transactions"]), 510)
+
 
 class RoleStateSQLiteMigrationTests(unittest.TestCase):
     def setUp(self):
@@ -129,6 +139,17 @@ class RoleStateSQLiteMigrationTests(unittest.TestCase):
         )
         self.assertEqual(result["total_draws"], 2)
         self.assertEqual(roles.get_lottery_stats(7, 99)["shell_hits"], 1)
+        ten_draw_at = "2026-08-20T01:00:00+08:00"
+        roles.record_lottery_draw(
+            7,
+            99,
+            results=[{"type": "empty"} for _ in range(10)],
+            spent_shells=10,
+            refund_shells=0,
+            reward_shells=0,
+            drawn_at=ten_draw_at,
+        )
+        self.assertEqual(roles.get_lottery_stats(7, 99)["last_ten_draw_at"], ten_draw_at)
 
 
 class AppStateSQLiteMigrationTests(unittest.TestCase):
@@ -139,6 +160,7 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         app_store._SCHEMA_READY = False
         red_packets.DATA_FILE = str(root / "red_packets.json")
         submissions.DATA_FILE = str(root / "submissions.json")
+        egg_qa.DATA_FILE = str(root / "egg_qa.json")
         Path(red_packets.DATA_FILE).write_text(
             json.dumps({"version": 1, "packets": {"legacy": {"id": "legacy"}}}),
             encoding="utf-8",
@@ -177,6 +199,38 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
             submissions.submission_notifications_enabled(submissions.get_submission(record["id"]))
         )
         self.assertTrue(submissions.submission_notifications_enabled({"id": "legacy"}))
+
+    def test_task_progress_uses_authoritative_module_records(self):
+        submissions.grant_comment_reward(guild_id=99, user_id=7, requested_reward=4.5)
+        self.assertEqual(
+            submissions.get_daily_comment_reward_usage(guild_id=99, user_id=7),
+            4.5,
+        )
+        data = egg_qa.load_data()
+        data["questions"]["q1"] = {
+            "id": "q1",
+            "guild_id": "99",
+            "author_id": "8",
+            "rewards": {"7": {"user_id": "7", "amount": 3, "date": egg_qa._today()}},
+        }
+        data["questions"]["q2"] = {
+            "id": "q2",
+            "guild_id": "99",
+            "author_id": "8",
+            "rewards": {"7": {"user_id": "7", "amount": 4, "date": egg_qa._today()}},
+        }
+        data.pop("daily_question_counts", None)
+        data.pop("daily_reply_totals", None)
+        data["version"] = 2
+        egg_qa.save_data(data)
+        self.assertEqual(egg_qa.get_daily_reply_reward_total(7, 99), 7)
+        self.assertEqual(egg_qa.load_data()["version"], 3)
+
+        question = egg_qa.create_question(author_id=7, guild_id=99, channel_id=10, content="测试")
+        self.assertIsNotNone(question)
+        self.assertEqual(egg_qa.get_daily_usage(7, 99), 1)
+        egg_qa.cancel_question(question["id"])
+        self.assertEqual(egg_qa.get_daily_usage(7, 99), 0)
 
 
 if __name__ == "__main__":
