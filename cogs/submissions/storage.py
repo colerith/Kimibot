@@ -158,6 +158,19 @@ def get_panel_info() -> dict:
     return load_data().get("panel_info", {})
 
 
+def clear_panel_info(channel_id: int) -> dict | None:
+    """Clear the main-panel pointer only if it targets the given channel."""
+    with _DATA_LOCK:
+        data = load_data()
+        panel = data.get("panel_info", {})
+        if not isinstance(panel, dict) or str(panel.get("channel_id", "")) != str(channel_id):
+            return None
+        removed = dict(panel)
+        data["panel_info"] = {}
+        save_data(data)
+        return removed
+
+
 def create_submission(
     *,
     guild_id: int,

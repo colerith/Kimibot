@@ -7,9 +7,12 @@ import config
 from cogs.points.storage import grant_monthly_eligible_reward
 
 from .storage import (
+    disable_panel,
     claim_reply_reward,
     find_question_by_message,
     get_question_notification_subscribers,
+    is_panel_disabled,
+    list_disabled_panel_channels,
     list_panels,
     remove_panel,
     revoke_reply_reward,
@@ -52,6 +55,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
         self.panels_refreshed = False
         self.bottom_refresh_task = None
         self.bottom_refresh_lock = asyncio.Lock()
+        self.disabled_panel_channels: set[int] = set()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -83,11 +87,15 @@ class EggQACog(commands.Cog, name="小蛋问答"):
     async def _refresh_saved_panels(self):
         await self.bot.wait_until_ready()
         refreshed = 0
-        saved_panels = await asyncio.to_thread(list_panels)
+        saved_panels, disabled_channels = await asyncio.gather(
+            asyncio.to_thread(list_panels),
+            asyncio.to_thread(list_disabled_panel_channels),
+        )
+        self.disabled_panel_channels = set(disabled_channels)
         for panel in saved_panels:
             channel_id = int(panel.get("channel_id") or 0)
             message_id = int(panel.get("message_id") or 0)
-            if not channel_id or not message_id:
+            if not channel_id or not message_id or channel_id in self.disabled_panel_channels:
                 continue
             channel = await self._fetch_channel(channel_id)
             if not channel:
@@ -101,7 +109,7 @@ class EggQACog(commands.Cog, name="小蛋问答"):
                 continue
 
         bottom_channel_id = self._bottom_channel_id()
-        if bottom_channel_id and not any(
+        if bottom_channel_id and bottom_channel_id not in self.disabled_panel_channels and not any(
             int(panel.get("channel_id") or 0) == bottom_channel_id for panel in saved_panels
         ):
             channel = await self._fetch_channel(bottom_channel_id)
@@ -116,8 +124,14 @@ class EggQACog(commands.Cog, name="小蛋问答"):
     async def _delayed_bottom_refresh(self):
         try:
             await asyncio.sleep(1.5)
+            bottom_channel_id = self._bottom_channel_id()
+            if (
+                bottom_channel_id in self.disabled_panel_channels
+                or await asyncio.to_thread(is_panel_disabled, bottom_channel_id)
+            ):
+                return
             async with self.bottom_refresh_lock:
-                channel = await self._fetch_channel(self._bottom_channel_id())
+                channel = await self._fetch_channel(bottom_channel_id)
                 if channel:
                     await refresh_bottom_egg_qa_panel(channel)
         except asyncio.CancelledError:
@@ -129,6 +143,20 @@ class EggQACog(commands.Cog, name="小蛋问答"):
         if self.bottom_refresh_task and not self.bottom_refresh_task.done():
             return
         self.bottom_refresh_task = self.bot.loop.create_task(self._delayed_bottom_refresh())
+
+    async def disable_managed_panel(self, channel_id: int) -> dict | None:
+        removed = await asyncio.to_thread(disable_panel, channel_id)
+        self.disabled_panel_channels.add(int(channel_id))
+        if (
+            int(channel_id) == self._bottom_channel_id()
+            and self.bottom_refresh_task
+            and not self.bottom_refresh_task.done()
+        ):
+            self.bottom_refresh_task.cancel()
+        return removed
+
+    def mark_panel_enabled(self, channel_id: int) -> None:
+        self.disabled_panel_channels.discard(int(channel_id))
 
     @staticmethod
     def _quoted_preview(text: str, limit: int) -> str:
@@ -210,7 +238,11 @@ class EggQACog(commands.Cog, name="小蛋问答"):
         if not message.guild:
             return
 
-        if not message.author.bot and message.channel.id == self._bottom_channel_id():
+        if (
+            not message.author.bot
+            and message.channel.id == self._bottom_channel_id()
+            and message.channel.id not in self.disabled_panel_channels
+        ):
             self._schedule_bottom_refresh()
 
         if message.author.bot or not message.reference:

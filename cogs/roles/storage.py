@@ -345,6 +345,19 @@ def save_role_data(data):
         _role_data_cache_mtime_ns = os.stat(ROLES_DATA_FILE).st_mtime_ns
 
 
+def clear_role_panel_info(channel_id: int) -> dict | None:
+    """Forget the maintained role panel only when it belongs to this channel."""
+    with _role_data_lock:
+        data = load_role_data()
+        panel = data.get("panel_info", {})
+        if not isinstance(panel, dict) or str(panel.get("channel_id", "")) != str(channel_id):
+            return None
+        removed = copy.deepcopy(panel)
+        data["panel_info"] = {}
+        save_role_data(data)
+        return removed
+
+
 def get_lottery_role_rarity(role_id: int, role_data: dict | None = None) -> int:
     data = role_data if role_data is not None else load_role_data()
     meta = data.get("lottery_role_meta", {})

@@ -10,6 +10,7 @@ import config
 from datetime import datetime, timezone, timedelta
 
 from .storage import (
+    clear_role_panel_info,
     load_role_data,
     save_role_data,
     add_to_collection,
@@ -4485,6 +4486,116 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
         await interaction.followup.send(message, ephemeral=True)
 
 
+class CommunityPanelWithdrawSelect(discord.ui.Select):
+    PANEL_TITLES = {
+        "role": {"🥚 **小蛋报到**", "🥚 小蛋报到"},
+        "prequiz": {"🥚 小蛋预答题"},
+        "egg_qa": {"🙋‍♀️ 小蛋问答入口", "🥚 小蛋问答站"},
+        "notification": {"📬 社区通知中心", "📬 **社区通知中心**"},
+    }
+    LABELS = {
+        "role": "小蛋报到面板",
+        "prequiz": "预答题面板",
+        "submission": "投稿面板",
+        "egg_qa": "小蛋问答面板",
+        "notification": "通知订阅面板",
+    }
+
+    def __init__(self, bot):
+        self.bot = bot
+        options = [
+            discord.SelectOption(label="撤销小蛋报到面板", value="role", emoji="🥚"),
+            discord.SelectOption(label="撤销预答题面板", value="prequiz", emoji="📝"),
+            discord.SelectOption(label="撤销投稿面板", value="submission", emoji="📮"),
+            discord.SelectOption(label="撤销小蛋问答面板", value="egg_qa", emoji="🙋‍♀️"),
+            discord.SelectOption(label="撤销通知订阅面板", value="notification", emoji="📬"),
+        ]
+        super().__init__(
+            placeholder="选择要从当前频道撤销的面板…",
+            options=options,
+            row=3,
+            custom_id="community_admin_withdraw_panel",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+
+        target = self.values[0]
+        channel = interaction.channel
+        stored_message_id = 0
+        maintenance_cleared = False
+
+        try:
+            if target == "role":
+                panel = await asyncio.to_thread(clear_role_panel_info, channel.id)
+                stored_message_id = int((panel or {}).get("message_id") or 0)
+                maintenance_cleared = panel is not None
+            elif target == "submission":
+                from cogs.submissions.storage import clear_panel_info
+
+                panel = await asyncio.to_thread(clear_panel_info, channel.id)
+                stored_message_id = int((panel or {}).get("message_id") or 0)
+                maintenance_cleared = panel is not None
+            elif target == "egg_qa":
+                cog = self.bot.get_cog("小蛋问答")
+                if cog and hasattr(cog, "disable_managed_panel"):
+                    panel = await cog.disable_managed_panel(channel.id)
+                else:
+                    from cogs.egg_qa.storage import disable_panel
+
+                    panel = await asyncio.to_thread(disable_panel, channel.id)
+                stored_message_id = int((panel or {}).get("message_id") or 0)
+                # The disabled marker is written even when the message was
+                # manually deleted and no saved pointer remains.
+                maintenance_cleared = True
+        except (OSError, ValueError, TypeError) as error:
+            return await interaction.followup.send(f"❌ 清除面板维护记录失败：{error}", ephemeral=True)
+
+        candidates: dict[int, discord.Message] = {}
+        if stored_message_id:
+            try:
+                message = await channel.fetch_message(stored_message_id)
+                candidates[message.id] = message
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        titles = self.PANEL_TITLES.get(target, set())
+        if titles:
+            try:
+                async for message in channel.history(limit=200):
+                    if self.bot.user and message.author.id != self.bot.user.id:
+                        continue
+                    if message.embeds and message.embeds[0].title in titles:
+                        candidates[message.id] = message
+            except (AttributeError, discord.Forbidden, discord.HTTPException):
+                pass
+
+        deleted = 0
+        for message in candidates.values():
+            try:
+                await message.delete(reason=f"管理员撤销{self.LABELS[target]}")
+                deleted += 1
+            except discord.NotFound:
+                pass
+            except (discord.Forbidden, discord.HTTPException) as error:
+                return await interaction.followup.send(
+                    f"❌ 已停止自动维护，但删除面板消息失败：{error}",
+                    ephemeral=True,
+                )
+
+        label = self.LABELS[target]
+        if deleted or maintenance_cleared:
+            detail = f"，并删除 **{deleted}** 条面板消息" if deleted else "；原消息已不存在或未找到"
+            return await interaction.followup.send(
+                f"✅ 已撤销当前频道的 **{label}**{detail}。\n重新点击对应的发送按钮即可恢复。",
+                ephemeral=True,
+            )
+        await interaction.followup.send(f"ℹ️ 当前频道没有找到可撤销的 **{label}**。", ephemeral=True)
+
+
 class CommunityPanelManageView(discord.ui.View):
     def __init__(self, ctx, bot):
         super().__init__(timeout=600)
@@ -4492,6 +4603,7 @@ class CommunityPanelManageView(discord.ui.View):
         self.bot = bot
         self.owner_id = ctx.author.id if getattr(ctx, "author", None) else None
         self.add_item(CommunityPanelRefreshSelect(bot))
+        self.add_item(CommunityPanelWithdrawSelect(bot))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.owner_id and interaction.user.id != self.owner_id:
@@ -4568,6 +4680,9 @@ class CommunityPanelManageView(discord.ui.View):
             await deploy_egg_qa_panel(interaction.channel)
         except (discord.Forbidden, discord.HTTPException):
             return await interaction.followup.send("❌ 小蛋问答面板发送失败，请检查机器人在当前频道的权限。", ephemeral=True)
+        cog = self.bot.get_cog("小蛋问答")
+        if cog and hasattr(cog, "mark_panel_enabled"):
+            cog.mark_panel_enabled(interaction.channel.id)
         await interaction.followup.send("✅ 已发送小蛋问答面板。", ephemeral=True)
 
     @discord.ui.button(label="通知面板", style=discord.ButtonStyle.success, emoji="📬", custom_id="community_admin_notification_panel")
@@ -4629,6 +4744,7 @@ def build_community_manage_embed(guild: discord.Guild | None):
         description=(
             "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
             "预答题、投稿、小蛋问答及各类面板刷新入口已统一接入这里。\n"
+            "误发面板可通过【撤销面板】下拉菜单停止维护并删除。\n"
             "需要创建测试工单，或维护工单、许愿池、投诉、入站答题、助力鸣谢及论坛统计时，请使用下拉菜单。\n"
             f"当前识别奖励规则：**{len(load_praise_rules())}** 条。"
         ),

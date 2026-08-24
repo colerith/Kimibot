@@ -23,6 +23,17 @@ from .views import (
 # --- 持久化工具函数 (新增) ---
 AUDIT_SCHEDULE_FILE = "data/audit_schedule.json"
 UPLOAD_WINDOW_MINUTES = 10
+MATERIAL_STATE_PENDING = "待提交"
+MATERIAL_STATE_SUBMITTED = "已提交"
+
+
+def build_ticket_channel_name(info, material_state):
+    """Build a compact ticket name whose prefix exposes material submission state."""
+    is_test = info.get("测试模式") == "是"
+    prefix = f"测试{material_state}" if is_test else material_state
+    ticket_id = info.get("工单ID") or "未知工单"
+    creator = info.get("创建者") or "未知用户"
+    return f"{prefix}-{ticket_id}-{creator}"[:100]
 
 
 def build_ticket_created_dm(
@@ -174,6 +185,7 @@ class Tickets(commands.Cog):
         # 集合中存储正在处理中的 user_id
         self.creating_lock = set()
         self.approval_lock = set()
+        self.material_state_lock = set()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -323,11 +335,15 @@ class Tickets(commands.Cog):
                 await self.update_panel_message()
 
             tid = random.randint(100000, 999999)
-            c_name = (
-                f"测试工单-{tid}-{interaction.user.name}"
-                if test_mode
-                else f"审核中-{tid}-{interaction.user.name}"
-            )
+            initial_info = {
+                "创建者ID": str(interaction.user.id),
+                "创建者": interaction.user.name,
+                "工单ID": str(tid),
+                "材料状态": MATERIAL_STATE_PENDING,
+            }
+            if test_mode:
+                initial_info["测试模式"] = "是"
+            c_name = build_ticket_channel_name(initial_info, MATERIAL_STATE_PENDING)
 
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -344,10 +360,7 @@ class Tickets(commands.Cog):
 
             ch = await interaction.guild.create_text_channel(
                 name=c_name, category=target_category, overwrites=overwrites,
-                topic=(
-                    f"创建者ID: {interaction.user.id} | 创建者: {interaction.user.name} | "
-                    f"工单ID: {tid}" + (" | 测试模式: 是" if test_mode else "")
-                ),
+                topic=" | ".join(f"{key}: {value}" for key, value in initial_info.items()),
             )
 
             # 发送初始消息
@@ -426,7 +439,9 @@ class Tickets(commands.Cog):
         info["上传状态"] = "进行中"
         info["上传开始"] = str(int(now.timestamp()))
         info["上传截止"] = str(int(deadline.timestamp()))
+        info["材料状态"] = info.get("材料状态") or MATERIAL_STATE_PENDING
         new_topic = " | ".join(f"{key}: {value}" for key, value in info.items())
+        new_name = build_ticket_channel_name(info, info["材料状态"])
 
         overwrite = channel.overwrites_for(interaction.user)
         overwrite.read_messages = True
@@ -438,7 +453,11 @@ class Tickets(commands.Cog):
                 overwrite=overwrite,
                 reason="人工审核材料上传窗口已开启",
             )
-            await channel.edit(topic=new_topic, reason="记录人工审核材料上传窗口")
+            await channel.edit(
+                name=new_name,
+                topic=new_topic,
+                reason="记录人工审核材料上传窗口",
+            )
         except (discord.Forbidden, discord.HTTPException) as error:
             overwrite.send_messages = False
             overwrite.attach_files = False
@@ -464,6 +483,57 @@ class Tickets(commands.Cog):
         embed.set_footer(text="上传窗口仅可开启一次 · 截止后不能补充材料")
         await channel.send(embed=embed)
         await interaction.followup.send("✅ 十分钟上传窗口已开启，请立即上传全部材料。", ephemeral=True)
+
+    async def mark_material_submitted(self, channel):
+        """Persist the first valid upload and expose it in the ticket channel prefix."""
+        if channel.id in self.material_state_lock:
+            return False
+        self.material_state_lock.add(channel.id)
+        try:
+            info = get_ticket_info(channel)
+            if info.get("上传状态") != "进行中":
+                return False
+            if info.get("材料状态") == MATERIAL_STATE_SUBMITTED:
+                return True
+
+            info["材料状态"] = MATERIAL_STATE_SUBMITTED
+            await channel.edit(
+                name=build_ticket_channel_name(info, MATERIAL_STATE_SUBMITTED),
+                topic=" | ".join(f"{key}: {value}" for key, value in info.items()),
+                reason="申请人已提交人工审核材料",
+            )
+            return True
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"更新工单材料状态失败: channel={channel.id} error={error!r}")
+            return False
+        finally:
+            self.material_state_lock.discard(channel.id)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Rename an application ticket as soon as its creator uploads the first attachment."""
+        if message.author.bot or not message.guild or not message.attachments:
+            return
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+
+        valid_category_ids = {
+            IDS.get("FIRST_REVIEW_CHANNEL_ID"),
+            IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"),
+            IDS.get("SECOND_REVIEW_CHANNEL_ID"),
+        }
+        if message.channel.category_id not in valid_category_ids:
+            return
+
+        info = get_ticket_info(message.channel)
+        try:
+            creator_id = int(info.get("创建者ID", "0"))
+        except (TypeError, ValueError):
+            return
+        if creator_id != message.author.id or info.get("上传状态") != "进行中":
+            return
+
+        await self.mark_material_submitted(message.channel)
 
 
 
@@ -651,6 +721,9 @@ class Tickets(commands.Cog):
                     )
                     continue
 
+                # 实时消息事件可能因重启或短暂断线漏掉；截止扫描负责兜底校正。
+                await self.mark_material_submitted(channel)
+
                 member = channel.guild.get_member(creator_id)
                 if member:
                     overwrite = channel.overwrites_for(member)
@@ -667,10 +740,15 @@ class Tickets(commands.Cog):
                         continue
 
                 info["上传状态"] = "已截止"
+                info["材料状态"] = MATERIAL_STATE_SUBMITTED
                 info["上传材料数"] = str(attachment_count)
                 new_topic = " | ".join(f"{key}: {value}" for key, value in info.items())
                 try:
-                    await channel.edit(topic=new_topic, reason="人工审核材料上传已截止")
+                    await channel.edit(
+                        name=build_ticket_channel_name(info, MATERIAL_STATE_SUBMITTED),
+                        topic=new_topic,
+                        reason="人工审核材料上传已截止",
+                    )
                     embed = discord.Embed(
                         title="🔒 材料上传已截止",
                         description=(
@@ -701,7 +779,10 @@ class Tickets(commands.Cog):
         for cat in cats:
             if not cat: continue
             for channel in cat.text_channels:
-                valid_prefixes = ["一审中", "二审中", "审核中", "已过审"]
+                valid_prefixes = [
+                    "待提交", "已提交", "测试待提交", "测试已提交",
+                    "一审中", "二审中", "审核中", "已过审",
+                ]
                 if not any(prefix in channel.name for prefix in valid_prefixes):
                     continue
 

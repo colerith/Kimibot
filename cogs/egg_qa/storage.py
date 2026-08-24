@@ -106,9 +106,10 @@ def _build_daily_indexes(questions: dict) -> tuple[dict[str, int], dict[str, int
 
 def _empty_data() -> dict:
     return {
-        "version": 3,
+        "version": 4,
         "questions": {},
         "panels": {},
+        "disabled_panel_channels": [],
         "author_subscriptions": {},
         "daily_question_counts": {},
         "daily_reply_totals": {},
@@ -127,6 +128,14 @@ def load_data() -> dict:
     author_subscriptions = raw.get("author_subscriptions", {})
     if not isinstance(author_subscriptions, dict):
         author_subscriptions = {}
+    raw_disabled_channels = raw.get("disabled_panel_channels", [])
+    if not isinstance(raw_disabled_channels, (list, tuple, set)):
+        raw_disabled_channels = []
+    disabled_panel_channels = sorted({
+        str(channel_id)
+        for channel_id in raw_disabled_channels
+        if str(channel_id).isdigit()
+    }, key=int)
     needs_index_migration = (
         int(raw.get("version", 0) or 0) < 3
         or not isinstance(raw.get("daily_question_counts"), dict)
@@ -144,9 +153,10 @@ def load_data() -> dict:
             for key, value in raw["daily_reply_totals"].items()
         }
     normalized = {
-        "version": 3,
+        "version": 4,
         "questions": raw["questions"],
         "panels": panels,
+        "disabled_panel_channels": disabled_panel_channels,
         "author_subscriptions": author_subscriptions,
         "daily_question_counts": daily_question_counts,
         "daily_reply_totals": daily_reply_totals,
@@ -177,8 +187,13 @@ def get_daily_reply_reward_total(user_id: int, guild_id: int, day: str | None = 
 @_synchronized
 def save_panel(channel_id: int, message_id: int) -> None:
     data = load_data()
-    data["panels"][str(channel_id)] = {
-        "channel_id": str(channel_id),
+    channel_key = str(channel_id)
+    data["disabled_panel_channels"] = [
+        value for value in data.get("disabled_panel_channels", [])
+        if str(value) != channel_key
+    ]
+    data["panels"][channel_key] = {
+        "channel_id": channel_key,
         "message_id": str(message_id),
         "updated_at": _now_iso(),
     }
@@ -206,6 +221,35 @@ def remove_panel(channel_id: int, message_id: int | None = None) -> None:
         return
     data["panels"].pop(str(channel_id), None)
     save_data(data)
+
+
+@_synchronized
+def disable_panel(channel_id: int) -> dict | None:
+    """Remove a saved panel and suppress config-driven bottom recreation."""
+    data = load_data()
+    channel_key = str(channel_id)
+    removed = data["panels"].pop(channel_key, None)
+    disabled = {str(value) for value in data.get("disabled_panel_channels", []) if str(value).isdigit()}
+    disabled.add(channel_key)
+    data["disabled_panel_channels"] = sorted(disabled, key=int)
+    save_data(data)
+    return dict(removed) if isinstance(removed, dict) else None
+
+
+@_synchronized
+def is_panel_disabled(channel_id: int) -> bool:
+    return str(channel_id) in {
+        str(value) for value in load_data().get("disabled_panel_channels", [])
+    }
+
+
+@_synchronized
+def list_disabled_panel_channels() -> set[int]:
+    return {
+        int(value)
+        for value in load_data().get("disabled_panel_channels", [])
+        if str(value).isdigit()
+    }
 
 
 @_synchronized
