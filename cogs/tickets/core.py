@@ -11,7 +11,7 @@ import os
 from config import IDS, QUOTA, STYLE
 from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 from .utils import (
-    STRINGS, SPECIFIC_REVIEWER_ID, TIMEOUT_HOURS_ARCHIVE, TIMEOUT_HOURS_REMIND,
+    STRINGS, REVIEWER_ROLE_ID, TIMEOUT_HOURS_ARCHIVE, TIMEOUT_HOURS_REMIND,
     is_reviewer_egg, get_ticket_info, load_quota_data, save_quota_data, execute_archive,
     ApprovedTicketArchiveView, ARCHIVE_KIND_APPROVED, ARCHIVE_KIND_REJECTED, ARCHIVE_KIND_TIMEOUT,
 )
@@ -186,13 +186,15 @@ class Tickets(commands.Cog):
         self.creating_lock = set()
         self.approval_lock = set()
         self.material_state_lock = set()
+        self.ticket_order_locks = {}
+        self.material_submission_times = {}
 
     @commands.Cog.listener()
     async def on_ready(self):
         self.bot.add_view(TicketActionView())
         self.bot.add_view(TicketPanelView(self))
         self.bot.add_view(ArchiveRequestView())
-        self.bot.add_view(NotifyReviewerView(SPECIFIC_REVIEWER_ID))
+        self.bot.add_view(NotifyReviewerView(REVIEWER_ROLE_ID))
         self.bot.add_view(ApprovedTicketArchiveView())
 
         print("Tickets Cog Loaded & Views Registered.")
@@ -280,7 +282,7 @@ class Tickets(commands.Cog):
             user_roles = [r.id for r in interaction.user.roles]
             has_perm = (IDS["VERIFICATION_ROLE_ID"] in user_roles) or \
                     (IDS["SUPER_EGG_ROLE_ID"] in user_roles) or \
-                    (interaction.user.id == SPECIFIC_REVIEWER_ID)
+                    (REVIEWER_ROLE_ID in user_roles)
 
             if not test_mode and not has_perm:
                 self.creating_lock.discard(user.id)
@@ -353,8 +355,9 @@ class Tickets(commands.Cog):
                     attach_files=False,
                 ),
             }
-            staff = interaction.guild.get_member(SPECIFIC_REVIEWER_ID)
-            if staff: overwrites[staff] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            reviewer_role = interaction.guild.get_role(REVIEWER_ROLE_ID)
+            if reviewer_role:
+                overwrites[reviewer_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
             super_egg = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
             if super_egg: overwrites[super_egg] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
@@ -380,7 +383,7 @@ class Tickets(commands.Cog):
 
             # 发送给审核员的提醒
             rem_text = STRINGS["messages"]["reminder_text"].format(ticket_id=tid, user_id=interaction.user.id)
-            await ch.send(embed=discord.Embed(description=rem_text, color=STYLE["KIMI_YELLOW"]), view=NotifyReviewerView(SPECIFIC_REVIEWER_ID))
+            await ch.send(embed=discord.Embed(description=rem_text, color=STYLE["KIMI_YELLOW"]), view=NotifyReviewerView(REVIEWER_ROLE_ID))
 
             # 私信通知
             try:
@@ -484,7 +487,82 @@ class Tickets(commands.Cog):
         await channel.send(embed=embed)
         await interaction.followup.send("✅ 十分钟上传窗口已开启，请立即上传全部材料。", ephemeral=True)
 
-    async def mark_material_submitted(self, channel):
+    @staticmethod
+    def _ticket_created_sort_key(channel):
+        return (channel.created_at.timestamp(), channel.id)
+
+    async def reposition_submitted_ticket(self, channel, submitted_at):
+        """Insert one submitted ticket into the category queue with one Discord move."""
+        category = channel.category
+        if not category:
+            return
+
+        lock = self.ticket_order_locks.setdefault(category.id, asyncio.Lock())
+        async with lock:
+            submitted = []
+            pending = []
+            for ticket_channel in category.text_channels:
+                info = get_ticket_info(ticket_channel)
+                if not info.get("工单ID"):
+                    continue
+
+                state = info.get("材料状态")
+                if ticket_channel.id == channel.id:
+                    state = MATERIAL_STATE_SUBMITTED
+                    submission_time = int(submitted_at)
+                else:
+                    submission_time = self.material_submission_times.get(ticket_channel.id)
+                    if submission_time is not None:
+                        state = MATERIAL_STATE_SUBMITTED
+                    if submission_time is None:
+                        try:
+                            submission_time = int(
+                                info.get("材料提交时间")
+                                or info.get("上传开始")
+                                or ticket_channel.created_at.timestamp()
+                            )
+                        except (TypeError, ValueError):
+                            submission_time = int(ticket_channel.created_at.timestamp())
+
+                if state == MATERIAL_STATE_SUBMITTED:
+                    submitted.append((submission_time, ticket_channel.id, ticket_channel))
+                elif state == MATERIAL_STATE_PENDING:
+                    pending.append(ticket_channel)
+
+            submitted.sort(key=lambda item: (item[0], item[1]))
+            pending.sort(key=self._ticket_created_sort_key)
+            target_index = next(
+                (index for index, item in enumerate(submitted) if item[2].id == channel.id),
+                None,
+            )
+            if target_index is None:
+                return
+
+            try:
+                if target_index + 1 < len(submitted):
+                    await channel.move(
+                        before=submitted[target_index + 1][2],
+                        reason="按材料提交顺序排列人工审核工单",
+                    )
+                elif target_index > 0:
+                    await channel.move(
+                        after=submitted[target_index - 1][2],
+                        reason="按材料提交顺序排列人工审核工单",
+                    )
+                elif pending:
+                    await channel.move(
+                        before=pending[0],
+                        reason="已提交工单置于待提交工单之前",
+                    )
+                else:
+                    await channel.move(
+                        beginning=True,
+                        reason="已提交工单置于审核频道列表最前",
+                    )
+            except (discord.Forbidden, discord.HTTPException, ValueError) as error:
+                print(f"调整工单审核队列失败: channel={channel.id} error={error!r}")
+
+    async def mark_material_submitted(self, channel, *, submitted_at=None):
         """Persist the first valid upload and expose it in the ticket channel prefix."""
         if channel.id in self.material_state_lock:
             return False
@@ -494,14 +572,33 @@ class Tickets(commands.Cog):
             if info.get("上传状态") != "进行中":
                 return False
             if info.get("材料状态") == MATERIAL_STATE_SUBMITTED:
+                try:
+                    saved_submission_at = int(
+                        info.get("材料提交时间")
+                        or submitted_at
+                        or info.get("上传开始")
+                        or channel.created_at.timestamp()
+                    )
+                except (TypeError, ValueError):
+                    saved_submission_at = int(channel.created_at.timestamp())
+                self.material_submission_times[channel.id] = saved_submission_at
+                await self.reposition_submitted_ticket(channel, saved_submission_at)
                 return True
 
+            submitted_at = int(
+                submitted_at.timestamp()
+                if isinstance(submitted_at, datetime.datetime)
+                else submitted_at or discord.utils.utcnow().timestamp()
+            )
             info["材料状态"] = MATERIAL_STATE_SUBMITTED
+            info["材料提交时间"] = str(submitted_at)
             await channel.edit(
                 name=build_ticket_channel_name(info, MATERIAL_STATE_SUBMITTED),
                 topic=" | ".join(f"{key}: {value}" for key, value in info.items()),
                 reason="申请人已提交人工审核材料",
             )
+            self.material_submission_times[channel.id] = submitted_at
+            await self.reposition_submitted_ticket(channel, submitted_at)
             return True
         except (discord.Forbidden, discord.HTTPException) as error:
             print(f"更新工单材料状态失败: channel={channel.id} error={error!r}")
@@ -533,7 +630,12 @@ class Tickets(commands.Cog):
         if creator_id != message.author.id or info.get("上传状态") != "进行中":
             return
 
-        await self.mark_material_submitted(message.channel)
+        if info.get("材料状态") == MATERIAL_STATE_SUBMITTED:
+            return
+        await self.mark_material_submitted(
+            message.channel,
+            submitted_at=message.created_at,
+        )
 
 
 
@@ -704,10 +806,13 @@ class Tickets(commands.Cog):
                     continue
 
                 attachment_count = 0
+                first_attachment_at = None
                 after = datetime.datetime.fromtimestamp(started_at, tz=datetime.timezone.utc)
                 async for message in channel.history(limit=None, after=after, oldest_first=True):
                     if message.author.id == creator_id:
                         attachment_count += len(message.attachments)
+                        if message.attachments and first_attachment_at is None:
+                            first_attachment_at = message.created_at
 
                 if attachment_count <= 0:
                     await execute_archive(
@@ -722,7 +827,10 @@ class Tickets(commands.Cog):
                     continue
 
                 # 实时消息事件可能因重启或短暂断线漏掉；截止扫描负责兜底校正。
-                await self.mark_material_submitted(channel)
+                await self.mark_material_submitted(
+                    channel,
+                    submitted_at=first_attachment_at,
+                )
 
                 member = channel.guild.get_member(creator_id)
                 if member:
@@ -759,9 +867,13 @@ class Tickets(commands.Cog):
                         color=0xF0A45D,
                     )
                     await channel.send(
-                        f"<@{SPECIFIC_REVIEWER_ID}>",
+                        f"<@&{REVIEWER_ROLE_ID}>",
                         embed=embed,
-                        allowed_mentions=discord.AllowedMentions(users=True, roles=False),
+                        allowed_mentions=discord.AllowedMentions(
+                            everyone=False,
+                            users=False,
+                            roles=True,
+                        ),
                     )
                 except (discord.Forbidden, discord.HTTPException) as error:
                     print(f"发送上传截止通知失败: channel={channel.id} error={error!r}")
@@ -1083,8 +1195,9 @@ class Tickets(commands.Cog):
         if not target_cat: return await ctx.followup.send("找不到目标分类配置或分类已满", ephemeral=True)
 
         overwrites = {ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False)}
-        spec = ctx.guild.get_member(SPECIFIC_REVIEWER_ID)
-        if spec: overwrites[spec] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        reviewer_role = ctx.guild.get_role(REVIEWER_ROLE_ID)
+        if reviewer_role:
+            overwrites[reviewer_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
         uid = info.get("创建者ID")
         user = ctx.guild.get_member(int(uid)) if uid else None

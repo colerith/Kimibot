@@ -9,7 +9,9 @@ from config import IDS, QUOTA, STYLE
 from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 
 # --- 常量 ---
-SPECIFIC_REVIEWER_ID = 1452321798308888776
+REVIEWER_ROLE_ID = 1452321798308888776
+# 兼容模块外可能仍在使用的旧名称；该 Snowflake 实际指向身份组，不是用户。
+SPECIFIC_REVIEWER_ID = REVIEWER_ROLE_ID
 TIMEOUT_HOURS_ARCHIVE = 6
 TIMEOUT_HOURS_REMIND = 3
 STRINGS_PATH = os.path.join(os.path.dirname(__file__), 'strings.json')
@@ -33,7 +35,7 @@ def build_approved_archive_dm(member, guild, ticket_id, *, automatic=False):
         else "你已完成最后确认，审核工单现已安全归档。"
     )
     embed = discord.Embed(
-        title="📦 人工审核工单已归档",
+        title="🎉 人工审核已通过｜正式成员权限已生效",
         description=(
             f"嗨，**{member.display_name}**！你在 **{guild.name}** 的人工审核流程已经全部完成。\n"
             f"{archive_note} 已获得的正式成员身份和社区权限不会受到影响。"
@@ -128,10 +130,11 @@ def build_ticket_archive_embed(
 
 
 def _is_archive_staff(interaction: discord.Interaction) -> bool:
-    if interaction.user.id == SPECIFIC_REVIEWER_ID:
+    user_role_ids = {getattr(role, "id", 0) for role in getattr(interaction.user, "roles", [])}
+    if REVIEWER_ROLE_ID in user_role_ids:
         return True
     role_id = IDS.get("SUPER_EGG_ROLE_ID", 0)
-    return any(getattr(role, "id", 0) == role_id for role in getattr(interaction.user, "roles", []))
+    return role_id in user_role_ids
 
 
 class TicketArchiveQQModal(discord.ui.Modal):
@@ -205,7 +208,8 @@ def is_reviewer_egg():
             await ctx.respond(STRINGS["messages"]["err_not_guild"], ephemeral=True)
             return False
 
-        if ctx.author.id == SPECIFIC_REVIEWER_ID:
+        reviewer_role = ctx.guild.get_role(REVIEWER_ROLE_ID)
+        if reviewer_role and reviewer_role in ctx.author.roles:
             return True
 
         super_egg_role = ctx.guild.get_role(IDS.get("SUPER_EGG_ROLE_ID", 0))

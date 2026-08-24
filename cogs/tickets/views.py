@@ -2,7 +2,7 @@ import discord
 import datetime
 from config import IDS, STYLE, QUOTA
 from .utils import (
-    STRINGS, SPECIFIC_REVIEWER_ID, get_ticket_info,
+    STRINGS, REVIEWER_ROLE_ID, get_ticket_info,
     ARCHIVE_KIND_APPROVED, ARCHIVE_KIND_REJECTED,
     execute_archive, load_quota_data, save_quota_data,
 )
@@ -225,9 +225,9 @@ class TicketActionView(discord.ui.View):
         super().__init__(timeout=None)
 
     async def interaction_check(self, interaction):
-        uid = interaction.user.id
-        # 简单鉴权：审核员ID 或 超级蛋Role
-        is_staff = (uid == SPECIFIC_REVIEWER_ID)
+        # 审核小蛋身份组或超级蛋身份组均可操作。
+        reviewer_role = interaction.guild.get_role(REVIEWER_ROLE_ID)
+        is_staff = bool(reviewer_role and reviewer_role in interaction.user.roles)
         role = interaction.guild.get_role(IDS["SUPER_EGG_ROLE_ID"])
         if role and role in interaction.user.roles: is_staff = True
 
