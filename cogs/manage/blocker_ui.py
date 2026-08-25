@@ -28,8 +28,8 @@ def build_notice_embed(
         inline=True,
     )
     embed.add_field(name="🏷️ 昵称", value=target_name, inline=True)
-    embed.add_field(name="🆔 用户 ID", value=f"`{target_id}`", inline=False)
-    embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
+    embed.add_field(name="🪪 用户 ID", value=f"`{target_id}`", inline=False)
+    embed.add_field(name="🧾 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
     embed.add_field(
         name="⚠️ 处罚原因",
         value=str(reason)[:1024],

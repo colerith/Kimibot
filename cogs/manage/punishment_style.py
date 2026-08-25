@@ -61,6 +61,7 @@ def build_dm_embed(
     target_name: str,
     target_id: int,
     punishment_id: int,
+    guidance: str | None = None,
 ) -> discord.Embed:
     embed = discord.Embed(
         title="📨 社区管理通知",
@@ -73,11 +74,13 @@ def build_dm_embed(
     )
     embed.add_field(name="👤 被处罚人", value=target_mention, inline=True)
     embed.add_field(name="🏷️ 昵称", value=target_name, inline=True)
-    embed.add_field(name="🆔 用户 ID", value=f"`{target_id}`", inline=False)
-    embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
+    embed.add_field(name="🪪 用户 ID", value=f"`{target_id}`", inline=False)
+    embed.add_field(name="🧾 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
     embed.add_field(name="📌 处理类型", value=f"**{action}**", inline=True)
     if action_detail:
         embed.add_field(name="⚖️ 处理结果", value=str(action_detail)[:1024], inline=True)
+    if guidance:
+        embed.add_field(name="🥚 本大王提醒", value=str(guidance)[:1024], inline=False)
     if notice_url:
         embed.add_field(name="🔗 处罚公示", value=f"[点击查看完整公示]({notice_url})", inline=False)
     embed.set_footer(text=DM_FOOTER)

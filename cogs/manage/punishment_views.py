@@ -736,8 +736,8 @@ class ManagementControlView(ui.View):
                 display_name = getattr(member, "display_name", None) or getattr(user_obj, "global_name", None) or user_obj.name
                 p_embed.add_field(name="👤 被处罚人", value=f"<@{tid}>", inline=True)
                 p_embed.add_field(name="🏷️ 昵称", value=display_name, inline=True)
-                p_embed.add_field(name="🆔 用户 ID", value=f"`{tid}`", inline=False)
-                p_embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
+                p_embed.add_field(name="🪪 用户 ID", value=f"`{tid}`", inline=False)
+                p_embed.add_field(name="🧾 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
                 p_embed.add_field(name="📌 累计记录", value=f"**{new_count}** 次", inline=True)
                 if act == "warn" and linked_action:
                     p_embed.add_field(name="⚙️ 自动处罚", value=linked_action, inline=True)

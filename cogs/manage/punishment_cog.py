@@ -27,6 +27,12 @@ LOG_CHANNEL_ID = IDS.get("LOG_CHANNEL_ID", 1468508677144055818)
 NEWBIE_ROLE_ID = IDS.get("VERIFICATION_ROLE_ID")
 THIRD_PARTY_REASON = "使用第三方商业化API站点提问，违反社区规范"
 THIRD_PARTY_MUTE_SECONDS = 24 * 60 * 60
+THIRD_PARTY_GUIDANCE = (
+    "社区不允许使用或推荐第三方 API、中转站、商业化软件，也不可以为相关平台宣传、"
+    "适配、引流，或擅自搬运社区作品与资源。以上行为都会按「违规使用第三方」处理。\n\n"
+    "放心，这次不是把你踢出服务器喔！请重新前往验证区完成答题；通过后仍可回来正常发言，"
+    "并继续通过官方渠道游玩交流。"
+)
 
 ACTION_LABELS = {
     "warn": "警告",
@@ -132,6 +138,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         evidences=None,
         notice_url: str | None = None,
         punishment_id: int,
+        guidance: str | None = None,
     ) -> bool:
         """Best-effort DM used by every punishment path."""
         target = guild.get_member(target_id)
@@ -157,6 +164,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             target_name=target_name,
             target_id=target_id,
             punishment_id=punishment_id,
+            guidance=guidance,
         )
 
         files = await self._evidence_files(evidences, spoiler=False)
@@ -576,8 +584,8 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         embed.clear_fields()
         embed.add_field(name="👤 被处罚人", value=f"<@{target_id}>", inline=True)
         embed.add_field(name="🏷️ 昵称", value=display_name, inline=True)
-        embed.add_field(name="🆔 用户 ID", value=f"`{target_id}`", inline=False)
-        embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
+        embed.add_field(name="🪪 用户 ID", value=f"`{target_id}`", inline=False)
+        embed.add_field(name="🧾 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
         for field in preserved_fields:
             embed.add_field(name=field.name, value=field.value, inline=field.inline)
         return embed
@@ -735,14 +743,18 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
 
         channel_notice = discord.Embed(
             title="⚡ 已执行第三方快速处罚",
-            description=f"{message.author.mention} 因违反社区规范，已由管理组执行第三方快速处罚。",
+            description=(
+                f"🚫 {message.author.mention} 已被本大王执行「第三方快速处罚」惹！\n\n"
+                "在社区使用第三方 API 或商业化软件提问违反答疑规则，需要重新完成答题验证。"
+            ),
             color=color_for_action("第三方快速处罚"),
             timestamp=discord.utils.utcnow(),
         )
         channel_notice.add_field(name="👤 被处罚人", value=message.author.mention, inline=True)
         channel_notice.add_field(name="🏷️ 昵称", value=member.display_name, inline=True)
-        channel_notice.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
+        channel_notice.add_field(name="🧾 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
         channel_notice.add_field(name="⚖️ 处罚结果", value="\n".join(action_results), inline=False)
+        channel_notice.add_field(name="🥚 本大王提醒", value=THIRD_PARTY_GUIDANCE, inline=False)
         channel_notice.set_footer(text="奇米蛋社区管理中心 · 当前频道处罚提示")
         try:
             await message.channel.send(
@@ -771,9 +783,10 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 inline=True,
             )
             public_embed.add_field(name="🏷️ 昵称", value=member.display_name, inline=True)
-            public_embed.add_field(name="🆔 用户 ID", value=f"`{target_id}`", inline=False)
-            public_embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
+            public_embed.add_field(name="🪪 用户 ID", value=f"`{target_id}`", inline=False)
+            public_embed.add_field(name="🧾 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
             public_embed.add_field(name="⚖️ 处罚结果", value="\n".join(action_results), inline=False)
+            public_embed.add_field(name="🥚 处理说明", value=THIRD_PARTY_GUIDANCE, inline=False)
             public_embed.add_field(name="🔗 原始消息", value=f"[点击跳转]({message.jump_url})", inline=False)
             if errors:
                 public_embed.add_field(name="⚠️ 执行异常", value="\n".join(errors), inline=False)
@@ -797,6 +810,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             evidences=cached_attachments,
             notice_url=public_msg.jump_url if public_msg else None,
             punishment_id=punishment_id,
+            guidance=THIRD_PARTY_GUIDANCE,
         )
 
         log_channel = await ManagementControlView._resolve_sendable_channel(guild, LOG_CHANNEL_ID)
