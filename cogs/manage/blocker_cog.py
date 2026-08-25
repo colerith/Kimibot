@@ -17,6 +17,7 @@ from .blocker_ui import (
     build_notice_embed,
 )
 from .punishment_db import db as punishment_db
+from .punishment_style import build_dm_embed
 from ..shared.utils import is_super_egg
 
 PUBLIC_NOTICE_CHANNEL_ID = IDS.get("PUBLIC_NOTICE_CHANNEL_ID")
@@ -237,6 +238,27 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
                 msg = await notice_ch.send(embed=notice_embed)
                 notice_url = msg.jump_url
             except discord.HTTPException:
+                pass
+
+        if target_user:
+            result_lines = []
+            if result.get("mute_text"):
+                result_lines.append(result["mute_text"])
+            if result.get("role_removed"):
+                result_lines.append("已撤销相关身份组")
+            if result.get("deleted_count"):
+                result_lines.append(f"已清理 {result['deleted_count']} 条相关消息")
+            result_lines.append("警告一次")
+            dm_embed = build_dm_embed(
+                guild_name=guild.name,
+                action="广告风险处置",
+                reason=reason,
+                action_detail="\n".join(result_lines),
+                notice_url=notice_url,
+            )
+            try:
+                await target_user.send(embed=dm_embed)
+            except (discord.Forbidden, discord.HTTPException):
                 pass
 
         log_ch = await self._fetch_channel(guild, LOG_CHANNEL_ID)

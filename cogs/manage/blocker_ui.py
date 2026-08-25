@@ -1,5 +1,7 @@
 import discord
 
+from .punishment_style import LOG_COLOR, NOTICE_COLOR, NOTICE_FOOTER
+
 
 def build_notice_embed(
     *,
@@ -11,12 +13,12 @@ def build_notice_embed(
     muted_text: str | None = None,
 ) -> discord.Embed:
     embed = discord.Embed(
-        title="🚨 广告风险处置通告",
+        title="🚨 社区处罚公示・广告风险处置",
         description=(
             "检测到疑似盗号或恶意广告行为，系统已完成拦截与清理。\n"
             "> 🔒 请勿点击陌生链接，也不要向他人提供账号验证码。"
         ),
-        color=0xED4245,
+        color=NOTICE_COLOR,
     )
     embed.add_field(
         name="👤 处理对象",
@@ -45,7 +47,7 @@ def build_notice_embed(
         value="\n".join(action_lines),
         inline=False,
     )
-    embed.set_footer(text="奇米蛋安全中心 · 处罚记录已归档")
+    embed.set_footer(text=NOTICE_FOOTER)
     embed.timestamp = discord.utils.utcnow()
     return embed
 
@@ -58,7 +60,7 @@ def build_log_embed(
     notice_url: str | None,
     detail_text: str | None,
 ) -> discord.Embed:
-    embed = discord.Embed(title="防盗号广告拦截日志", color=0xA0AAB0)
+    embed = discord.Embed(title="🛡️ 处罚执行记录・广告风险处置", color=LOG_COLOR)
     embed.add_field(name="执行者", value=executor_mention, inline=True)
     embed.add_field(name="目标", value=target_mention, inline=True)
     embed.add_field(name="原因", value=reason, inline=False)
@@ -84,9 +86,9 @@ def build_manage_regex_embed(*, target_mention: str, extracted_links: list[str])
         desc = "未从消息中提取到可用链接。"
 
     embed = discord.Embed(
-        title="广告正则提取记录",
+        title="🧾 风险规则提取记录",
         description=f"目标: {target_mention}\n{desc}",
-        color=0xFF9900,
+        color=LOG_COLOR,
     )
     embed.timestamp = discord.utils.utcnow()
     return embed

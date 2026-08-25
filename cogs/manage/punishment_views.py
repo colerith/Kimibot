@@ -8,6 +8,7 @@ import re
 
 from config import STYLE
 from .punishment_db import db
+from .punishment_style import LOG_COLOR, build_public_notice_embed
 from ..shared.utils import parse_duration
 
 # --- Modal 面板 (无变化) ---
@@ -497,7 +498,7 @@ class ManagementControlView(ui.View):
             act_label = action_map.get(act, act)
             color = color_map.get(act, 0x999999)
 
-            files_for_pub, missing_evidence_urls = await self._evidence_to_files(self.attachments, spoiler=True)
+            files_for_pub, missing_evidence_urls = await self._evidence_to_files(self.attachments, spoiler=False)
             files_for_log = [self._clone_discord_file(f) for f in files_for_pub]
 
             public_msg = None
@@ -508,28 +509,26 @@ class ManagementControlView(ui.View):
                 if len(success_mentions) > 20:
                     display_mentions += f"\n... 以及其余 {len(success_mentions) - 20} 人"
 
-                p_embed = discord.Embed(title=f"🚨 违规公示 | 批量{act_label}", color=color)
+                p_embed = build_public_notice_embed(action=f"批量{act_label}", reason=self.reason)
                 p_embed.add_field(
-                    name="目标数量",
+                    name="👥 目标数量",
                     value=f"成功 **{len(success)}** / 总计 **{len(target_ids)}**",
                     inline=True,
                 )
-                p_embed.add_field(name="执行人", value=interaction.user.mention, inline=True)
-                p_embed.description = f"**理由:**\n{self.reason}\n\n**目标列表:**\n{display_mentions}"
+                p_embed.add_field(name="🛡️ 执行管理", value=interaction.user.mention, inline=True)
+                p_embed.description += f"\n\n### 👥 目标列表\n{display_mentions}"
                 if act == "mute":
-                    p_embed.add_field(name="禁言时长", value=self.duration_str, inline=True)
+                    p_embed.add_field(name="⏳ 禁言时长", value=self.duration_str, inline=True)
                 if act in {"warn", "unwarn"}:
-                    p_embed.add_field(name="累计说明", value="仅警告动作影响累计次数", inline=True)
-                p_embed.set_footer(text="请大家遵守社区规范，共建良好环境。")
-                p_embed.timestamp = discord.utils.utcnow()
+                    p_embed.add_field(name="📌 累计说明", value="仅警告动作影响累计次数", inline=True)
                 public_msg = await public_chan.send(embed=p_embed, files=files_for_pub)
 
             log_chan = await self._resolve_sendable_channel(guild, self.log_channel_id)
             log_error = None
             if log_chan:
                 try:
-                    log_embed = discord.Embed(title=f"🛡️ 管理执行日志: BATCH-{act.upper()}", color=color)
-                    log_embed.description = f"**理由:** {self.reason}"
+                    log_embed = discord.Embed(title=f"🛡️ 处罚执行记录・批量{act_label}", color=LOG_COLOR)
+                    log_embed.description = f"### ⚠️ 执行原因\n> {self.reason}"
                     log_embed.add_field(name="执行人 (Executor)", value=interaction.user.mention, inline=True)
                     log_embed.add_field(
                         name="结果统计",
@@ -608,22 +607,35 @@ class ManagementControlView(ui.View):
             # --- Discord 操作 ---
             msg_act, color = "", 0x999999
             linked_action = ""
+            dm_sent = False
+            if act in {"kick", "ban"}:
+                dm_sent = await punish_cog.send_punishment_dm(
+                    guild=guild,
+                    target_id=tid,
+                    action=act,
+                    reason=self.reason,
+                    action_detail="该管理操作即将执行",
+                    evidences=self.attachments,
+                )
             if act == "warn":
                 if not member:
                     raise ValueError("用户不在服务器内，无法执行警告")
 
                 msg_act, color = "进行警告", 0xFFAA00
-                if member:
-                    try:
-                        dm_files, _ = await self._evidence_to_files(self.attachments, spoiler=True)
-                        dm_embed = discord.Embed(title=f"⚠️ {guild.name} 社区警告", description=f"**理由:** {self.reason}", color=color)
-                        if dm_files:
-                            dm_embed.set_image(url=f"attachment://{dm_files[0].filename}")
-                        await member.send(embed=dm_embed, files=dm_files)
-                    except (discord.Forbidden, IndexError):
-                        pass # 无法私信或无附件
-
                 new_count = db.add_strike(tid)
+                expected_linked_action = (
+                    "禁言 1 天" if new_count == 1
+                    else "禁言 7 天" if new_count == 2
+                    else "永久封禁"
+                )
+                dm_sent = await punish_cog.send_punishment_dm(
+                    guild=guild,
+                    target_id=tid,
+                    action=act,
+                    reason=self.reason,
+                    action_detail=f"第 {new_count} 次警告；{expected_linked_action}",
+                    evidences=self.attachments,
+                )
                 try:
                     if new_count == 1:
                         await member.timeout(
@@ -676,22 +688,32 @@ class ManagementControlView(ui.View):
             if act not in ["warn", "unwarn"]:
                 new_count = db.get_strikes(tid)
 
+            dm_detail = linked_action or None
+            if act == "mute":
+                dm_detail = f"已禁言 {self.duration_str}"
+            if act not in {"warn", "kick", "ban"}:
+                dm_sent = await punish_cog.send_punishment_dm(
+                    guild=guild,
+                    target_id=tid,
+                    action=act,
+                    reason=self.reason,
+                    action_detail=dm_detail,
+                    evidences=self.attachments,
+                )
+
             # --- 文件准备 ---
-            files_for_pub, missing_evidence_urls = await self._evidence_to_files(self.attachments, spoiler=True)
+            files_for_pub, missing_evidence_urls = await self._evidence_to_files(self.attachments, spoiler=False)
             files_for_log = [self._clone_discord_file(f) for f in files_for_pub]
 
             # --- 1. 发送公开公示 ---
             public_msg, user_obj = None, member or self.selected_user or await self.ctx.bot.fetch_user(tid)
             public_chan = await self._resolve_sendable_channel(guild, self.public_channel_id)
             if public_chan:
-                p_embed = discord.Embed(title=f"🚨 违规公示 | {msg_act}", color=color)
-                p_embed.add_field(name="违规者", value=f"<@{tid}> (`{user_obj.name}`)", inline=True)
-                p_embed.add_field(name="累计违规", value=f"**{new_count}** 次", inline=True)
+                p_embed = build_public_notice_embed(action=msg_act, reason=self.reason)
+                p_embed.add_field(name="👤 违规成员", value=f"<@{tid}> (`{user_obj.name}`)", inline=True)
+                p_embed.add_field(name="📌 累计记录", value=f"**{new_count}** 次", inline=True)
                 if act == "warn" and linked_action:
-                    p_embed.add_field(name="自动处罚", value=linked_action, inline=True)
-                p_embed.description = f"**理由:**\n{self.reason}"
-                p_embed.set_footer(text="请大家遵守社区规范，共建良好环境。")
-                p_embed.timestamp = discord.utils.utcnow()
+                    p_embed.add_field(name="⚙️ 自动处罚", value=linked_action, inline=True)
                 if user_obj.display_avatar:
                     p_embed.set_thumbnail(url=user_obj.display_avatar.url)
                 public_msg = await public_chan.send(embed=p_embed, files=files_for_pub)
@@ -701,8 +723,8 @@ class ManagementControlView(ui.View):
             log_error = None
             if log_chan:
                 try:
-                    log_embed = discord.Embed(title=f"🛡️ 管理执行日志: {act.upper()}", color=color)
-                    log_embed.description = f"**理由:** {self.reason}"
+                    log_embed = discord.Embed(title=f"🛡️ 处罚执行记录・{msg_act}", color=LOG_COLOR)
+                    log_embed.description = f"### ⚠️ 执行原因\n> {self.reason}"
                     log_embed.add_field(name="执行人 (Executor)", value=interaction.user.mention, inline=True)
                     log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
                     if act == "mute":
@@ -731,7 +753,8 @@ class ManagementControlView(ui.View):
             if log_error:
                 await interaction.followup.send(f"✅ 执行成功，但日志发送失败：{log_error}", ephemeral=True)
             else:
-                await interaction.followup.send("✅ 执行成功！已发送公示与日志。", ephemeral=True)
+                dm_note = "私信提醒已发送" if dm_sent else "私信提醒发送失败/对方已关闭私信"
+                await interaction.followup.send(f"✅ 执行成功！已发送公示与日志；{dm_note}。", ephemeral=True)
             self.clear_items()
             original_msg = await interaction.original_response()
             fin_embed = original_msg.embeds[0]
