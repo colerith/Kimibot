@@ -105,6 +105,7 @@ _MONTHLY_CARD_USER_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 # Fold a burst of successful sign-ins into one public-panel edit per guild.
 _ROLE_PANEL_REFRESH_TASKS: dict[int, asyncio.Task] = {}
 _ROLE_PANEL_REFRESH_DIRTY: set[int] = set()
+_ROLE_PANEL_FALLBACK_MESSAGES: dict[int, discord.Message] = {}
 
 
 def _preview_lines(lines: list[str], limit: int = EMBED_FIELD_VALUE_LIMIT) -> str:
@@ -2331,19 +2332,42 @@ async def refresh_role_panel(guild: discord.Guild, user_avatar_url: str | None =
     if not channel_id or not message_id:
         return False
 
-    channel = guild.get_channel(int(channel_id))
+    channel = guild.get_thread(int(channel_id)) or guild.get_channel(int(channel_id))
     if not channel:
-        return False
+        try:
+            channel = await guild.fetch_channel(int(channel_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return False
 
     try:
         message = await channel.fetch_message(int(message_id))
+        return await refresh_role_panel_message(
+            message,
+            guild,
+            user_avatar_url,
+            signin_summary,
+        )
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return False
+
+
+async def refresh_role_panel_message(
+    message: discord.Message,
+    guild: discord.Guild,
+    user_avatar_url: str | None = None,
+    signin_summary: dict | None = None,
+) -> bool:
+    """Refresh a concrete panel message without relying on saved panel IDs."""
+    if signin_summary is None:
+        signin_summary = await asyncio.to_thread(get_daily_signin_summary, guild.id)
+    try:
         await message.edit(
             embed=build_role_panel_embed(guild, user_avatar_url, signin_summary),
             view=RoleClaimView(),
             allowed_mentions=discord.AllowedMentions.none(),
         )
         return True
-    except (discord.NotFound, discord.Forbidden):
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         return False
 
 
@@ -2353,7 +2377,22 @@ async def _delayed_role_panel_refresh(guild: discord.Guild, user_avatar_url: str
         await asyncio.sleep(1.5)
         while True:
             _ROLE_PANEL_REFRESH_DIRTY.discard(guild.id)
-            await refresh_role_panel(guild, user_avatar_url)
+            refreshed = await refresh_role_panel(guild, user_avatar_url)
+            fallback_message = _ROLE_PANEL_FALLBACK_MESSAGES.get(guild.id)
+            if fallback_message:
+                role_data = await asyncio.to_thread(load_role_data)
+                saved_message_id = int(
+                    (role_data.get("panel_info", {}) or {}).get("message_id") or 0
+                )
+                if not refreshed or fallback_message.id != saved_message_id:
+                    fallback_refreshed = await refresh_role_panel_message(
+                        fallback_message,
+                        guild,
+                        user_avatar_url,
+                    )
+                    refreshed = refreshed or fallback_refreshed
+            if not refreshed:
+                print(f"[小蛋报到] 未找到可刷新的公开面板: guild={guild.id}")
             if guild.id not in _ROLE_PANEL_REFRESH_DIRTY:
                 break
             # A sign-in landed while the snapshot was being fetched/edited.
@@ -2364,9 +2403,16 @@ async def _delayed_role_panel_refresh(guild: discord.Guild, user_avatar_url: str
     finally:
         _ROLE_PANEL_REFRESH_TASKS.pop(guild.id, None)
         _ROLE_PANEL_REFRESH_DIRTY.discard(guild.id)
+        _ROLE_PANEL_FALLBACK_MESSAGES.pop(guild.id, None)
 
 
-def schedule_role_panel_refresh(guild: discord.Guild, user_avatar_url: str | None = None) -> None:
+def schedule_role_panel_refresh(
+    guild: discord.Guild,
+    user_avatar_url: str | None = None,
+    fallback_message: discord.Message | None = None,
+) -> None:
+    if fallback_message is not None:
+        _ROLE_PANEL_FALLBACK_MESSAGES[guild.id] = fallback_message
     current = _ROLE_PANEL_REFRESH_TASKS.get(guild.id)
     if current and not current.done():
         _ROLE_PANEL_REFRESH_DIRTY.add(guild.id)
@@ -2657,6 +2703,7 @@ class RoleClaimView(discord.ui.View):
             schedule_role_panel_refresh(
                 interaction.guild,
                 interaction.client.user.display_avatar.url if interaction.client.user else None,
+                interaction.message,
             )
 
     @discord.ui.button(label="每日任务", style=discord.ButtonStyle.secondary, emoji="📒", custom_id="role_main_daily_tasks", row=0)

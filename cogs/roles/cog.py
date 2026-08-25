@@ -46,9 +46,26 @@ class RolesCog(commands.Cog):
         if not self.ownership_scanner_started:
             self.ownership_scanner_started = True
             self.cached_ownership_reconcile.start()
+        if not self.role_panel_periodic_refresh.is_running():
+            self.role_panel_periodic_refresh.start()
 
     def cog_unload(self):
         self.cached_ownership_reconcile.cancel()
+        self.role_panel_periodic_refresh.cancel()
+
+    @tasks.loop(minutes=5)
+    async def role_panel_periodic_refresh(self):
+        """Repair stale check-in counts after transient Discord/cache failures."""
+        avatar_url = self.bot.user.display_avatar.url if self.bot.user else None
+        for guild in self.bot.guilds:
+            try:
+                await refresh_role_panel(guild, avatar_url)
+            except Exception as error:
+                print(f"[Roles] periodic role panel refresh failed: guild={guild.id} error={error!r}")
+
+    @role_panel_periodic_refresh.before_loop
+    async def before_role_panel_periodic_refresh(self):
+        await self.bot.wait_until_ready()
 
     @tasks.loop(hours=6)
     async def cached_ownership_reconcile(self):
