@@ -3,6 +3,7 @@
 import datetime
 import asyncio
 import io
+import re
 
 import discord
 from discord.ext import commands
@@ -11,9 +12,11 @@ from config import IDS, STYLE
 from .punishment_db import db
 from .punishment_style import (
     LOG_COLOR,
+    action_from_notice_title,
     beautify_historical_notice,
     build_dm_embed,
     build_public_notice_embed,
+    color_for_action,
     is_public_punishment_embed,
 )
 from .punishment_views import ManagementControlView
@@ -436,6 +439,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 for embed in message.embeds:
                     if is_public_punishment_embed(embed):
                         styled = beautify_historical_notice(embed)
+                        styled = await self._enrich_historical_notice(styled, message)
                         styled_embeds.append(styled)
                         changed = changed or styled.to_dict() != embed.to_dict()
                     else:
@@ -454,6 +458,129 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             f"[Punishment] notice-style-refresh-complete: scanned={scanned} "
             f"updated={updated} failed={failed}"
         )
+
+    @staticmethod
+    def _plain_field_name(name: str) -> str:
+        return re.sub(r"^[^\w\u4e00-\u9fff]+\s*", "", name or "").strip()
+
+    @classmethod
+    def _extract_notice_target_id(cls, embed: discord.Embed) -> int | None:
+        identity_markers = ("目标", "处理对象", "违规者", "违规成员", "被处罚人", "用户 ID")
+        identity_values = [
+            field.value
+            for field in embed.fields
+            if any(marker in cls._plain_field_name(field.name) for marker in identity_markers)
+        ]
+        for value in identity_values:
+            match = re.search(r"<@!?(\d{15,20})>|`?(\d{15,20})`?", str(value))
+            if match:
+                return int(match.group(1) or match.group(2))
+        return None
+
+    @classmethod
+    def _extract_notice_reason(cls, embed: discord.Embed) -> str:
+        for field in embed.fields:
+            name = cls._plain_field_name(field.name)
+            if "原因" in name or "理由" in name:
+                return str(field.value).strip()[:1000] or "历史处罚记录"
+        description = embed.description or ""
+        match = re.search(
+            r"(?:处罚原因|违规原因|处理原因|理由)\*{0,2}[:：]?\s*\n?(?:>\s*)?(.+?)(?:\n\n|\n###|$)",
+            description,
+            re.S,
+        )
+        if match:
+            return re.sub(r"^>\s?", "", match.group(1).strip(), flags=re.M)[:1000]
+        return "历史处罚记录"
+
+    @classmethod
+    def _extract_notice_name(cls, embed: discord.Embed) -> str | None:
+        for field in embed.fields:
+            name = cls._plain_field_name(field.name)
+            if name == "昵称":
+                return str(field.value).strip(" *`") or None
+            if any(marker in name for marker in ("目标", "处理对象", "违规", "被处罚")):
+                candidates = re.findall(r"\(([^()]{1,64})\)", str(field.value))
+                for candidate in reversed(candidates):
+                    if not candidate.isdigit():
+                        return candidate.strip(" *`")
+        title = embed.title or ""
+        if "已被广告拦截" in title:
+            return title.split("-", 1)[0].strip() or None
+        return None
+
+    async def _enrich_historical_notice(
+        self,
+        embed: discord.Embed,
+        message: discord.Message,
+    ) -> discord.Embed:
+        action = action_from_notice_title(embed.title)
+        if "批量" in action:
+            return embed
+
+        target_id = self._extract_notice_target_id(embed)
+        if not target_id:
+            return embed
+
+        punishment_id = None
+        for field in embed.fields:
+            if "处罚编号" not in self._plain_field_name(field.name):
+                continue
+            match = re.search(r"#?(\d+)", str(field.value))
+            if match:
+                punishment_id = int(match.group(1))
+                break
+        if punishment_id is None:
+            punishment_id = db.get_or_create_message_punishment_record(
+                source_message_id=message.id,
+                user_id=target_id,
+                action=action,
+                reason=self._extract_notice_reason(embed),
+            )
+
+        display_name = self._extract_notice_name(embed) or "未知昵称"
+        guild = getattr(message.channel, "guild", None)
+        target = guild.get_member(target_id) if guild else None
+        if target is None and guild:
+            try:
+                target = await guild.fetch_member(target_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                target = None
+        if target is None:
+            try:
+                target = await self.bot.fetch_user(target_id)
+            except (discord.NotFound, discord.HTTPException):
+                target = None
+        if target:
+            display_name = (
+                getattr(target, "display_name", None)
+                or getattr(target, "global_name", None)
+                or target.name
+            )
+
+        identity_names = {
+            "目标",
+            "处理对象",
+            "违规者",
+            "违规成员",
+            "被处罚人",
+            "昵称",
+            "用户 ID",
+            "处罚编号",
+        }
+        preserved_fields = [
+            field
+            for field in embed.fields
+            if self._plain_field_name(field.name) not in identity_names
+        ]
+        embed.clear_fields()
+        embed.add_field(name="👤 被处罚人", value=f"<@{target_id}>", inline=True)
+        embed.add_field(name="🏷️ 昵称", value=display_name, inline=True)
+        embed.add_field(name="🆔 用户 ID", value=f"`{target_id}`", inline=False)
+        embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
+        for field in preserved_fields:
+            embed.add_field(name=field.name, value=field.value, inline=field.inline)
+        return embed
 
     def cog_unload(self):
         for session in self.evidence_sessions.values():
@@ -600,6 +727,32 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         strike_count = db.add_strike(target_id)
         punishment_id = db.add_punishment_record(target_id, "third_party_quick", reason)
         action_results.append(f"警告一次（当前累计 {strike_count} 次）")
+
+        try:
+            await message.add_reaction("🚫")
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+            errors.append(f"原消息反应添加失败：{error}")
+
+        channel_notice = discord.Embed(
+            title="⚡ 已执行第三方快速处罚",
+            description=f"{message.author.mention} 因违反社区规范，已由管理组执行第三方快速处罚。",
+            color=color_for_action("第三方快速处罚"),
+            timestamp=discord.utils.utcnow(),
+        )
+        channel_notice.add_field(name="👤 被处罚人", value=message.author.mention, inline=True)
+        channel_notice.add_field(name="🏷️ 昵称", value=member.display_name, inline=True)
+        channel_notice.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
+        channel_notice.add_field(name="⚖️ 处罚结果", value="\n".join(action_results), inline=False)
+        channel_notice.set_footer(text="奇米蛋社区管理中心 · 当前频道处罚提示")
+        try:
+            await message.channel.send(
+                embed=channel_notice,
+                reference=message,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+            errors.append(f"当前频道通知发送失败：{error}")
 
         public_msg = None
         public_channel = await ManagementControlView._resolve_sendable_channel(

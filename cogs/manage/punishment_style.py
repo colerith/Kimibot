@@ -88,22 +88,30 @@ def is_public_punishment_embed(embed: discord.Embed) -> bool:
     title = embed.title or ""
     return any(
         marker in title
-        for marker in ("违规公示", "处罚公示", "广告风险处置通告", "社区处罚公示")
+        for marker in (
+            "违规公示",
+            "处罚公示",
+            "广告风险处置通告",
+            "社区处罚公示",
+            "已被广告拦截",
+        )
     )
+
+
+def action_from_notice_title(title: str | None) -> str:
+    old_title = title or "处罚记录"
+    if "广告风险处置" in old_title or "已被广告拦截" in old_title:
+        return "广告风险处置"
+    if "・" in old_title:
+        return old_title.rsplit("・", 1)[-1].strip()
+    if "|" in old_title:
+        return old_title.rsplit("|", 1)[-1].strip()
+    return re.sub(r"^[^\w\u4e00-\u9fff]+", "", old_title).strip() or "处罚记录"
 
 
 def beautify_historical_notice(embed: discord.Embed) -> discord.Embed:
     styled = discord.Embed.from_dict(embed.to_dict())
-    old_title = styled.title or "处罚记录"
-
-    if "广告风险处置" in old_title:
-        action = "广告风险处置"
-    elif "・" in old_title:
-        action = old_title.rsplit("・", 1)[-1].strip()
-    elif "|" in old_title:
-        action = old_title.rsplit("|", 1)[-1].strip()
-    else:
-        action = re.sub(r"^[^\w\u4e00-\u9fff]+", "", old_title).strip() or "处罚记录"
+    action = action_from_notice_title(styled.title)
 
     styled.title = f"🚨 社区处罚公示・{action}"
     styled.color = discord.Color(color_for_action(action))

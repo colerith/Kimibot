@@ -40,8 +40,21 @@ class PunishmentDB:
                 user_id INTEGER NOT NULL,
                 action TEXT NOT NULL,
                 reason TEXT NOT NULL,
-                created_at TIMESTAMP NOT NULL
+                created_at TIMESTAMP NOT NULL,
+                source_message_id INTEGER
             )
+        """)
+        columns = {
+            row[1] for row in self.cursor.execute("PRAGMA table_info(punishment_records)").fetchall()
+        }
+        if "source_message_id" not in columns:
+            self.cursor.execute(
+                "ALTER TABLE punishment_records ADD COLUMN source_message_id INTEGER"
+            )
+        self.cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_punishment_records_source_message
+            ON punishment_records(source_message_id)
+            WHERE source_message_id IS NOT NULL
         """)
         self.conn.commit()
 
@@ -52,6 +65,33 @@ class PunishmentDB:
             VALUES (?, ?, ?, ?)
             """,
             (user_id, action, reason, datetime.datetime.now()),
+        )
+        self.conn.commit()
+        return int(self.cursor.lastrowid)
+
+    def get_or_create_message_punishment_record(
+        self,
+        *,
+        source_message_id: int,
+        user_id: int,
+        action: str,
+        reason: str,
+    ) -> int:
+        self.cursor.execute(
+            "SELECT id FROM punishment_records WHERE source_message_id = ?",
+            (source_message_id,),
+        )
+        row = self.cursor.fetchone()
+        if row:
+            return int(row[0])
+
+        self.cursor.execute(
+            """
+            INSERT INTO punishment_records
+                (user_id, action, reason, created_at, source_message_id)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, action, reason, datetime.datetime.now(), source_message_id),
         )
         self.conn.commit()
         return int(self.cursor.lastrowid)
