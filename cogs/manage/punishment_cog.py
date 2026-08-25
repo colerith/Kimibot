@@ -534,7 +534,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         )
         await view.refresh_view(ctx.interaction)
 
-    @discord.message_command(name="第三方快速处罚")
+    @discord.message_command(name="⚡第三方快速处罚")
     @is_super_egg()
     async def third_party_quick_punishment(
         self,
