@@ -1,6 +1,6 @@
 import discord
 
-from .punishment_style import LOG_COLOR, NOTICE_COLOR, NOTICE_FOOTER
+from .punishment_style import LOG_COLOR, NOTICE_FOOTER, color_for_action
 
 
 def build_notice_embed(
@@ -11,6 +11,8 @@ def build_notice_embed(
     deleted_count: int,
     role_removed: bool = True,
     muted_text: str | None = None,
+    target_id: int,
+    punishment_id: int,
 ) -> discord.Embed:
     embed = discord.Embed(
         title="🚨 社区处罚公示・广告风险处置",
@@ -18,13 +20,16 @@ def build_notice_embed(
             "检测到疑似盗号或恶意广告行为，系统已完成拦截与清理。\n"
             "> 🔒 请勿点击陌生链接，也不要向他人提供账号验证码。"
         ),
-        color=NOTICE_COLOR,
+        color=color_for_action("广告风险处置"),
     )
     embed.add_field(
         name="👤 处理对象",
-        value=f"**{target_name}**\n{target_mention}",
+        value=target_mention,
         inline=True,
     )
+    embed.add_field(name="🏷️ 昵称", value=target_name, inline=True)
+    embed.add_field(name="🆔 用户 ID", value=f"`{target_id}`", inline=False)
+    embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
     embed.add_field(
         name="⚠️ 处罚原因",
         value=str(reason)[:1024],
@@ -59,10 +64,16 @@ def build_log_embed(
     target_mention: str,
     notice_url: str | None,
     detail_text: str | None,
+    target_name: str,
+    target_id: int,
+    punishment_id: int,
 ) -> discord.Embed:
     embed = discord.Embed(title="🛡️ 处罚执行记录・广告风险处置", color=LOG_COLOR)
     embed.add_field(name="执行者", value=executor_mention, inline=True)
     embed.add_field(name="目标", value=target_mention, inline=True)
+    embed.add_field(name="昵称", value=target_name, inline=True)
+    embed.add_field(name="用户 ID", value=f"`{target_id}`", inline=False)
+    embed.add_field(name="处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
     embed.add_field(name="原因", value=reason, inline=False)
 
     if detail_text:

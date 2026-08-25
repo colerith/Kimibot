@@ -128,6 +128,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         action_detail: str | None = None,
         evidences=None,
         notice_url: str | None = None,
+        punishment_id: int,
     ) -> bool:
         """Best-effort DM used by every punishment path."""
         target = guild.get_member(target_id)
@@ -138,12 +139,21 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 return False
 
         label = ACTION_LABELS.get(action, action)
+        target_name = (
+            getattr(target, "display_name", None)
+            or getattr(target, "global_name", None)
+            or target.name
+        )
         embed = build_dm_embed(
             guild_name=guild.name,
             action=label,
             reason=reason,
             action_detail=action_detail,
             notice_url=notice_url,
+            target_mention=target.mention,
+            target_name=target_name,
+            target_id=target_id,
+            punishment_id=punishment_id,
         )
 
         files = await self._evidence_files(evidences, spoiler=False)
@@ -259,6 +269,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         except discord.NotFound:
             member = None
 
+        punishment_id = db.add_punishment_record(target_id, action, reason)
         try:
             linked_action = ""
             dm_sent_before_action = False
@@ -269,6 +280,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                     action=action,
                     reason=reason,
                     action_detail="该管理操作即将执行",
+                    punishment_id=punishment_id,
                 )
 
             if action == "warn":
@@ -288,6 +300,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                     action=action,
                     reason=reason,
                     action_detail=f"第 {strike} 次警告；{expected_linked_action}",
+                    punishment_id=punishment_id,
                 )
                 try:
                     if strike == 1:
@@ -314,6 +327,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                     "member": member,
                     "strike": strike,
                     "linked_action": linked_action,
+                    "punishment_id": punishment_id,
                 }
                 return result
 
@@ -362,6 +376,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                     action=action,
                     reason=reason,
                     action_detail=action_detail,
+                    punishment_id=punishment_id,
                 )
 
             return {
@@ -370,6 +385,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
                 "member": member,
                 "strike": strike,
                 "linked_action": linked_action,
+                "punishment_id": punishment_id,
             }
 
         except (discord.Forbidden, discord.HTTPException, ValueError) as e:
@@ -582,6 +598,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             errors.append("未配置新兵蛋子身份组")
 
         strike_count = db.add_strike(target_id)
+        punishment_id = db.add_punishment_record(target_id, "third_party_quick", reason)
         action_results.append(f"警告一次（当前累计 {strike_count} 次）")
 
         public_msg = None
@@ -597,9 +614,12 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             public_embed.description += f"\n\n### 💬 违规消息原文\n{original_text}"
             public_embed.add_field(
                 name="👤 违规成员",
-                value=f"{message.author.mention} (`{target_id}`)",
+                value=message.author.mention,
                 inline=True,
             )
+            public_embed.add_field(name="🏷️ 昵称", value=member.display_name, inline=True)
+            public_embed.add_field(name="🆔 用户 ID", value=f"`{target_id}`", inline=False)
+            public_embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
             public_embed.add_field(name="⚖️ 处罚结果", value="\n".join(action_results), inline=False)
             public_embed.add_field(name="🔗 原始消息", value=f"[点击跳转]({message.jump_url})", inline=False)
             if errors:
@@ -623,6 +643,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             action_detail="禁言一天 + 撤掉新兵蛋子身份组 + 警告一次",
             evidences=cached_attachments,
             notice_url=public_msg.jump_url if public_msg else None,
+            punishment_id=punishment_id,
         )
 
         log_channel = await ManagementControlView._resolve_sendable_channel(guild, LOG_CHANNEL_ID)
@@ -635,6 +656,9 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             )
             log_embed.add_field(name="执行人", value=ctx.user.mention, inline=True)
             log_embed.add_field(name="目标", value=message.author.mention, inline=True)
+            log_embed.add_field(name="昵称", value=member.display_name, inline=True)
+            log_embed.add_field(name="用户 ID", value=f"`{target_id}`", inline=False)
+            log_embed.add_field(name="处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
             log_embed.add_field(name="原始消息", value=f"[点击跳转]({message.jump_url})", inline=False)
             log_embed.add_field(name="执行结果", value="\n".join(action_results), inline=False)
             log_embed.add_field(name="私信通知", value="已发送" if dm_sent else "发送失败/私信关闭", inline=True)

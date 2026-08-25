@@ -34,7 +34,27 @@ class PunishmentDB:
                 last_hit TIMESTAMP
             )
         """)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS punishment_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL
+            )
+        """)
         self.conn.commit()
+
+    def add_punishment_record(self, user_id: int, action: str, reason: str) -> int:
+        self.cursor.execute(
+            """
+            INSERT INTO punishment_records (user_id, action, reason, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, action, reason, datetime.datetime.now()),
+        )
+        self.conn.commit()
+        return int(self.cursor.lastrowid)
 
     def add_strike(self, user_id: int):
         self.cursor.execute("""

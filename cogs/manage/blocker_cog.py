@@ -82,6 +82,11 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
 
             if result["role_removed"] or result["deleted_count"] > 0 or result.get("muted"):
                 punishment_db.add_strike(user_id)
+                result["punishment_id"] = punishment_db.add_punishment_record(
+                    user_id,
+                    "ad_risk",
+                    reason,
+                )
                 await self._send_notifications(
                     guild=guild,
                     user_id=user_id,
@@ -234,6 +239,8 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
                     deleted_count=result["deleted_count"],
                     role_removed=bool(result.get("role_removed")),
                     muted_text=result.get("mute_text") or None,
+                    target_id=user_id,
+                    punishment_id=result["punishment_id"],
                 )
                 msg = await notice_ch.send(embed=notice_embed)
                 notice_url = msg.jump_url
@@ -255,6 +262,10 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
                 reason=reason,
                 action_detail="\n".join(result_lines),
                 notice_url=notice_url,
+                target_mention=target_mention,
+                target_name=target_name,
+                target_id=user_id,
+                punishment_id=result["punishment_id"],
             )
             try:
                 await target_user.send(embed=dm_embed)
@@ -270,6 +281,9 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
                     target_mention=target_mention,
                     notice_url=notice_url,
                     detail_text=detail_text,
+                    target_name=target_name,
+                    target_id=user_id,
+                    punishment_id=result["punishment_id"],
                 )
                 await log_ch.send(
                     embed=log_embed,

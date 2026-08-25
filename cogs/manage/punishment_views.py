@@ -504,10 +504,25 @@ class ManagementControlView(ui.View):
             public_msg = None
             public_chan = await self._resolve_sendable_channel(guild, self.public_channel_id)
             if public_chan and success:
-                success_mentions = [f"<@{item['target_id']}>" for item in success]
-                display_mentions = "\n".join(success_mentions[:20])
-                if len(success_mentions) > 20:
-                    display_mentions += f"\n... 以及其余 {len(success_mentions) - 20} 人"
+                target_lines = []
+                for item in success:
+                    target_member = item.get("member")
+                    target_name = (
+                        getattr(target_member, "display_name", None)
+                        or getattr(target_member, "global_name", None)
+                        or getattr(target_member, "name", None)
+                        or "未知昵称"
+                    )
+                    target_mention = target_member.mention if target_member else f"<@{item['target_id']}>"
+                    target_lines.append(
+                        f"{target_mention}\n"
+                        f"> 昵称：**{target_name}**\n"
+                        f"> 用户 ID：`{item['target_id']}`\n"
+                        f"> 处罚编号：`#{item['punishment_id']:06d}`"
+                    )
+                display_mentions = "\n\n".join(target_lines[:20])
+                if len(target_lines) > 20:
+                    display_mentions += f"\n... 以及其余 {len(target_lines) - 20} 人"
 
                 p_embed = build_public_notice_embed(action=f"批量{act_label}", reason=self.reason)
                 p_embed.add_field(
@@ -551,7 +566,11 @@ class ManagementControlView(ui.View):
                             inline=False,
                         )
 
-                    success_list = [f"<@{item['target_id']}>" for item in success]
+                    success_list = [
+                        f"<@{item['target_id']}> · ID `{item['target_id']}` · "
+                        f"编号 `#{item['punishment_id']:06d}`"
+                        for item in success
+                    ]
                     failed_list = [f"`{item['target_id']}`: {item['error']}" for item in failed]
 
                     if success_list:
@@ -603,6 +622,7 @@ class ManagementControlView(ui.View):
         except discord.NotFound:
             pass
 
+        punishment_id = db.add_punishment_record(tid, act, self.reason)
         try:
             # --- Discord 操作 ---
             msg_act, color = "", 0x999999
@@ -616,6 +636,7 @@ class ManagementControlView(ui.View):
                     reason=self.reason,
                     action_detail="该管理操作即将执行",
                     evidences=self.attachments,
+                    punishment_id=punishment_id,
                 )
             if act == "warn":
                 if not member:
@@ -635,6 +656,7 @@ class ManagementControlView(ui.View):
                     reason=self.reason,
                     action_detail=f"第 {new_count} 次警告；{expected_linked_action}",
                     evidences=self.attachments,
+                    punishment_id=punishment_id,
                 )
                 try:
                     if new_count == 1:
@@ -699,6 +721,7 @@ class ManagementControlView(ui.View):
                     reason=self.reason,
                     action_detail=dm_detail,
                     evidences=self.attachments,
+                    punishment_id=punishment_id,
                 )
 
             # --- 文件准备 ---
@@ -710,7 +733,11 @@ class ManagementControlView(ui.View):
             public_chan = await self._resolve_sendable_channel(guild, self.public_channel_id)
             if public_chan:
                 p_embed = build_public_notice_embed(action=msg_act, reason=self.reason)
-                p_embed.add_field(name="👤 违规成员", value=f"<@{tid}> (`{user_obj.name}`)", inline=True)
+                display_name = getattr(member, "display_name", None) or getattr(user_obj, "global_name", None) or user_obj.name
+                p_embed.add_field(name="👤 被处罚人", value=f"<@{tid}>", inline=True)
+                p_embed.add_field(name="🏷️ 昵称", value=display_name, inline=True)
+                p_embed.add_field(name="🆔 用户 ID", value=f"`{tid}`", inline=False)
+                p_embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
                 p_embed.add_field(name="📌 累计记录", value=f"**{new_count}** 次", inline=True)
                 if act == "warn" and linked_action:
                     p_embed.add_field(name="⚙️ 自动处罚", value=linked_action, inline=True)
@@ -727,6 +754,7 @@ class ManagementControlView(ui.View):
                     log_embed.description = f"### ⚠️ 执行原因\n> {self.reason}"
                     log_embed.add_field(name="执行人 (Executor)", value=interaction.user.mention, inline=True)
                     log_embed.add_field(name="目标 (Target)", value=user_obj.mention, inline=True)
+                    log_embed.add_field(name="处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
                     if act == "mute":
                         log_embed.add_field(name="时长", value=self.duration_str, inline=True)
                     if act in {"warn", "unwarn"} and linked_action:

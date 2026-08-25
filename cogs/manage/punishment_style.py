@@ -6,6 +6,11 @@ import discord
 NOTICE_COLOR = 0xE85D68
 WARNING_COLOR = 0xF0A24A
 RELIEF_COLOR = 0x57A773
+MUTE_COLOR = 0xE76F51
+KICK_COLOR = 0xD97706
+BAN_COLOR = 0x8B1E3F
+THIRD_PARTY_COLOR = 0x7C5CE7
+AD_RISK_COLOR = 0xC0396B
 LOG_COLOR = 0x586A8C
 NOTICE_FOOTER = "奇米蛋社区管理中心 · 处罚记录已归档"
 DM_FOOTER = "如有异议，请通过社区工单联系管理组"
@@ -21,6 +26,16 @@ def color_for_action(action: str) -> int:
         return RELIEF_COLOR
     if "警告" in text or "warn" in text:
         return WARNING_COLOR
+    if "第三方" in text or "third" in text:
+        return THIRD_PARTY_COLOR
+    if "广告" in text or "风险" in text:
+        return AD_RISK_COLOR
+    if "封禁" in text or "ban" in text:
+        return BAN_COLOR
+    if "踢出" in text or "kick" in text:
+        return KICK_COLOR
+    if "禁言" in text or "mute" in text:
+        return MUTE_COLOR
     return NOTICE_COLOR
 
 
@@ -42,6 +57,10 @@ def build_dm_embed(
     reason: str,
     action_detail: str | None = None,
     notice_url: str | None = None,
+    target_mention: str,
+    target_name: str,
+    target_id: int,
+    punishment_id: int,
 ) -> discord.Embed:
     embed = discord.Embed(
         title="📨 社区管理通知",
@@ -52,6 +71,10 @@ def build_dm_embed(
         color=color_for_action(action),
         timestamp=discord.utils.utcnow(),
     )
+    embed.add_field(name="👤 被处罚人", value=target_mention, inline=True)
+    embed.add_field(name="🏷️ 昵称", value=target_name, inline=True)
+    embed.add_field(name="🆔 用户 ID", value=f"`{target_id}`", inline=False)
+    embed.add_field(name="📁 处罚编号", value=f"`#{punishment_id:06d}`", inline=True)
     embed.add_field(name="📌 处理类型", value=f"**{action}**", inline=True)
     if action_detail:
         embed.add_field(name="⚖️ 处理结果", value=str(action_detail)[:1024], inline=True)
