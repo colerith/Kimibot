@@ -24,6 +24,7 @@ from .storage import (
     list_submissions,
     list_user_submissions,
     mark_deleted,
+    parse_manual_reply_reward,
     random_reward,
     save_submission,
     set_panel_info,
@@ -31,6 +32,7 @@ from .storage import (
     submission_notifications_enabled,
     toggle_useful,
     update_submission_fields,
+    validate_submission_content,
 )
 
 
@@ -346,7 +348,7 @@ async def _notify_submission_event(
 ) -> bool:
     if not submission_notifications_enabled(record):
         return False
-    if actor and str(getattr(actor, "id", "")) == str(record.get("author_id")):
+    if event != "owner_reply" and actor and str(getattr(actor, "id", "")) == str(record.get("author_id")):
         return False
 
     event_config = {
@@ -577,6 +579,7 @@ class SubmissionModal(ui.DesignerModal):
                 "repo_type": repo_type,
                 "content": self.content_input.value.strip(),
             }
+
         elif self.kind == KIND_BUG:
             fields = {
                 "target": self.subject_input.value.strip(),
@@ -591,6 +594,17 @@ class SubmissionModal(ui.DesignerModal):
                 "domain": domain,
                 "content": self.content_input.value.strip(),
             }
+
+        quality = validate_submission_content(fields.get("content", ""))
+        if not quality["valid"]:
+            if quality["reason"] == "too_short":
+                notice = (
+                    f"📝 投稿正文至少需要 **{quality['minimum']}** 个有效文字，"
+                    f"目前只有 **{quality['length']}** 个。"
+                )
+            else:
+                notice = "🚫 投稿正文包含明显的重复灌水内容，请写清楚具体信息后再提交。"
+            return await interaction.response.send_message(notice, ephemeral=True)
 
         if self.record and str(self.record.get("author_id")) != str(interaction.user.id):
             return await interaction.response.send_message("只能修改自己的投稿。", ephemeral=True)
@@ -631,39 +645,60 @@ class OwnerReplyModal(discord.ui.Modal):
         self.record = record
         super().__init__(title=f"回复 {_kind_label(record.get('kind', ''))}投稿")
         self.add_item(_text_input("回复内容", style=_paragraph_style(), max_length=1500, required=True))
+        self.add_item(_text_input("手动追加蛋壳（可选）", max_length=8, required=False))
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         record = get_submission(self.record["id"])
         if not record:
             return await interaction.followup.send("投稿记录不存在。", ephemeral=True)
-        base_reward = random_reward(record.get("kind", KIND_REPO), "reply")
-        record = add_owner_reply(record["id"], interaction.user.id, interaction.user.display_name, self.children[0].value.strip(), base_reward)
+        try:
+            manual_reward = parse_manual_reply_reward(self.children[1].value)
+        except ValueError as error:
+            return await interaction.followup.send(f"❌ {error}", ephemeral=True)
+        base_reward = manual_reward if manual_reward is not None else random_reward(record.get("kind", KIND_REPO), "reply")
+        reply_content = self.children[0].value.strip()
+        record = add_owner_reply(record["id"], interaction.user.id, interaction.user.display_name, reply_content, base_reward)
         if not record:
             return await interaction.followup.send("投稿已删除，不能回复。", ephemeral=True)
-        reward_result = grant_monthly_eligible_reward(
-            int(record["author_id"]),
-            interaction.guild_id,
-            base_reward,
-            source=f"submission_reply_{record.get('kind')}",
-            reason=f"submission_id={record['id']}",
-        )
-        reward = float(reward_result["amount"])
-        monthly_bonus = float(reward_result.get("monthly_bonus", 0) or 0)
-        if monthly_bonus > 0:
+        if manual_reward is not None:
+            modify_user_points(
+                int(record["author_id"]),
+                manual_reward,
+                interaction.guild_id,
+                source=f"submission_reply_{record.get('kind')}_manual",
+                reason=f"submission_id={record['id']};reward_mode=manual",
+            )
+            reward = float(manual_reward)
+        else:
+            reward_result = grant_monthly_eligible_reward(
+                int(record["author_id"]),
+                interaction.guild_id,
+                base_reward,
+                source=f"submission_reply_{record.get('kind')}",
+                reason=f"submission_id={record['id']};reward_mode=random",
+            )
+            reward = float(reward_result["amount"])
+        reward_difference = round(reward - float(base_reward), 1)
+        if reward_difference:
             record["replies"][-1]["reward"] = reward
-            record["extra_reward"] = round(float(record.get("extra_reward", 0) or 0) + monthly_bonus, 1)
+            record["extra_reward"] = round(float(record.get("extra_reward", 0) or 0) + reward_difference, 1)
             record = save_submission(record)
         await publish_or_update_submission(interaction.client, record)
-        await _notify_submission_event(
+        dm_sent = await _notify_submission_event(
             interaction.client,
             record,
             event="owner_reply",
             actor=interaction.user,
-            content=self.children[0].value.strip(),
+            content=reply_content,
             reward=reward,
         )
-        await interaction.followup.send(f"✅ 已回复并追加 **{format_shells(reward)}** 蛋壳。", ephemeral=True)
+        reward_mode = "手动填写" if manual_reward is not None else "默认随机"
+        dm_status = "💌 私信与奖励提醒已送达。" if dm_sent else "⚠️ 私信未送达（用户可能关闭私信或取消了该投稿提醒）。"
+        await interaction.followup.send(
+            f"✅ 已发送电波回信并追加 **{format_shells(reward)}** 蛋壳（{reward_mode}）。\n{dm_status}",
+            ephemeral=True,
+        )
 
 
 class CommentModal(discord.ui.Modal):
@@ -929,6 +964,7 @@ class SubmissionPanelView(ui.DesignerView):
                     "# 🥚 奇米蛋投稿箱\n"
                     "📮 想给电波系 repo、捉虫电波系预设的小 bug，或分享一份安利，都可以投进这里。\n\n"
                     "🥚 认真投稿会获得亮晶晶的蛋壳奖励。\n"
+                    "📝 投稿正文至少 15 个有效文字，重复灌水会被拦截。\n"
                     "📎 投稿表单内可直接拖入附件，最多上传 9 个。\n"
                     "🧺 每类投稿每天最多 5 次，按北京时间刷新。"
                 ),
@@ -1097,6 +1133,16 @@ class SubmissionDraftView(discord.ui.View):
         if not interaction.guild_id:
             return None
 
+        quality = validate_submission_content(self.fields.get("content", ""))
+        if not quality["valid"]:
+            message = (
+                f"投稿正文至少需要 **{quality['minimum']}** 个有效文字，目前只有 **{quality['length']}** 个。"
+                if quality["reason"] == "too_short"
+                else "投稿正文被识别为明显重复灌水，请修改成有实际信息的内容。"
+            )
+            await interaction.followup.send(f"🚫 {message}", ephemeral=True)
+            return None
+
         if not self.record_id:
             limit_status = can_create_submission(
                 guild_id=interaction.guild_id,
@@ -1104,6 +1150,13 @@ class SubmissionDraftView(discord.ui.View):
                 kind=self.kind,
             )
             if not limit_status["allowed"]:
+                if limit_status.get("blocked"):
+                    await interaction.followup.send(
+                        "🚫 你今天有投稿因无意义灌水被撤回，今日已禁止继续投稿。\n"
+                        "请于北京时间次日再认真填写投稿内容。",
+                        ephemeral=True,
+                    )
+                    return None
                 await interaction.followup.send(
                     f"今天的 **{_kind_label(self.kind)}** 投稿已经达到上限啦。\n"
                     f"每类投稿每日最多 **{limit_status['limit']}** 次，你今天已经提交 **{limit_status['used']}** 次。\n"
@@ -1363,7 +1416,7 @@ class SubmissionEditView(discord.ui.View):
             return None
         return record
 
-    @discord.ui.button(label="修改投稿", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="修改投稿", emoji="✏️", style=discord.ButtonStyle.primary)
     async def edit(self, button, interaction: discord.Interaction):
         record = await self._record_for_user(interaction)
         if not record:
@@ -1400,7 +1453,7 @@ class SubmissionEditView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="删除投稿", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="删除投稿", emoji="🗑️", style=discord.ButtonStyle.danger)
     async def delete(self, button, interaction: discord.Interaction):
         record = await self._record_for_user(interaction)
         if not record:
@@ -1419,7 +1472,7 @@ class SubmissionDeleteConfirmView(discord.ui.View):
         super().__init__(timeout=120)
         self.record_id = str(record["id"])
 
-    @discord.ui.button(label="确认删除", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="确认删除", emoji="🗑️", style=discord.ButtonStyle.danger)
     async def confirm(self, button, interaction: discord.Interaction):
         record = get_submission(self.record_id)
         if not record or str(record.get("author_id")) != str(interaction.user.id):
@@ -1449,6 +1502,6 @@ class SubmissionDeleteConfirmView(discord.ui.View):
 
         await interaction.response.send_message(f"✅ 投稿已删除，发布消息已移除，扣回 **{format_shells(penalty)}** 蛋壳。", ephemeral=True)
 
-    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="取消", emoji="✖️", style=discord.ButtonStyle.secondary)
     async def cancel(self, button, interaction: discord.Interaction):
         await interaction.response.send_message("已取消删除。", ephemeral=True)

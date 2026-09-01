@@ -83,7 +83,17 @@ def migrate_runtime_json_namespaces() -> None:
                 "daily_reply_totals": {},
             },
         ),
-        ("submissions", "data/submissions.json", {"version": 1, "panel_info": {}, "submissions": {}, "comment_rewards": {}}),
+        (
+            "submissions",
+            "data/submissions.json",
+            {
+                "version": 1,
+                "panel_info": {},
+                "submissions": {},
+                "comment_rewards": {},
+                "meaningless_submission_users": {},
+            },
+        ),
         ("red_packets", "data/red_packets.json", {"version": 1, "packets": {}}),
         ("prequiz_attempts", "data/prequiz_attempts.json", {"version": 1, "attempts": {}}),
         ("boost_thanks", "data/boost_thanks.json", {"version": 1, "processed": {}}),
