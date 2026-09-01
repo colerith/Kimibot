@@ -16,6 +16,25 @@ storage = _load_submission_storage()
 
 
 class SubmissionQualityTests(unittest.TestCase):
+    def test_attachment_lookup_ignores_temporary_cdn_signature(self):
+        data = storage._empty_data()
+        data["submissions"]["123"] = {
+            "id": "123",
+            "attachments": [
+                "https://cdn.discordapp.com/attachments/10/20/example.png?ex=old&is=old"
+            ],
+        }
+        original_load = storage.load_data
+        storage.load_data = lambda: data
+        try:
+            record = storage.find_by_attachment_urls([
+                "https://cdn.discordapp.com/attachments/10/20/example.png?ex=new&is=new"
+            ])
+            self.assertIsNotNone(record)
+            self.assertEqual(record["id"], "123")
+        finally:
+            storage.load_data = original_load
+
     def test_manual_reply_reward_is_optional_and_validated(self):
         self.assertIsNone(storage.parse_manual_reply_reward(""))
         self.assertEqual(storage.parse_manual_reply_reward("2.5"), 2.5)

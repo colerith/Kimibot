@@ -5,6 +5,7 @@ import re
 import threading
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlsplit
 
 import config
 from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
@@ -462,6 +463,36 @@ def find_by_message_id(message_id: int) -> dict | None:
     msg_id = str(message_id)
     for record in load_data().get("submissions", {}).values():
         if isinstance(record, dict) and record.get("message_id") == msg_id:
+            return record
+    return None
+
+
+def _attachment_url_key(url: str) -> str:
+    """忽略 Discord CDN 临时签名，仅保留稳定的附件路径。"""
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    return parsed.path.rstrip("/").casefold()
+
+
+def find_by_attachment_urls(attachment_urls) -> dict | None:
+    target_keys = {
+        key
+        for key in (_attachment_url_key(url) for url in (attachment_urls or []))
+        if key
+    }
+    if not target_keys:
+        return None
+    for record in load_data().get("submissions", {}).values():
+        if not isinstance(record, dict):
+            continue
+        record_keys = {
+            key
+            for key in (_attachment_url_key(url) for url in record.get("attachments", []))
+            if key
+        }
+        if target_keys & record_keys:
             return record
     return None
 

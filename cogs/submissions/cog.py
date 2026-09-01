@@ -1,3 +1,5 @@
+import re
+
 import discord
 from discord.ext import commands
 
@@ -7,7 +9,9 @@ from cogs.points.storage import format_shells, modify_user_points
 from cogs.shared.utils import is_super_egg
 
 from .storage import (
+    find_by_attachment_urls,
     find_by_message_id,
+    get_submission,
     mark_meaningless_warning_issued,
     record_meaningless_withdrawal,
 )
@@ -154,6 +158,56 @@ class SubmissionsCog(commands.Cog):
             print(f"[Submissions] submission-panel-refresh-failed: {e}")
 
     @staticmethod
+    def _find_submission_for_message(message: discord.Message) -> dict | None:
+        record = find_by_message_id(message.id)
+        if record:
+            return record
+
+        for embed in message.embeds or []:
+            footer_text = str(getattr(getattr(embed, "footer", None), "text", "") or "")
+            match = re.search(r"投稿\s*#([0-9]+)", footer_text)
+            if match:
+                record = get_submission(match.group(1))
+                if record:
+                    return record
+
+        attachment_urls = []
+        for attachment in message.attachments or []:
+            attachment_urls.extend(
+                url
+                for url in (
+                    getattr(attachment, "url", ""),
+                    getattr(attachment, "proxy_url", ""),
+                )
+                if url
+            )
+        return find_by_attachment_urls(attachment_urls)
+
+    async def _delete_submission_messages(self, message: discord.Message, record: dict) -> bool:
+        """删除权威投稿消息，并兼容清理被右键选中的附件代理消息。"""
+        canonical_id = int(record.get("message_id") or 0)
+        canonical_channel_id = int(record.get("channel_id") or 0)
+        canonical_deleted = False
+
+        if canonical_id and canonical_channel_id:
+            try:
+                channel = self.bot.get_channel(canonical_channel_id) or await self.bot.fetch_channel(canonical_channel_id)
+                canonical_message = await channel.fetch_message(canonical_id)
+                await canonical_message.delete(reason=f"水投稿撤回 #{record['id']}")
+                canonical_deleted = True
+            except discord.NotFound:
+                canonical_deleted = True
+            except (discord.Forbidden, discord.HTTPException):
+                canonical_deleted = False
+
+        if message.id != canonical_id:
+            try:
+                await message.delete(reason=f"投稿附件随主投稿撤回 #{record['id']}")
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+        return canonical_deleted
+
+    @staticmethod
     def _build_withdrawal_dm(
         *,
         guild: discord.Guild,
@@ -248,7 +302,7 @@ class SubmissionsCog(commands.Cog):
         if not ctx.guild:
             return await ctx.respond("❌ 该指令只能在服务器中使用。", ephemeral=True)
 
-        record = find_by_message_id(message.id)
+        record = self._find_submission_for_message(message)
         if not record or str(record.get("guild_id")) != str(ctx.guild.id):
             return await ctx.respond("❌ 这不是投稿系统发布的有效投稿消息。", ephemeral=True)
         if record.get("status") == "deleted":
@@ -270,7 +324,7 @@ class SubmissionsCog(commands.Cog):
         if not ctx.guild:
             return await ctx.followup.send("❌ 该指令只能在服务器中使用。", ephemeral=True)
 
-        record = find_by_message_id(message.id)
+        record = self._find_submission_for_message(message)
         if not record or str(record.get("guild_id")) != str(ctx.guild.id):
             return await ctx.followup.send("❌ 这不是投稿系统发布的有效投稿消息。", ephemeral=True)
 
@@ -294,11 +348,7 @@ class SubmissionsCog(commands.Cog):
                 reason=f"submission_id={record['id']};count={count};reason={reason}",
             )
 
-        deleted = True
-        try:
-            await message.delete(reason=f"水投稿撤回 #{record['id']}: {reason}"[:512])
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            deleted = False
+        deleted = await self._delete_submission_messages(message, record)
 
         user = ctx.guild.get_member(author_id)
         if user is None:
