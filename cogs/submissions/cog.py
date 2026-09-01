@@ -36,10 +36,17 @@ WITHDRAWAL_REASON_TEMPLATES = {
 
 
 class WithdrawalReasonModal(discord.ui.Modal):
-    def __init__(self, cog: "SubmissionsCog", message: discord.Message, default_reason: str = ""):
+    def __init__(
+        self,
+        cog: "SubmissionsCog",
+        message: discord.Message,
+        default_reason: str = "",
+        submission_id: str | None = None,
+    ):
         super().__init__(title="🚫 确认撤回投稿")
         self.cog = cog
         self.message = message
+        self.submission_id = submission_id
         self.add_item(
             discord.ui.InputText(
                 label="撤回理由",
@@ -57,7 +64,12 @@ class WithdrawalReasonModal(discord.ui.Modal):
         if len(reason) < 2:
             return await interaction.response.send_message("❌ 撤回理由至少需要 2 个文字。", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
-        await self.cog._execute_meaningless_withdrawal(interaction, self.message, reason)
+        await self.cog._execute_meaningless_withdrawal(
+            interaction,
+            self.message,
+            reason,
+            submission_id=self.submission_id,
+        )
 
 
 class WithdrawalReasonSelect(discord.ui.Select):
@@ -105,16 +117,28 @@ class WithdrawalReasonSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         reason = WITHDRAWAL_REASON_TEMPLATES.get(self.values[0], "")
         await interaction.response.send_modal(
-            WithdrawalReasonModal(self.parent_view.cog, self.parent_view.message, reason)
+            WithdrawalReasonModal(
+                self.parent_view.cog,
+                self.parent_view.message,
+                reason,
+                self.parent_view.submission_id,
+            )
         )
 
 
 class WithdrawalReasonView(discord.ui.View):
-    def __init__(self, cog: "SubmissionsCog", message: discord.Message, owner_id: int):
+    def __init__(
+        self,
+        cog: "SubmissionsCog",
+        message: discord.Message,
+        owner_id: int,
+        submission_id: str,
+    ):
         super().__init__(timeout=180)
         self.cog = cog
         self.message = message
         self.owner_id = owner_id
+        self.submission_id = str(submission_id)
         self.add_item(WithdrawalReasonSelect(self))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -125,7 +149,74 @@ class WithdrawalReasonView(discord.ui.View):
 
     @discord.ui.button(label="自定义理由", emoji="✍️", style=discord.ButtonStyle.secondary)
     async def custom_reason(self, button, interaction: discord.Interaction):
-        await interaction.response.send_modal(WithdrawalReasonModal(self.cog, self.message))
+        await interaction.response.send_modal(
+            WithdrawalReasonModal(self.cog, self.message, submission_id=self.submission_id)
+        )
+
+
+class ManualSubmissionIdModal(discord.ui.Modal):
+    def __init__(self, cog: "SubmissionsCog", message: discord.Message, owner_id: int):
+        super().__init__(title="🔢 手动定位投稿")
+        self.cog = cog
+        self.message = message
+        self.owner_id = owner_id
+        self.add_item(
+            discord.ui.InputText(
+                label="投稿编号",
+                placeholder="例如：17881689315948",
+                required=True,
+                min_length=8,
+                max_length=24,
+            )
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message("❌ 这个手动定位弹窗不属于你。", ephemeral=True)
+        submission_id = re.sub(r"\D", "", str(self.children[0].value or ""))
+        if len(submission_id) < 8:
+            return await interaction.response.send_message("❌ 投稿编号格式不正确。", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        record = await self.cog._find_submission_by_manual_id(
+            interaction,
+            self.message,
+            submission_id,
+        )
+        if not record:
+            return await interaction.followup.send(
+                f"❌ 仍未找到投稿 `#{submission_id}`。后台已打印详细诊断日志。",
+                ephemeral=True,
+            )
+        await interaction.followup.send(
+            f"✅ 已定位投稿 `#{record['id']}`，请选择撤回理由。",
+            view=WithdrawalReasonView(
+                self.cog,
+                self.message,
+                interaction.user.id,
+                str(record["id"]),
+            ),
+            ephemeral=True,
+        )
+
+
+class ManualSubmissionLookupView(discord.ui.View):
+    def __init__(self, cog: "SubmissionsCog", message: discord.Message, owner_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.message = message
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ 这个诊断面板不属于你。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="手动填写投稿编号", emoji="🔢", style=discord.ButtonStyle.primary)
+    async def manual_id(self, button, interaction: discord.Interaction):
+        await interaction.response.send_modal(
+            ManualSubmissionIdModal(self.cog, self.message, self.owner_id)
+        )
 
 
 class SubmissionsCog(commands.Cog):
@@ -134,6 +225,14 @@ class SubmissionsCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.submission_panels_refreshed = False
+
+    @staticmethod
+    def _withdraw_log(event: str, **details) -> None:
+        rendered = " ".join(
+            f"{key}={str(value).replace(chr(10), ' ')[:500]!r}"
+            for key, value in details.items()
+        )
+        print(f"[Submissions][Withdraw] {event} {rendered}", flush=True)
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -158,23 +257,47 @@ class SubmissionsCog(commands.Cog):
         except Exception as e:
             print(f"[Submissions] submission-panel-refresh-failed: {e}")
 
-    async def _find_submission_for_message(self, message: discord.Message) -> dict | None:
+    async def _find_submission_for_message(
+        self,
+        message: discord.Message,
+        *,
+        raw_message_data: dict | None = None,
+    ) -> dict | None:
+        original_message_id = message.id
+        self._withdraw_log(
+            "resolve_start",
+            target_id=message.id,
+            channel_id=getattr(message.channel, "id", 0),
+            embeds=len(message.embeds or []),
+            attachments=len(message.attachments or []),
+            content=message.content or "",
+        )
         # 上下文菜单的 resolved message 偶尔不带完整 embeds/attachments，重新抓取权威消息。
         try:
             message = await message.channel.fetch_message(message.id)
+            self._withdraw_log(
+                "fetch_success",
+                target_id=message.id,
+                embeds=len(message.embeds or []),
+                attachments=len(message.attachments or []),
+                author_id=getattr(message.author, "id", 0),
+            )
         except (AttributeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
+            self._withdraw_log("fetch_failed", target_id=original_message_id)
 
         record = find_by_message_id(message.id)
         if record:
+            self._withdraw_log("match_message_id", submission_id=record.get("id"), message_id=message.id)
             return record
 
         for embed in message.embeds or []:
             footer_text = str(getattr(getattr(embed, "footer", None), "text", "") or "")
+            self._withdraw_log("inspect_embed", title=embed.title or "", footer=footer_text)
             match = re.search(r"投稿\s*#([0-9]+)", footer_text)
             if match:
                 record = get_submission(match.group(1))
                 if record:
+                    self._withdraw_log("match_embed_id", submission_id=record.get("id"))
                     return record
 
             if message.guild and message.author.id == self.bot.user.id:
@@ -191,6 +314,33 @@ class SubmissionsCog(commands.Cog):
                     attachment_urls=attachment_urls,
                 )
                 if record:
+                    self._withdraw_log("recovered_embed", submission_id=record.get("id"))
+                    return record
+
+        if isinstance(raw_message_data, dict):
+            self._withdraw_log(
+                "inspect_raw_resolved",
+                raw_embeds=len(raw_message_data.get("embeds", []) or []),
+                raw_attachments=len(raw_message_data.get("attachments", []) or []),
+                raw_content=raw_message_data.get("content", ""),
+            )
+            for embed_data in raw_message_data.get("embeds", []) or []:
+                if not message.guild:
+                    continue
+                raw_attachments = [
+                    str(item.get("url", ""))
+                    for item in (raw_message_data.get("attachments", []) or [])
+                    if isinstance(item, dict) and item.get("url")
+                ]
+                record = recover_submission_from_embed_data(
+                    guild_id=message.guild.id,
+                    channel_id=message.channel.id,
+                    message_id=message.id,
+                    embed_data=embed_data,
+                    attachment_urls=raw_attachments,
+                )
+                if record:
+                    self._withdraw_log("recovered_raw_embed", submission_id=record.get("id"))
                     return record
 
         attachment_urls = []
@@ -203,7 +353,60 @@ class SubmissionsCog(commands.Cog):
                 )
                 if url
             )
-        return find_by_attachment_urls(attachment_urls)
+        record = find_by_attachment_urls(attachment_urls)
+        self._withdraw_log(
+            "match_attachments" if record else "resolve_miss",
+            submission_id=record.get("id") if record else "",
+            target_id=message.id,
+            attachment_urls=attachment_urls,
+        )
+        return record
+
+    async def _find_submission_by_manual_id(
+        self,
+        interaction: discord.Interaction,
+        target_message: discord.Message,
+        submission_id: str,
+    ) -> dict | None:
+        self._withdraw_log(
+            "manual_lookup_start",
+            submission_id=submission_id,
+            target_id=target_message.id,
+            channel_id=getattr(interaction.channel, "id", 0),
+        )
+        record = get_submission(submission_id)
+        if record and str(record.get("guild_id")) == str(interaction.guild_id):
+            self._withdraw_log("manual_db_match", submission_id=submission_id)
+            return record
+
+        target_record = await self._find_submission_for_message(target_message)
+        if target_record and str(target_record.get("id")) == submission_id:
+            self._withdraw_log("manual_target_match", submission_id=submission_id)
+            return target_record
+
+        channel = interaction.channel
+        if channel and hasattr(channel, "history"):
+            scanned = 0
+            try:
+                async for candidate in channel.history(limit=200):
+                    scanned += 1
+                    for embed in candidate.embeds or []:
+                        footer_text = str(getattr(getattr(embed, "footer", None), "text", "") or "")
+                        if not re.search(rf"投稿\s*#{re.escape(submission_id)}(?:\D|$)", footer_text):
+                            continue
+                        record = await self._find_submission_for_message(candidate)
+                        if record and str(record.get("id")) == submission_id:
+                            self._withdraw_log(
+                                "manual_history_match",
+                                submission_id=submission_id,
+                                message_id=candidate.id,
+                                scanned=scanned,
+                            )
+                            return record
+            except (discord.Forbidden, discord.HTTPException) as error:
+                self._withdraw_log("manual_history_error", error=repr(error), scanned=scanned)
+            self._withdraw_log("manual_history_miss", submission_id=submission_id, scanned=scanned)
+        return None
 
     async def _delete_submission_messages(self, message: discord.Message, record: dict) -> bool:
         """删除权威投稿消息，并兼容清理被右键选中的附件代理消息。"""
@@ -324,16 +527,39 @@ class SubmissionsCog(commands.Cog):
         if not ctx.guild:
             return await ctx.respond("❌ 该指令只能在服务器中使用。", ephemeral=True)
 
-        record = await self._find_submission_for_message(message)
+        interaction_data = getattr(getattr(ctx, "interaction", None), "data", {}) or {}
+        target_id = str(interaction_data.get("target_id") or message.id)
+        resolved_messages = (interaction_data.get("resolved", {}) or {}).get("messages", {}) or {}
+        raw_message_data = resolved_messages.get(target_id) or resolved_messages.get(message.id)
+        self._withdraw_log(
+            "context_command",
+            target_id=target_id,
+            supplied_message_id=message.id,
+            raw_message_found=isinstance(raw_message_data, dict),
+            raw_keys=list(raw_message_data.keys()) if isinstance(raw_message_data, dict) else [],
+            guild_id=ctx.guild.id,
+            operator_id=ctx.user.id,
+        )
+        record = await self._find_submission_for_message(
+            message,
+            raw_message_data=raw_message_data if isinstance(raw_message_data, dict) else None,
+        )
         if not record or str(record.get("guild_id")) != str(ctx.guild.id):
-            return await ctx.respond("❌ 这不是投稿系统发布的有效投稿消息。", ephemeral=True)
+            self._withdraw_log("context_auto_match_failed", target_id=message.id)
+            return await ctx.respond(
+                "### ⚠️ 自动识别投稿失败\n"
+                "可以点击下方按钮手动填写面板底部显示的投稿编号；后台控制台已打印本次消息结构。",
+                view=ManualSubmissionLookupView(self, message, ctx.user.id),
+                ephemeral=True,
+            )
         if record.get("status") == "deleted":
             return await ctx.respond("ℹ️ 这条投稿已经撤回或删除。", ephemeral=True)
 
+        self._withdraw_log("context_match_success", submission_id=record.get("id"), target_id=message.id)
         await ctx.respond(
             "### 🚫 撤回投稿\n"
             "从下拉菜单选择常用理由，系统会打开已预填的弹窗供你修改；也可以点击“自定义理由”。",
-            view=WithdrawalReasonView(self, message, ctx.user.id),
+            view=WithdrawalReasonView(self, message, ctx.user.id, str(record["id"])),
             ephemeral=True,
         )
 
@@ -342,15 +568,39 @@ class SubmissionsCog(commands.Cog):
         ctx: discord.Interaction,
         message: discord.Message,
         reason: str,
+        *,
+        submission_id: str | None = None,
     ):
         if not ctx.guild:
             return await ctx.followup.send("❌ 该指令只能在服务器中使用。", ephemeral=True)
 
-        record = await self._find_submission_for_message(message)
+        record = get_submission(submission_id) if submission_id else None
+        if record:
+            self._withdraw_log(
+                "execute_forced_id_match",
+                submission_id=submission_id,
+                target_id=message.id,
+            )
+        if not record:
+            record = await self._find_submission_for_message(message)
         if not record or str(record.get("guild_id")) != str(ctx.guild.id):
+            self._withdraw_log(
+                "execute_match_failed",
+                submission_id=submission_id or "",
+                target_id=message.id,
+                guild_id=ctx.guild.id,
+            )
             return await ctx.followup.send("❌ 这不是投稿系统发布的有效投稿消息。", ephemeral=True)
 
         reason = str(reason or "").strip()[:500]
+        self._withdraw_log(
+            "execute_start",
+            submission_id=record.get("id"),
+            target_id=message.id,
+            author_id=record.get("author_id"),
+            reward=float(record.get("base_reward", 0) or 0) + float(record.get("extra_reward", 0) or 0),
+            reason=reason,
+        )
         result = record_meaningless_withdrawal(str(record["id"]), ctx.user.id, reason)
         if not result:
             return await ctx.followup.send("❌ 投稿不存在或已经通过其他方式删除。", ephemeral=True)
@@ -442,3 +692,13 @@ class SubmissionsCog(commands.Cog):
                 error = punishment_result.get("error", "找不到处罚模块") if punishment_result else "找不到处罚模块"
                 details.append(f"⚠️ 达到自动警告阈值，但处罚执行失败：{error}")
         await ctx.followup.send("\n".join(details), ephemeral=True)
+        self._withdraw_log(
+            "execute_complete",
+            submission_id=record.get("id"),
+            deleted=deleted,
+            dm_sent=dm_sent,
+            count=count,
+            penalty=penalty,
+            warning_triggered=bool(punishment_result and punishment_result.get("ok")),
+            announcement_sent=announcement_sent,
+        )
