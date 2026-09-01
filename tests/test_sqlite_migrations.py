@@ -224,7 +224,7 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         data["version"] = 2
         egg_qa.save_data(data)
         self.assertEqual(egg_qa.get_daily_reply_reward_total(7, 99), 7)
-        self.assertEqual(egg_qa.load_data()["version"], 3)
+        self.assertEqual(egg_qa.load_data()["version"], 4)
 
         question = egg_qa.create_question(author_id=7, guild_id=99, channel_id=10, content="这是一个测试问题")
         self.assertIsNotNone(question)

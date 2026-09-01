@@ -7,6 +7,7 @@ import os
 
 from dotenv import load_dotenv
 from cogs.shared.sqlite_store import migrate_runtime_json_namespaces
+from cogs.shared.discord_http_scheduler import install_discord_http_scheduler
 
 
 load_dotenv()
@@ -26,6 +27,16 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 bot = discord.Bot(intents=intents, debug_guilds=DEBUG_GUILDS)
+
+# Pycord handles route buckets and 429 retries. This shared pre-flight scheduler
+# prevents unrelated cogs from collectively bursting through the global limit.
+http_scheduler = install_discord_http_scheduler(
+    bot,
+    requests_per_second=float(os.getenv("DISCORD_HTTP_REQUESTS_PER_SECOND", "40")),
+    max_concurrency=int(os.getenv("DISCORD_HTTP_MAX_CONCURRENCY", "8")),
+    max_queue_size=int(os.getenv("DISCORD_HTTP_MAX_QUEUE_SIZE", "5000")),
+    queue_warning_size=int(os.getenv("DISCORD_HTTP_QUEUE_WARNING_SIZE", "250")),
+)
 
 # --- 启动时加载所有“魔法书” (Cogs) ---
 cogs_list = ['manage', 'tickets', 'lottery', 'forum_tracker','welcome', 'points', 'poll', 'roles', 'thread_tools', 'wish_pool']

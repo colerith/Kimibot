@@ -228,10 +228,28 @@ class EggQACog(commands.Cog, name="小蛋问答"):
         subscriber_ids = await asyncio.to_thread(get_question_notification_subscribers, question["id"])
         if not subscriber_ids:
             return
-        await asyncio.gather(
-            *(self._send_answer_notification(user_id, message, question) for user_id in subscriber_ids),
-            return_exceptions=True,
-        )
+        # Do not create one network task per subscriber. A small worker pool keeps
+        # memory stable; the process-wide HTTP scheduler performs final pacing.
+        pending: asyncio.Queue[int] = asyncio.Queue()
+        for user_id in subscriber_ids:
+            pending.put_nowait(user_id)
+
+        async def worker() -> None:
+            while True:
+                try:
+                    user_id = pending.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    await self._send_answer_notification(user_id, message, question)
+                except Exception:
+                    # One unavailable user must not prevent other notifications.
+                    pass
+                finally:
+                    pending.task_done()
+
+        worker_count = min(5, len(subscriber_ids))
+        await asyncio.gather(*(worker() for _ in range(worker_count)))
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

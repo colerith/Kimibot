@@ -52,6 +52,8 @@ cd kimibot-project-name
 pip install -r requirements.txt
 ```
 
+> 该项目使用 **Pycord**，不要在同一虚拟环境安装 **discord.py**；两者共享 discord 包名，混装会导致 discord.Bot、SlashCommandGroup 等接口消失。
+
 ### 4. 配置机器人
 
 机器人需要一些关键信息才能运行。
@@ -60,7 +62,15 @@ pip install -r requirements.txt
     在项目根目录创建一个名为 `.env` 的文件，并填入你的机器人 Token。
     ```env
     DISCORD_TOKEN="你的机器人TOKEN粘贴到这里"
+
+    # 可选：全局 Discord REST 请求调度（默认值通常无需修改）
+    DISCORD_HTTP_REQUESTS_PER_SECOND=40
+    DISCORD_HTTP_MAX_CONCURRENCY=8
+    DISCORD_HTTP_MAX_QUEUE_SIZE=5000
+    DISCORD_HTTP_QUEUE_WARNING_SIZE=250
     ```
+
+    所有 Cog 的机器人 Token REST 请求都会经过同一个 FIFO 队列。调度器会均匀放行请求并限制并发；Pycord 仍负责各路由 bucket、Retry-After 和 429 重试。若日志出现队列积压警告，应优先减少批处理频率，不要提高每秒请求数。
 
 -   **配置 `config.py`**:
     打开 `config.py` 文件，根据你的服务器情况，修改里面的频道ID、身份组ID等常量。
