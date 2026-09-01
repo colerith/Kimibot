@@ -497,6 +497,88 @@ def find_by_attachment_urls(attachment_urls) -> dict | None:
     return None
 
 
+def recover_submission_from_embed_data(
+    *,
+    guild_id: int,
+    channel_id: int,
+    message_id: int,
+    embed_data: dict,
+    attachment_urls=None,
+) -> dict | None:
+    """从机器人标准投稿 Embed 重建意外丢失的投稿索引。"""
+    if not isinstance(embed_data, dict):
+        return None
+    footer = embed_data.get("footer", {})
+    footer_text = str(footer.get("text", "")) if isinstance(footer, dict) else ""
+    id_match = re.search(r"投稿\s*#([0-9]{8,})", footer_text)
+    reward_match = re.search(r"已奖励\s*([0-9]+(?:\.[0-9]+)?)\s*蛋壳", footer_text)
+    if not id_match or not reward_match:
+        return None
+
+    submission_id = id_match.group(1)
+    existing = get_submission(submission_id)
+    if existing:
+        return existing
+
+    author_id = ""
+    author_name = "未知投稿人"
+    recovered_fields = {}
+    for field in embed_data.get("fields", []):
+        if not isinstance(field, dict):
+            continue
+        name = str(field.get("name", ""))
+        value = str(field.get("value", ""))
+        if "投稿人" in name or "投稿者" in name:
+            mention = re.search(r"<@!?(\d{15,20})>", value)
+            if mention:
+                author_id = mention.group(1)
+        elif "投稿内容" in name:
+            recovered_fields["content"] = value
+        elif any(label in name for label in ("标题", "对象")):
+            recovered_fields["target"] = value
+    if not author_id:
+        return None
+
+    title = str(embed_data.get("title", ""))
+    if "安利" in title:
+        kind = KIND_RECOMMENDATION
+    elif "捉虫" in title:
+        kind = KIND_BUG
+    elif "repo" in title.casefold():
+        kind = KIND_REPO
+    else:
+        return None
+
+    now = _now_iso()
+    reward = _round_shells(reward_match.group(1))
+    record = {
+        "id": submission_id,
+        "request_id": "",
+        "guild_id": str(guild_id),
+        "author_id": author_id,
+        "author_name": author_name,
+        "kind": kind,
+        "fields": recovered_fields,
+        "attachments": [str(url) for url in (attachment_urls or []) if url][:9],
+        "channel_id": str(channel_id),
+        "message_id": str(message_id),
+        "status": STATUS_OPEN,
+        "base_reward": reward,
+        "extra_reward": 0.0,
+        "delete_penalty": 0.0,
+        "replies": [],
+        "useful_user_ids": [],
+        "useful_reward_tiers": [],
+        "comments": [],
+        "notifications_enabled": True,
+        "created_at": now,
+        "updated_at": now,
+        "deleted_at": "",
+        "moderation": {"recovered_from_message": True, "recovered_at": now},
+    }
+    return save_submission(record)
+
+
 def list_user_submissions(user_id: int, guild_id: int | None = None, include_deleted: bool = False) -> list[dict]:
     uid = str(user_id)
     gid = str(guild_id) if guild_id else None

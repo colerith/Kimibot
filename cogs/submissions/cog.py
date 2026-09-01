@@ -14,6 +14,7 @@ from .storage import (
     get_submission,
     mark_meaningless_warning_issued,
     record_meaningless_withdrawal,
+    recover_submission_from_embed_data,
 )
 
 from .views import (
@@ -157,8 +158,13 @@ class SubmissionsCog(commands.Cog):
         except Exception as e:
             print(f"[Submissions] submission-panel-refresh-failed: {e}")
 
-    @staticmethod
-    def _find_submission_for_message(message: discord.Message) -> dict | None:
+    async def _find_submission_for_message(self, message: discord.Message) -> dict | None:
+        # 上下文菜单的 resolved message 偶尔不带完整 embeds/attachments，重新抓取权威消息。
+        try:
+            message = await message.channel.fetch_message(message.id)
+        except (AttributeError, discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
         record = find_by_message_id(message.id)
         if record:
             return record
@@ -168,6 +174,22 @@ class SubmissionsCog(commands.Cog):
             match = re.search(r"投稿\s*#([0-9]+)", footer_text)
             if match:
                 record = get_submission(match.group(1))
+                if record:
+                    return record
+
+            if message.guild and message.author.id == self.bot.user.id:
+                attachment_urls = [
+                    str(getattr(attachment, "url", "") or "")
+                    for attachment in (message.attachments or [])
+                    if getattr(attachment, "url", None)
+                ]
+                record = recover_submission_from_embed_data(
+                    guild_id=message.guild.id,
+                    channel_id=message.channel.id,
+                    message_id=message.id,
+                    embed_data=embed.to_dict(),
+                    attachment_urls=attachment_urls,
+                )
                 if record:
                     return record
 
@@ -302,7 +324,7 @@ class SubmissionsCog(commands.Cog):
         if not ctx.guild:
             return await ctx.respond("❌ 该指令只能在服务器中使用。", ephemeral=True)
 
-        record = self._find_submission_for_message(message)
+        record = await self._find_submission_for_message(message)
         if not record or str(record.get("guild_id")) != str(ctx.guild.id):
             return await ctx.respond("❌ 这不是投稿系统发布的有效投稿消息。", ephemeral=True)
         if record.get("status") == "deleted":
@@ -324,7 +346,7 @@ class SubmissionsCog(commands.Cog):
         if not ctx.guild:
             return await ctx.followup.send("❌ 该指令只能在服务器中使用。", ephemeral=True)
 
-        record = self._find_submission_for_message(message)
+        record = await self._find_submission_for_message(message)
         if not record or str(record.get("guild_id")) != str(ctx.guild.id):
             return await ctx.followup.send("❌ 这不是投稿系统发布的有效投稿消息。", ephemeral=True)
 

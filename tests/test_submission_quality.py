@@ -16,6 +16,36 @@ storage = _load_submission_storage()
 
 
 class SubmissionQualityTests(unittest.TestCase):
+    def test_missing_numbered_submission_can_be_recovered_from_embed(self):
+        data = storage._empty_data()
+        original_load = storage.load_data
+        original_save = storage.save_data
+        storage.load_data = lambda: data
+        storage.save_data = lambda updated: None
+        try:
+            record = storage.recover_submission_from_embed_data(
+                guild_id=100,
+                channel_id=200,
+                message_id=300,
+                embed_data={
+                    "title": "🌟 安利投稿｜测试内容",
+                    "fields": [
+                        {"name": "👤 投稿人", "value": "<@123456789012345678>"},
+                        {"name": "📝 投稿内容", "value": "这是一段测试投稿内容"},
+                    ],
+                    "footer": {"text": "投稿 #17881689315948 · 已奖励 1.5 蛋壳"},
+                },
+                attachment_urls=["https://cdn.discordapp.com/attachments/1/2/test.png"],
+            )
+            self.assertIsNotNone(record)
+            self.assertEqual(record["id"], "17881689315948")
+            self.assertEqual(record["author_id"], "123456789012345678")
+            self.assertEqual(record["base_reward"], 1.5)
+            self.assertTrue(record["moderation"]["recovered_from_message"])
+        finally:
+            storage.load_data = original_load
+            storage.save_data = original_save
+
     def test_attachment_lookup_ignores_temporary_cdn_signature(self):
         data = storage._empty_data()
         data["submissions"]["123"] = {
