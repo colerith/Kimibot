@@ -7,7 +7,6 @@ from cogs.points.storage import get_user_points, modify_user_points
 from . import storage
 
 
-MAX_PACKET_COUNT = 50
 MIN_PACKET_UNIT = 0.1
 RED_PACKET_IMAGE_URL = (
     "https://i.postimg.cc/kMKjMnc1/"
@@ -36,7 +35,12 @@ def build_packet_embed(packet: dict, *, closed_note: str | None = None) -> disco
 
     title = "🧧 奇米蛋红包来啦！"
     color = 0xED4245
-    footer_text = "点击下方按钮领取 · 每人限领一次 · 24 小时后自动结束"
+    expires_at = packet.get("expires_at")
+    footer_text = (
+        "点击下方按钮领取 · 每人限领一次 · 24 小时后自动结束"
+        if expires_at
+        else "点击下方按钮领取 · 每人限领一次 · 抢完即止"
+    )
     if status == "empty":
         title = "🎉 红包已被抢光"
         color = 0xF0B232
@@ -46,7 +50,6 @@ def build_packet_embed(packet: dict, *, closed_note: str | None = None) -> disco
         color = 0x747F8D
         footer_text = "红包已结束，未领取部分已按规则处理"
 
-    expires_timestamp = int(storage.parse_time(packet.get("expires_at", "")).timestamp())
     message = packet.get("message") or "奇米蛋抱着红包跑来啦。"
     admin_badge = "\n\n✨ **管理员福利红包 · 免费发放**" if admin_free else ""
 
@@ -71,11 +74,15 @@ def build_packet_embed(packet: dict, *, closed_note: str | None = None) -> disco
         value=_build_claim_progress(claimed_count, count),
         inline=False,
     )
-    embed.add_field(
-        name="⏰ 结束时间",
-        value=f"<t:{expires_timestamp}:F>（<t:{expires_timestamp}:R>）",
-        inline=False,
-    )
+    if expires_at:
+        expires_timestamp = int(storage.parse_time(expires_at).timestamp())
+        embed.add_field(
+            name="⏰ 结束时间",
+            value=f"<t:{expires_timestamp}:F>（<t:{expires_timestamp}:R>）",
+            inline=False,
+        )
+    else:
+        embed.add_field(name="⏰ 结束条件", value="红包全部领取完毕", inline=False)
     if closed_note:
         embed.add_field(name="📌 处理结果", value=closed_note, inline=False)
 
@@ -130,8 +137,9 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
     async def send_red_packet(
         self,
         ctx: discord.ApplicationContext,
-        金额: Option(float, "红包总金额，最小单位 0.1 蛋壳", required=True),  # pyright: ignore[reportInvalidTypeForm]
-        数量: Option(int, "红包数量，每个红包至少 0.1 蛋壳", required=True),  # pyright: ignore[reportInvalidTypeForm]
+        金额: Option(float, "红包总金额，不设上限，最小单位 0.1 蛋壳", required=True),  # pyright: ignore[reportInvalidTypeForm]
+        数量: Option(int, "红包数量不设上限，每个红包至少 0.1 蛋壳", required=True),  # pyright: ignore[reportInvalidTypeForm]
+        时效: Option(str, "选择红包是否限时", choices=["不限时", "限时（24小时）"], default="不限时"),  # pyright: ignore[reportInvalidTypeForm]
         留言: Option(str, "红包留言，可选", required=False, default="奇米蛋把蛋壳红包端上来啦。"),  # pyright: ignore[reportInvalidTypeForm]
     ):
         if not ctx.guild or not ctx.channel:
@@ -140,8 +148,8 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
 
         amount = storage.round_shells(金额)
         count = int(数量)
-        if count <= 0 or count > MAX_PACKET_COUNT:
-            await ctx.respond(f"红包数量需要在 1-{MAX_PACKET_COUNT} 个之间。", ephemeral=True)
+        if count <= 0:
+            await ctx.respond("红包数量至少需要 1 个。", ephemeral=True)
             return
         if amount < storage.round_shells(count * MIN_PACKET_UNIT):
             await ctx.respond("红包金额太少啦，每个红包至少要有 0.1 蛋壳。", ephemeral=True)
@@ -183,6 +191,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             count=count,
             message=(留言 or "奇米蛋把蛋壳红包端上来啦。")[:120],
             admin_free=admin_free,
+            timed=时效 == "限时（24小时）",
         )
 
         view = RedPacketView(self, packet["id"])
@@ -228,9 +237,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
 
         if not result.get("success"):
             reason = result.get("reason")
-            if reason == "sender_blocked":
-                text = "发红包的人不能抢自己的红包哦。"
-            elif reason == "already_claimed":
+            if reason == "already_claimed":
                 text = f"你已经抢过啦，本次拿到 **{storage.format_shells(result.get('amount', 0))}** 蛋壳。"
             elif reason == "expired":
                 text = "这个红包已经超过 24 小时，正在等小蛋清理退款。"

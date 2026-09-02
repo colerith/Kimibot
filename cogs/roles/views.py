@@ -4926,7 +4926,7 @@ def build_red_packet_admin_embed() -> discord.Embed:
         ),
         inline=True,
     )
-    embed.set_footer(text="红包由 /发红包 创建，24 小时后自动清理并退款。")
+    embed.set_footer(text="红包不限数量和总金额；可选 24 小时限时或不限时（抢完即止）。")
     return embed
 
 

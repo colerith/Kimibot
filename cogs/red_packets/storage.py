@@ -1,6 +1,6 @@
 import json
+import math
 import os
-import random
 import secrets
 import threading
 from functools import wraps
@@ -47,6 +47,8 @@ def round_shells(value: float | int | str) -> float:
         amount = float(value)
     except (TypeError, ValueError):
         amount = 0.0
+    if not math.isfinite(amount):
+        amount = 0.0
     return round(max(0.0, amount), SHELL_PRECISION)
 
 
@@ -75,17 +77,21 @@ def save_data(data: dict[str, Any]) -> None:
     save_json_namespace("red_packets", data)
 
 
-def generate_allocations(total_amount: float, count: int) -> list[float]:
-    total_units = int(round(round_shells(total_amount) * 10))
-    if count <= 0 or total_units < count:
-        raise ValueError("红包金额不足以分配给指定数量")
+def _draw_lazy_allocation(remaining_amount: float, remaining_count: int) -> float:
+    """Draw one share without pre-building a list proportional to amount or count."""
+    remaining_units = int(round(round_shells(remaining_amount) * 10))
+    if remaining_count <= 0 or remaining_units < remaining_count:
+        raise ValueError("红包剩余金额不足以分配")
+    if remaining_count == 1:
+        return round_shells(remaining_units / 10)
 
-    units = [1 for _ in range(count)]
-    for _ in range(total_units - count):
-        units[random.randrange(count)] += 1
-
-    random.shuffle(units)
-    return [round(u / 10, SHELL_PRECISION) for u in units]
+    # Keep at least one 0.1-unit share for every later claimant. Capping the
+    # random draw at twice the current average keeps the lucky-packet feel while
+    # making creation O(1), even for very large packets.
+    distributable_units = remaining_units - (remaining_count - 1)
+    twice_average = max(1, (remaining_units * 2) // remaining_count)
+    upper_units = min(distributable_units, twice_average)
+    return round_shells((secrets.randbelow(upper_units) + 1) / 10)
 
 
 @_locked
@@ -99,10 +105,14 @@ def create_packet(
     count: int,
     message: str,
     admin_free: bool,
+    timed: bool = False,
 ) -> dict[str, Any]:
     created_at = now_cn()
     packet_id = f"{int(created_at.timestamp())}-{secrets.token_hex(4)}"
-    allocations = generate_allocations(total_amount, count)
+    total_amount = round_shells(total_amount)
+    count = int(count)
+    if count <= 0 or total_amount < round_shells(count * 0.1):
+        raise ValueError("红包金额不足以分配给指定数量")
 
     packet = {
         "id": packet_id,
@@ -112,18 +122,23 @@ def create_packet(
         "sender_id": str(sender_id),
         "sender_name": sender_name,
         "message": message,
-        "total_amount": round_shells(total_amount),
-        "count": int(count),
-        "remaining_amount": round_shells(sum(allocations)),
-        "remaining_count": len(allocations),
-        "allocations": allocations,
+        "total_amount": total_amount,
+        "count": count,
+        "remaining_amount": total_amount,
+        "remaining_count": count,
+        "allocation_mode": "lazy",
+        "allocations": [],
         "claims": {},
         "admin_free": bool(admin_free),
+        "timed": bool(timed),
         "created_at": created_at.isoformat(timespec="seconds"),
-        "expires_at": (created_at + timedelta(hours=EXPIRE_HOURS)).isoformat(timespec="seconds"),
         "status": "active",
         "refunded": False,
     }
+    if timed:
+        packet["expires_at"] = (created_at + timedelta(hours=EXPIRE_HOURS)).isoformat(
+            timespec="seconds"
+        )
 
     data = load_data()
     data["packets"][packet_id] = packet
@@ -154,13 +169,11 @@ def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
     if not isinstance(packet, dict):
         return {"success": False, "reason": "not_found"}
 
-    if packet.get("sender_id") == str(user_id):
-        return {"success": False, "reason": "sender_blocked", "packet": packet}
-
     if packet.get("status") != "active":
         return {"success": False, "reason": packet.get("status", "closed"), "packet": packet}
 
-    if parse_time(packet.get("expires_at", "")) <= now_cn():
+    expires_at = packet.get("expires_at")
+    if expires_at and parse_time(expires_at) <= now_cn():
         packet["status"] = "expired"
         packet["remaining_amount"] = round_shells(packet.get("remaining_amount", 0))
         packet["refund_amount"] = packet["remaining_amount"]
@@ -178,18 +191,33 @@ def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
         }
 
     allocations = packet.setdefault("allocations", [])
-    if not allocations:
+    remaining_count = int(packet.get("remaining_count", len(allocations)) or 0)
+    if remaining_count <= 0:
         packet["status"] = "empty"
         packet["remaining_amount"] = 0.0
         packet["remaining_count"] = 0
         save_data(data)
         return {"success": False, "reason": "empty", "packet": packet}
 
-    amount = round_shells(allocations.pop())
+    if packet.get("allocation_mode") == "lazy":
+        amount = _draw_lazy_allocation(packet.get("remaining_amount", 0), remaining_count)
+        packet["remaining_count"] = remaining_count - 1
+        packet["remaining_amount"] = round_shells(packet.get("remaining_amount", 0) - amount)
+    else:
+        # Compatibility with packets created before lazy allocation was added.
+        if not allocations:
+            packet["status"] = "empty"
+            packet["remaining_amount"] = 0.0
+            packet["remaining_count"] = 0
+            save_data(data)
+            return {"success": False, "reason": "empty", "packet": packet}
+        amount = round_shells(allocations.pop())
+        packet["remaining_count"] = len(allocations)
+        packet["remaining_amount"] = round_shells(sum(round_shells(x) for x in allocations))
+
     claims[str(user_id)] = {"amount": amount, "claimed_at": now_iso()}
-    packet["remaining_count"] = len(allocations)
-    packet["remaining_amount"] = round_shells(sum(round_shells(x) for x in allocations))
-    if not allocations:
+    if packet["remaining_count"] <= 0:
+        packet["remaining_amount"] = 0.0
         packet["status"] = "empty"
 
     save_data(data)
@@ -216,7 +244,8 @@ def expire_due_packets() -> list[dict[str, Any]]:
     for packet in data.get("packets", {}).values():
         if not isinstance(packet, dict) or packet.get("status") != "active":
             continue
-        if parse_time(packet.get("expires_at", "")) > now:
+        expires_at = packet.get("expires_at")
+        if not expires_at or parse_time(expires_at) > now:
             continue
 
         packet["status"] = "expired"

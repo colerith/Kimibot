@@ -179,6 +179,103 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         Path(red_packets.DATA_FILE).write_text("{}", encoding="utf-8")
         self.assertIn("new", red_packets.load_data()["packets"])
 
+    def test_large_red_packet_is_created_lazily_without_expiry(self):
+        packet = red_packets.create_packet(
+            guild_id=99,
+            channel_id=100,
+            sender_id=7,
+            sender_name="tester",
+            total_amount=1_000_000_000.0,
+            count=1_000_000,
+            message="large packet",
+            admin_free=True,
+        )
+
+        self.assertEqual(packet["remaining_count"], 1_000_000)
+        self.assertEqual(packet["allocations"], [])
+        self.assertEqual(packet["allocation_mode"], "lazy")
+        self.assertNotIn("expires_at", packet)
+        claim = red_packets.claim_packet(packet["id"], 8)
+        self.assertTrue(claim["success"])
+        self.assertGreaterEqual(claim["amount"], 0.1)
+        self.assertEqual(claim["packet"]["remaining_count"], 999_999)
+
+    def test_lazy_red_packet_pays_exact_total_and_ends_when_empty(self):
+        packet = red_packets.create_packet(
+            guild_id=99,
+            channel_id=100,
+            sender_id=7,
+            sender_name="tester",
+            total_amount=12.3,
+            count=20,
+            message="until empty",
+            admin_free=False,
+        )
+
+        claims = [red_packets.claim_packet(packet["id"], user_id) for user_id in range(100, 120)]
+        self.assertTrue(all(claim["success"] for claim in claims))
+        self.assertEqual(round(sum(claim["amount"] for claim in claims), 1), 12.3)
+        finished = red_packets.get_packet(packet["id"])
+        self.assertEqual(finished["status"], "empty")
+        self.assertEqual(finished["remaining_count"], 0)
+        self.assertEqual(finished["remaining_amount"], 0.0)
+
+    def test_active_legacy_timed_red_packet_still_expires(self):
+        data = red_packets.load_data()
+        data["packets"]["old-active"] = {
+            "id": "old-active",
+            "sender_id": "7",
+            "status": "active",
+            "expires_at": "2000-01-01T00:00:00+08:00",
+            "remaining_amount": 0.1,
+            "remaining_count": 1,
+            "allocations": [0.1],
+            "claims": {},
+        }
+        red_packets.save_data(data)
+
+        claim = red_packets.claim_packet("old-active", 8)
+        self.assertFalse(claim["success"])
+        self.assertEqual(claim["reason"], "expired")
+        self.assertEqual(red_packets.expire_due_packets(), [])
+
+    def test_timed_red_packet_has_24_hour_expiry(self):
+        packet = red_packets.create_packet(
+            guild_id=99,
+            channel_id=100,
+            sender_id=7,
+            sender_name="tester",
+            total_amount=10.0,
+            count=10,
+            message="timed packet",
+            admin_free=False,
+            timed=True,
+        )
+
+        self.assertTrue(packet["timed"])
+        lifetime = red_packets.parse_time(packet["expires_at"]) - red_packets.parse_time(
+            packet["created_at"]
+        )
+        self.assertEqual(lifetime.total_seconds(), 24 * 60 * 60)
+
+    def test_red_packet_sender_can_claim_once(self):
+        packet = red_packets.create_packet(
+            guild_id=99,
+            channel_id=100,
+            sender_id=7,
+            sender_name="tester",
+            total_amount=1.0,
+            count=2,
+            message="sender can claim",
+            admin_free=False,
+        )
+
+        first = red_packets.claim_packet(packet["id"], 7)
+        repeated = red_packets.claim_packet(packet["id"], 7)
+        self.assertTrue(first["success"])
+        self.assertFalse(repeated["success"])
+        self.assertEqual(repeated["reason"], "already_claimed")
+
     def test_submission_notification_subscription_is_owned_and_persistent(self):
         record, created = submissions.create_submission_once(
             guild_id=99,
