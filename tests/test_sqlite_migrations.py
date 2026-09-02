@@ -296,6 +296,21 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         self.assertEqual(repeated["reason"], "already_claimed")
         self.assertEqual(repeated["amount"], first["amount"])
 
+    def test_persistent_views_include_old_finished_packets(self):
+        data = red_packets.load_data()
+        data["packets"] = {
+            "active": {"id": "active", "status": "active"},
+            "empty": {"id": "empty", "status": "empty"},
+            "expired": {"id": "expired", "status": "expired"},
+            "cancelled": {"id": "cancelled", "status": "cancelled"},
+        }
+        red_packets.save_data(data)
+
+        packet_ids = {
+            packet["id"] for packet in red_packets.get_persistent_view_packets()
+        }
+        self.assertEqual(packet_ids, {"active", "empty", "expired"})
+
     def test_red_packet_claim_batch_preserves_order_and_uniqueness(self):
         packet = red_packets.create_packet(
             guild_id=99,

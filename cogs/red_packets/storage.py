@@ -304,3 +304,16 @@ def get_active_packets() -> list[dict[str, Any]]:
         for packet in data.get("packets", {}).values()
         if isinstance(packet, dict) and packet.get("status") == "active"
     ]
+
+
+def get_persistent_view_packets() -> list[dict[str, Any]]:
+    """Return packets whose historical messages may still contain a claim button."""
+    return [
+        packet
+        for packet in load_data().get("packets", {}).values()
+        if (
+            isinstance(packet, dict)
+            and packet.get("id")
+            and packet.get("status", "active") not in {"cancelled", "deleted"}
+        )
+    ]

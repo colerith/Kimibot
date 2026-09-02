@@ -134,6 +134,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
         if not self.cleanup_expired_packets.is_running():
             self.cleanup_expired_packets.start()
         self._ensure_claim_worker()
+        await self._register_saved_packet_views()
 
     def _ensure_claim_worker(self) -> None:
         if self._claim_worker_task is None or self._claim_worker_task.done():
@@ -157,13 +158,31 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        for packet in await asyncio.to_thread(storage.get_active_packets):
+        registered = await self._register_saved_packet_views()
+        print(
+            f"[RedPackets] Cog loaded; registered {registered} saved packet views.",
+            flush=True,
+        )
+
+    async def _register_saved_packet_views(self) -> int:
+        registered = 0
+        packets = await asyncio.to_thread(storage.get_persistent_view_packets)
+        for packet in packets:
             packet_id = str(packet.get("id", ""))
             if not packet_id or packet_id in self._registered_packet_ids:
                 continue
-            self.bot.add_view(RedPacketView(self, packet_id))
+            try:
+                self.bot.add_view(RedPacketView(self, packet_id))
+            except Exception as error:
+                print(
+                    f"[RedPackets] failed to register saved view: "
+                    f"packet={packet_id} error={error!r}",
+                    flush=True,
+                )
+                continue
             self._registered_packet_ids.add(packet_id)
-        print("[RedPackets] Cog loaded and active packet views registered.")
+            registered += 1
+        return registered
 
     @discord.slash_command(name="发红包", description="把蛋壳装进小蛋红包让大家抢。")
     async def send_red_packet(
