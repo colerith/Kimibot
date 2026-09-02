@@ -1239,22 +1239,37 @@ class RoleClaimSelect(discord.ui.Select):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return True
 
+    @staticmethod
+    async def _safe_followup(interaction: discord.Interaction, message: str) -> None:
+        try:
+            await interaction.followup.send(message, ephemeral=True)
+        except (discord.NotFound, discord.HTTPException) as error:
+            # A successful role operation must not become an unhandled view error
+            # merely because its deferred interaction token expired in a backlog.
+            print(
+                f"[身份装饰] 无法发送交互结果: interaction={interaction.id} "
+                f"code={getattr(error, 'code', None)} error={error}",
+                flush=True,
+            )
+
     async def callback(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
-        except discord.NotFound as error:
-            if getattr(error, "code", None) == 10062:
-                print(f"[身份装饰] 交互在处理前已过期: interaction={interaction.id}")
-                return
-            raise
+        except (discord.NotFound, discord.HTTPException) as error:
+            print(
+                f"[身份装饰] 交互在处理前已失效: interaction={interaction.id} "
+                f"code={getattr(error, 'code', None)}",
+                flush=True,
+            )
+            return
         try:
             role_id = int(self.values[0])
             target_role = interaction.guild.get_role(role_id)
-        except:
-            return await interaction.followup.send("数据错误", ephemeral=True)
+        except (TypeError, ValueError, AttributeError):
+            return await self._safe_followup(interaction, "数据错误")
 
         if not target_role:
-            return await interaction.followup.send("装饰已下架或失效", ephemeral=True)
+            return await self._safe_followup(interaction, "装饰已下架或失效")
 
         # 1. 判断身份组类型
         data = await asyncio.to_thread(load_role_data)
@@ -1289,14 +1304,21 @@ class RoleClaimSelect(discord.ui.Select):
                 msg = f"✅ **穿戴成功！**\n✨ 你现在拥有了 **{target_role.mention}**。"
                 if removed:
                     msg += f"\n♻️ 已自动换下同类旧装饰：{', '.join([r.name for r in removed])}"
-                await interaction.followup.send(msg, ephemeral=True)
-
             except Exception as e:
-                await interaction.followup.send(f"❌ 权限不足或发生错误: {e}", ephemeral=True)
+                return await self._safe_followup(interaction, f"❌ 权限不足或发生错误: {e}")
+            await self._safe_followup(interaction, msg)
         else:
             # 卸下
-            await interaction.user.remove_roles(target_role, reason="主动卸下")
-            await interaction.followup.send(f"❎ **卸下成功！** 你已将 {target_role.mention} 收回衣柜。", ephemeral=True)
+            try:
+                await interaction.user.remove_roles(target_role, reason="主动卸下")
+            except Exception as error:
+                return await self._safe_followup(
+                    interaction, f"❌ 权限不足或发生错误: {error}"
+                )
+            await self._safe_followup(
+                interaction,
+                f"❎ **卸下成功！** 你已将 {target_role.mention} 收回衣柜。",
+            )
 
 class RoleSelectionView(discord.ui.View):
     """

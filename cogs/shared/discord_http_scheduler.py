@@ -8,6 +8,7 @@ cogs cannot collectively burst through Discord's global request budget.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -38,7 +39,10 @@ class DiscordRequestScheduler:
         self._request = request
         self._interval = 1.0 / requests_per_second
         self._semaphore = asyncio.Semaphore(max_concurrency)
-        self._queue: asyncio.Queue[asyncio.Future[None]] = asyncio.Queue(max_queue_size)
+        self._queue: asyncio.PriorityQueue[tuple[int, int, asyncio.Future[None]]] = (
+            asyncio.PriorityQueue(max_queue_size)
+        )
+        self._sequence = itertools.count()
         self._queue_warning_size = max(0, queue_warning_size)
         self._dispatcher: asyncio.Task[None] | None = None
         self._next_start = 0.0
@@ -72,7 +76,8 @@ class DiscordRequestScheduler:
 
         queued = False
         try:
-            await self._queue.put(permit)
+            priority = self._request_priority(route)
+            await self._queue.put((priority, next(self._sequence), permit))
             queued = True
             queue_size = self._queue.qsize()
             if self._queue_warning_size and queue_size >= self._queue_warning_size:
@@ -98,10 +103,18 @@ class DiscordRequestScheduler:
         finally:
             self._semaphore.release()
 
+    @staticmethod
+    def _request_priority(route: Any) -> int:
+        """Prioritize interaction ACKs, which Discord requires within 3 seconds."""
+        path = str(getattr(route, "path", "") or "")
+        if path.startswith("/interactions/") and path.endswith("/callback"):
+            return 0
+        return 10
+
     async def _dispatch_loop(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
-            permit = await self._queue.get()
+            _, _, permit = await self._queue.get()
             acquired = False
             try:
                 if permit.cancelled():
@@ -146,7 +159,7 @@ class DiscordRequestScheduler:
 
         while True:
             try:
-                permit = self._queue.get_nowait()
+                _, _, permit = self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
             if not permit.done():

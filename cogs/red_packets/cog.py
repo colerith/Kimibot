@@ -1,3 +1,6 @@
+import asyncio
+import os
+
 import discord
 from discord import Option
 from discord.ext import commands, tasks
@@ -8,6 +11,11 @@ from . import storage
 
 
 MIN_PACKET_UNIT = 0.1
+CLAIM_QUEUE_SIZE = max(1, int(os.getenv("RED_PACKET_CLAIM_QUEUE_SIZE", "500")))
+CLAIM_BATCH_SIZE = max(1, int(os.getenv("RED_PACKET_CLAIM_BATCH_SIZE", "50")))
+MESSAGE_REFRESH_INTERVAL = max(
+    0.25, float(os.getenv("RED_PACKET_MESSAGE_REFRESH_INTERVAL", "1.0"))
+)
 RED_PACKET_IMAGE_URL = (
     "https://i.postimg.cc/kMKjMnc1/"
     "qi-mi-dan-hong-bao-feng-mian-2-cong-cong-da-wang123-lai-zi-xiao-hong-shu-wang-ye-ban.jpg"
@@ -114,18 +122,42 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
     def __init__(self, bot):
         self.bot = bot
         self._registered_packet_ids: set[str] = set()
+        self._claim_queue: asyncio.Queue[tuple[discord.Interaction, str]] = asyncio.Queue(
+            maxsize=CLAIM_QUEUE_SIZE
+        )
+        self._claim_worker_task: asyncio.Task | None = None
+        self._refund_lock = asyncio.Lock()
+        self._refresh_dirty: set[str] = set()
+        self._refresh_tasks: dict[str, asyncio.Task] = {}
 
     async def cog_load(self):
         if not self.cleanup_expired_packets.is_running():
             self.cleanup_expired_packets.start()
+        self._ensure_claim_worker()
+
+    def _ensure_claim_worker(self) -> None:
+        if self._claim_worker_task is None or self._claim_worker_task.done():
+            if self._claim_worker_task is not None and not self._claim_worker_task.cancelled():
+                error = self._claim_worker_task.exception()
+                if error is not None:
+                    print(f"[RedPackets] restarting stopped claim worker: {error!r}", flush=True)
+            self._claim_worker_task = asyncio.create_task(
+                self._claim_worker(), name="red-packet-claim-worker"
+            )
 
     def cog_unload(self):
         if self.cleanup_expired_packets.is_running():
             self.cleanup_expired_packets.cancel()
+        if self._claim_worker_task is not None:
+            self._claim_worker_task.cancel()
+        for task in self._refresh_tasks.values():
+            task.cancel()
+        self._refresh_tasks.clear()
+        self._refresh_dirty.clear()
 
     @commands.Cog.listener()
     async def on_ready(self):
-        for packet in storage.get_active_packets():
+        for packet in await asyncio.to_thread(storage.get_active_packets):
             packet_id = str(packet.get("id", ""))
             if not packet_id or packet_id in self._registered_packet_ids:
                 continue
@@ -157,7 +189,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
 
         admin_free = is_admin_packet_sender(ctx.author)
         if not admin_free:
-            balance = get_user_points(ctx.author.id, ctx.guild.id)
+            balance = await asyncio.to_thread(get_user_points, ctx.author.id, ctx.guild.id)
             if balance < amount:
                 await ctx.respond(
                     f"蛋壳不够哦，需要 **{storage.format_shells(amount)}**，"
@@ -174,7 +206,8 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             return
 
         if not admin_free:
-            modify_user_points(
+            await asyncio.to_thread(
+                modify_user_points,
                 ctx.author.id,
                 -amount,
                 ctx.guild.id,
@@ -182,7 +215,8 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
                 reason=f"count={count}",
             )
 
-        packet = storage.create_packet(
+        packet = await asyncio.to_thread(
+            storage.create_packet,
             guild_id=ctx.guild.id,
             channel_id=ctx.channel.id,
             sender_id=ctx.author.id,
@@ -204,11 +238,12 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            storage.set_packet_message(packet["id"], response.id)
+            await asyncio.to_thread(storage.set_packet_message, packet["id"], response.id)
         except discord.HTTPException:
-            storage.mark_packet_cancelled(packet["id"])
+            await asyncio.to_thread(storage.mark_packet_cancelled, packet["id"])
             if not admin_free:
-                modify_user_points(
+                await asyncio.to_thread(
+                    modify_user_points,
                     ctx.author.id,
                     amount,
                     ctx.guild.id,
@@ -218,22 +253,81 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             raise
 
     async def handle_claim(self, interaction: discord.Interaction, packet_id: str):
-        # Discord requires component interactions to be acknowledged within a few
-        # seconds. Claiming touches both红包 and points storage, so defer before any
-        # synchronous I/O and send the result through the follow-up webhook.
+        # Create a concrete ephemeral response immediately. The worker edits this
+        # message with the final result, avoiding unreliable component-defer +
+        # follow-up behavior during a large backlog.
         try:
-            await interaction.response.defer(ephemeral=True)
+            await interaction.response.send_message(
+                "🧧 正在排队抢红包，请稍候…",
+                ephemeral=True,
+            )
         except (discord.NotFound, discord.HTTPException):
-            # The interaction may already have expired (for example during an
-            # event-loop stall). Do not mutate balances when no reply is possible.
             return
 
         if not interaction.guild:
             await self._send_claim_result(interaction, "红包只能在服务器里领取哦。")
             return
 
-        result = storage.claim_packet(packet_id, interaction.user.id)
-        packet = result.get("packet") or storage.get_packet(packet_id)
+        self._ensure_claim_worker()
+        try:
+            self._claim_queue.put_nowait((interaction, packet_id))
+        except asyncio.QueueFull:
+            await self._send_claim_result(
+                interaction,
+                "现在抢红包的人太多啦，请稍后再点一次。",
+            )
+
+    async def _claim_worker(self) -> None:
+        while True:
+            first_job = await self._claim_queue.get()
+            batch = [first_job]
+            while len(batch) < CLAIM_BATCH_SIZE:
+                try:
+                    batch.append(self._claim_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            try:
+                claim_inputs = [
+                    (packet_id, interaction.user.id)
+                    for interaction, packet_id in batch
+                ]
+                results = await asyncio.to_thread(storage.claim_packets, claim_inputs)
+                for (interaction, packet_id), result in zip(batch, results):
+                    try:
+                        await self._process_claim(interaction, packet_id, result)
+                    except Exception as error:
+                        print(
+                            f"[RedPackets] claim result failed: packet={packet_id} "
+                            f"user={getattr(interaction.user, 'id', 0)} error={error!r}",
+                            flush=True,
+                        )
+                        await self._send_claim_result(
+                            interaction, "抢红包时发生错误，请稍后再试。"
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(
+                    f"[RedPackets] claim batch failed: size={len(batch)} error={error!r}",
+                    flush=True,
+                )
+                for interaction, _ in batch:
+                    await self._send_claim_result(
+                        interaction, "抢红包时发生错误，请稍后再试。"
+                    )
+            finally:
+                for _ in batch:
+                    self._claim_queue.task_done()
+
+    async def _process_claim(
+        self,
+        interaction: discord.Interaction,
+        packet_id: str,
+        result: dict,
+    ) -> None:
+        packet = result.get("packet")
+        if packet is None:
+            packet = await asyncio.to_thread(storage.get_packet, packet_id)
 
         if not result.get("success"):
             reason = result.get("reason")
@@ -247,15 +341,15 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
                 text = "这个红包找不到了，可能已经被清理。"
 
             await self._send_claim_result(interaction, text)
-            if packet:
+            if packet and reason in {"expired", "empty"}:
                 if reason == "expired":
                     await self._refund_expired_packet(packet)
-                    packet = storage.get_packet(packet_id) or packet
-                await self._refresh_packet_message(packet)
+                self._schedule_packet_refresh(packet_id)
             return
 
         amount = storage.round_shells(result["amount"])
-        balance = modify_user_points(
+        balance = await asyncio.to_thread(
+            modify_user_points,
             interaction.user.id,
             amount,
             interaction.guild.id,
@@ -268,20 +362,52 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             f"抢到 **{storage.format_shells(amount)}** 蛋壳！"
             f" 当前余额：**{storage.format_shells(balance)}**。",
         )
-        await self._refresh_packet_message(packet)
+        self._schedule_packet_refresh(packet_id)
+
+    def _schedule_packet_refresh(self, packet_id: str) -> None:
+        """Coalesce bursty claims into at most one message refresh per interval."""
+        self._refresh_dirty.add(packet_id)
+        task = self._refresh_tasks.get(packet_id)
+        if task is None or task.done():
+            self._refresh_tasks[packet_id] = asyncio.create_task(
+                self._packet_refresh_loop(packet_id),
+                name=f"red-packet-refresh-{packet_id}",
+            )
+
+    async def _packet_refresh_loop(self, packet_id: str) -> None:
+        try:
+            while True:
+                self._refresh_dirty.discard(packet_id)
+                await asyncio.sleep(MESSAGE_REFRESH_INTERVAL)
+                packet = await asyncio.to_thread(storage.get_packet, packet_id)
+                if packet:
+                    await self._refresh_packet_message(packet)
+                # No await occurs after this check, so a concurrent claim cannot
+                # mark the packet dirty between deciding to stop and task cleanup.
+                if packet_id not in self._refresh_dirty:
+                    return
+        finally:
+            self._refresh_tasks.pop(packet_id, None)
 
     @staticmethod
     async def _send_claim_result(interaction: discord.Interaction, text: str) -> None:
         try:
-            await interaction.followup.send(text, ephemeral=True)
-        except (discord.NotFound, discord.HTTPException):
-            # A follow-up token can also expire if the process was blocked for an
-            # unusually long time. The claim itself is already safely persisted.
+            await interaction.edit_original_response(content=text)
             return
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        try:
+            await interaction.followup.send(text, ephemeral=True)
+        except (discord.NotFound, discord.HTTPException) as error:
+            print(
+                f"[RedPackets] unable to deliver claim result: "
+                f"interaction={interaction.id} code={getattr(error, 'code', None)}",
+                flush=True,
+            )
 
     @tasks.loop(minutes=30)
     async def cleanup_expired_packets(self):
-        expired_packets = storage.expire_due_packets()
+        expired_packets = await asyncio.to_thread(storage.expire_due_packets)
         for packet in expired_packets:
             refund_amount = await self._refund_expired_packet(packet)
             if packet.get("admin_free"):
@@ -289,7 +415,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             else:
                 closed_note = f"已自动清理，未领取部分退还 **{storage.format_shells(refund_amount)}** 蛋壳。"
             await self._refresh_packet_message(
-                storage.get_packet(packet["id"]) or packet,
+                await asyncio.to_thread(storage.get_packet, packet["id"]) or packet,
                 closed_note=closed_note,
             )
 
@@ -298,17 +424,26 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
         await self.bot.wait_until_ready()
 
     async def _refund_expired_packet(self, packet: dict) -> float:
-        refund_amount = storage.round_shells(packet.get("refund_amount", packet.get("remaining_amount", 0)))
-        if refund_amount > 0 and not packet.get("admin_free") and not packet.get("refunded"):
-            modify_user_points(
-                int(packet["sender_id"]),
-                refund_amount,
-                int(packet["guild_id"]),
-                source="red_packet_refund",
-                reason=f"packet={packet['id']};expired",
+        async with self._refund_lock:
+            latest = await asyncio.to_thread(storage.get_packet, packet["id"])
+            if latest:
+                packet = latest
+            refund_amount = storage.round_shells(
+                packet.get("refund_amount", packet.get("remaining_amount", 0))
             )
-        storage.mark_refunded(packet["id"])
-        return refund_amount
+            if packet.get("refunded"):
+                return 0.0
+            if refund_amount > 0 and not packet.get("admin_free"):
+                await asyncio.to_thread(
+                    modify_user_points,
+                    int(packet["sender_id"]),
+                    refund_amount,
+                    int(packet["guild_id"]),
+                    source="red_packet_refund",
+                    reason=f"packet={packet['id']};expired",
+                )
+            await asyncio.to_thread(storage.mark_refunded, packet["id"])
+            return refund_amount
 
     async def _refresh_packet_message(self, packet: dict, *, closed_note: str | None = None):
         if not packet:
@@ -327,9 +462,20 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             return
 
         try:
-            message = await channel.fetch_message(int(packet.get("message_id", 0) or 0))
-        except (discord.NotFound, discord.HTTPException, ValueError):
+            message_id = int(packet.get("message_id", 0) or 0)
+        except (TypeError, ValueError):
             return
+        if not message_id:
+            return
+
+        get_partial_message = getattr(channel, "get_partial_message", None)
+        if callable(get_partial_message):
+            message = get_partial_message(message_id)
+        else:
+            try:
+                message = await channel.fetch_message(message_id)
+            except (discord.NotFound, discord.HTTPException):
+                return
 
         disabled = packet.get("status") != "active"
         view = RedPacketView(self, packet["id"], disabled=disabled)

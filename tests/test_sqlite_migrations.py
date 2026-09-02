@@ -276,6 +276,51 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         self.assertFalse(repeated["success"])
         self.assertEqual(repeated["reason"], "already_claimed")
 
+    def test_repeated_claim_shows_previous_amount_after_packet_is_empty(self):
+        packet = red_packets.create_packet(
+            guild_id=99,
+            channel_id=100,
+            sender_id=7,
+            sender_name="tester",
+            total_amount=1.0,
+            count=1,
+            message="empty then repeat",
+            admin_free=False,
+        )
+
+        first = red_packets.claim_packet(packet["id"], 8)
+        repeated = red_packets.claim_packet(packet["id"], 8)
+        self.assertTrue(first["success"])
+        self.assertEqual(first["packet"]["status"], "empty")
+        self.assertFalse(repeated["success"])
+        self.assertEqual(repeated["reason"], "already_claimed")
+        self.assertEqual(repeated["amount"], first["amount"])
+
+    def test_red_packet_claim_batch_preserves_order_and_uniqueness(self):
+        packet = red_packets.create_packet(
+            guild_id=99,
+            channel_id=100,
+            sender_id=7,
+            sender_name="tester",
+            total_amount=10.0,
+            count=10,
+            message="batch claims",
+            admin_free=False,
+        )
+
+        results = red_packets.claim_packets([
+            (packet["id"], 8),
+            (packet["id"], 8),
+            (packet["id"], 9),
+        ])
+        self.assertTrue(results[0]["success"])
+        self.assertFalse(results[1]["success"])
+        self.assertEqual(results[1]["reason"], "already_claimed")
+        self.assertTrue(results[2]["success"])
+        saved = red_packets.get_packet(packet["id"])
+        self.assertEqual(saved["remaining_count"], 8)
+        self.assertEqual(set(saved["claims"]), {"8", "9"})
+
     def test_submission_notification_subscription_is_owned_and_persistent(self):
         record, created = submissions.create_submission_once(
             guild_id=99,

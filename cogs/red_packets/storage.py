@@ -162,24 +162,12 @@ def get_packet(packet_id: str) -> dict[str, Any] | None:
     return packet if isinstance(packet, dict) else None
 
 
-@_locked
-def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
-    data = load_data()
+def _claim_packet_from_data(
+    data: dict[str, Any], packet_id: str, user_id: int
+) -> tuple[dict[str, Any], bool]:
     packet = data["packets"].get(packet_id)
     if not isinstance(packet, dict):
-        return {"success": False, "reason": "not_found"}
-
-    if packet.get("status") != "active":
-        return {"success": False, "reason": packet.get("status", "closed"), "packet": packet}
-
-    expires_at = packet.get("expires_at")
-    if expires_at and parse_time(expires_at) <= now_cn():
-        packet["status"] = "expired"
-        packet["remaining_amount"] = round_shells(packet.get("remaining_amount", 0))
-        packet["refund_amount"] = packet["remaining_amount"]
-        packet["expired_at"] = now_iso()
-        save_data(data)
-        return {"success": False, "reason": "expired", "packet": packet}
+        return {"success": False, "reason": "not_found"}, False
 
     claims = packet.setdefault("claims", {})
     if str(user_id) in claims:
@@ -188,7 +176,22 @@ def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
             "reason": "already_claimed",
             "amount": round_shells(claims[str(user_id)].get("amount", 0)),
             "packet": packet,
-        }
+        }, False
+
+    if packet.get("status") != "active":
+        return {
+            "success": False,
+            "reason": packet.get("status", "closed"),
+            "packet": packet,
+        }, False
+
+    expires_at = packet.get("expires_at")
+    if expires_at and parse_time(expires_at) <= now_cn():
+        packet["status"] = "expired"
+        packet["remaining_amount"] = round_shells(packet.get("remaining_amount", 0))
+        packet["refund_amount"] = packet["remaining_amount"]
+        packet["expired_at"] = now_iso()
+        return {"success": False, "reason": "expired", "packet": packet}, True
 
     allocations = packet.setdefault("allocations", [])
     remaining_count = int(packet.get("remaining_count", len(allocations)) or 0)
@@ -196,8 +199,7 @@ def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
         packet["status"] = "empty"
         packet["remaining_amount"] = 0.0
         packet["remaining_count"] = 0
-        save_data(data)
-        return {"success": False, "reason": "empty", "packet": packet}
+        return {"success": False, "reason": "empty", "packet": packet}, True
 
     if packet.get("allocation_mode") == "lazy":
         amount = _draw_lazy_allocation(packet.get("remaining_amount", 0), remaining_count)
@@ -209,8 +211,7 @@ def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
             packet["status"] = "empty"
             packet["remaining_amount"] = 0.0
             packet["remaining_count"] = 0
-            save_data(data)
-            return {"success": False, "reason": "empty", "packet": packet}
+            return {"success": False, "reason": "empty", "packet": packet}, True
         amount = round_shells(allocations.pop())
         packet["remaining_count"] = len(allocations)
         packet["remaining_amount"] = round_shells(sum(round_shells(x) for x in allocations))
@@ -220,8 +221,33 @@ def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
         packet["remaining_amount"] = 0.0
         packet["status"] = "empty"
 
-    save_data(data)
-    return {"success": True, "amount": amount, "packet": packet}
+    return {"success": True, "amount": amount, "packet": packet}, True
+
+
+@_locked
+def claim_packets(claims: list[tuple[str, int]]) -> list[dict[str, Any]]:
+    """Apply a batch of claims with one namespace read and at most one write."""
+    if not claims:
+        return []
+    data = load_data()
+    results = []
+    changed = False
+    for packet_id, user_id in claims:
+        result, result_changed = _claim_packet_from_data(data, packet_id, user_id)
+        # Copy only the packet metadata. Deep-copying the ever-growing claims map
+        # once per result would make large红包 progressively slower.
+        snapshot = dict(result)
+        if isinstance(result.get("packet"), dict):
+            snapshot["packet"] = dict(result["packet"])
+        results.append(snapshot)
+        changed = changed or result_changed
+    if changed:
+        save_data(data)
+    return results
+
+
+def claim_packet(packet_id: str, user_id: int) -> dict[str, Any]:
+    return claim_packets([(packet_id, user_id)])[0]
 
 
 @_locked

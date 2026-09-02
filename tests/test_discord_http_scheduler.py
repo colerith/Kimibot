@@ -115,6 +115,40 @@ class DiscordRequestSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(gap >= 0.04 for gap in gaps), gaps)
         await scheduler.close()
 
+    async def test_interaction_callback_overtakes_ordinary_backlog(self):
+        started = []
+        first_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def request(route, **kwargs):
+            started.append(route.path)
+            if route.path == "/ordinary/first":
+                first_started.set()
+                await release.wait()
+            return route.path
+
+        scheduler = DiscordRequestScheduler(
+            request, requests_per_second=1000, max_concurrency=1
+        )
+        first_route = SimpleNamespace(path="/ordinary/first")
+        queued_route = SimpleNamespace(path="/ordinary/queued")
+        interaction_route = SimpleNamespace(
+            path="/interactions/{interaction_id}/{interaction_token}/callback"
+        )
+        first = asyncio.create_task(scheduler.request(first_route))
+        await first_started.wait()
+        queued = asyncio.create_task(scheduler.request(queued_route))
+        urgent = asyncio.create_task(scheduler.request(interaction_route))
+        await asyncio.sleep(0.02)
+
+        release.set()
+        await asyncio.gather(first, queued, urgent)
+        self.assertEqual(
+            started,
+            [first_route.path, interaction_route.path, queued_route.path],
+        )
+        await scheduler.close()
+
 
 if __name__ == "__main__":
     unittest.main()
