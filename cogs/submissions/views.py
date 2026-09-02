@@ -22,6 +22,7 @@ from .storage import (
     get_panel_info,
     get_submission,
     list_submissions,
+    list_useful_submissions,
     list_user_submissions,
     mark_deleted,
     parse_manual_reply_reward,
@@ -210,6 +211,7 @@ def build_panel_embed() -> discord.Embed:
     embed.add_field(name="🐞 我要捉虫", value="提交问题对象与详细描述，仅限电波系的作品哦。", inline=False)
     embed.add_field(name="🌟 我要安利", value="分享好物、书籍、影视、音乐、游戏或生活经验。", inline=False)
     embed.add_field(name="🗂️ 管理投稿", value="修改或删除自己发过的投稿。", inline=False)
+    embed.add_field(name="👍 我的有用", value="查看自己点过“觉得有用”的安利投稿。", inline=False)
     embed.set_footer(text="每日投稿次数按北京时间刷新。")
     return embed
 
@@ -954,10 +956,12 @@ class SubmissionPanelView(ui.DesignerView):
         bug_button = ui.Button(label="我要捉虫", emoji="🐞", style=discord.ButtonStyle.danger, custom_id="submission_panel_bug")
         recommend_button = ui.Button(label="我要安利", emoji="🌟", style=discord.ButtonStyle.success, custom_id="submission_panel_recommend")
         manage_button = ui.Button(label="管理投稿", emoji="🗂️", style=discord.ButtonStyle.secondary, custom_id="submission_panel_manage")
+        useful_button = ui.Button(label="我的有用", emoji="👍", style=discord.ButtonStyle.secondary, custom_id="submission_panel_my_useful")
         repo_button.callback = self.repo
         bug_button.callback = self.bug
         recommend_button.callback = self.recommend
         manage_button.callback = self.manage
+        useful_button.callback = self.my_useful
         self.add_item(
             ui.Container(
                 ui.TextDisplay(
@@ -973,10 +977,11 @@ class SubmissionPanelView(ui.DesignerView):
                     "**📦 我要repo**　提交电波系作品相关的 repo 需求。\n"
                     "**🐞 我要捉虫**　反馈电波系作品的小 bug。\n"
                     "**🌟 我要安利**　分享好物、书影音、游戏或生活经验。\n"
-                    "**🗂️ 管理投稿**　修改或删除自己发过的投稿。"
+                    "**🗂️ 管理投稿**　修改或删除自己发过的投稿。\n"
+                    "**👍 我的有用**　查看自己点过“觉得有用”的安利。"
                 ),
                 ui.Separator(),
-                ui.ActionRow(repo_button, bug_button, recommend_button, manage_button),
+                ui.ActionRow(repo_button, bug_button, recommend_button, manage_button, useful_button),
                 color=SUBMISSION_MAIN_PANEL_COLOR,
             )
         )
@@ -1020,6 +1025,23 @@ class SubmissionPanelView(ui.DesignerView):
         await interaction.followup.send(
             "选择一条投稿进行修改或删除。",
             view=SubmissionManageView(interaction.user.id, rows),
+            ephemeral=True,
+        )
+
+    async def my_useful(self, interaction: discord.Interaction):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
+        rows = list_useful_submissions(interaction.user.id, interaction.guild_id)
+        if not rows:
+            return await interaction.followup.send(
+                "你还没有点过“觉得有用”的安利投稿。",
+                ephemeral=True,
+            )
+        await interaction.followup.send(
+            _useful_list_content(0, len(rows)),
+            view=UsefulSubmissionListView(interaction.user.id, rows),
             ephemeral=True,
         )
 
@@ -1360,6 +1382,133 @@ class RecommendationActionView(discord.ui.View):
     @discord.ui.button(label="下一页", emoji="▶️", style=discord.ButtonStyle.secondary, row=1, custom_id="submission_comments_next")
     async def comments_next(self, button, interaction: discord.Interaction):
         await self._turn_comment_page(interaction, 1)
+
+
+USEFUL_SUBMISSIONS_PER_PAGE = 25
+
+
+def _useful_list_content(page: int, total_rows: int) -> str:
+    total_pages = max(1, (total_rows - 1) // USEFUL_SUBMISSIONS_PER_PAGE + 1)
+    return (
+        "选择一条你点过“觉得有用”的安利投稿查看。\n"
+        f"第 **{page + 1}/{total_pages}** 页，共 **{total_rows}** 条。"
+    )
+
+
+class UsefulSubmissionDetailView(discord.ui.View):
+    def __init__(self, record: dict):
+        super().__init__(timeout=300)
+        self.record_id = str(record.get("id", ""))
+        jump_url = _submission_jump_url(record)
+        if jump_url:
+            self.add_item(discord.ui.Button(
+                label="跳转原投稿",
+                emoji="🔗",
+                style=discord.ButtonStyle.link,
+                url=jump_url,
+            ))
+
+    @discord.ui.button(label="展开全文", emoji="📖", style=discord.ButtonStyle.secondary)
+    async def expand_content(self, button, interaction: discord.Interaction):
+        record = get_submission(self.record_id)
+        if not record:
+            return await interaction.response.send_message("这条投稿已不存在。", ephemeral=True)
+        await interaction.response.send_message(embed=_build_full_content_embed(record), ephemeral=True)
+
+
+class UsefulSubmissionSelect(discord.ui.Select):
+    def __init__(self, owner_id: int, rows: list[dict], page: int):
+        self.owner_id = owner_id
+        options = []
+        for record in rows:
+            fields = record.get("fields", {}) if isinstance(record.get("fields"), dict) else {}
+            title = _submission_title(record)
+            domain = str(fields.get("domain", "其他类型"))
+            useful_count = len(
+                record.get("useful_user_ids", [])
+                if isinstance(record.get("useful_user_ids"), list)
+                else []
+            )
+            options.append(discord.SelectOption(
+                label=title[:100],
+                value=str(record["id"]),
+                description=f"{domain} · {useful_count} 人觉得有用"[:100],
+                emoji="🌟",
+            ))
+        super().__init__(
+            placeholder=f"选择第 {page + 1} 页的安利投稿",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        record = get_submission(self.values[0])
+        useful_user_ids = record.get("useful_user_ids", []) if record else []
+        if (
+            not record
+            or record.get("status") == STATUS_DELETED
+            or str(self.owner_id) not in useful_user_ids
+        ):
+            return await interaction.response.send_message(
+                "这条投稿已删除，或你已经取消了“觉得有用”。",
+                ephemeral=True,
+            )
+        await interaction.response.send_message(
+            embed=build_submission_embed(record),
+            view=UsefulSubmissionDetailView(record),
+            ephemeral=True,
+        )
+
+
+class UsefulSubmissionListView(discord.ui.View):
+    def __init__(self, owner_id: int, rows: list[dict], page: int = 0):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.rows = rows
+        self.max_page = max(0, (len(rows) - 1) // USEFUL_SUBMISSIONS_PER_PAGE)
+        self.page = max(0, min(page, self.max_page))
+        start = self.page * USEFUL_SUBMISSIONS_PER_PAGE
+        page_rows = rows[start:start + USEFUL_SUBMISSIONS_PER_PAGE]
+        self.add_item(UsefulSubmissionSelect(owner_id, page_rows, self.page))
+
+        previous = discord.ui.Button(
+            label="上一页",
+            emoji="◀️",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page <= 0,
+            row=1,
+        )
+        following = discord.ui.Button(
+            label="下一页",
+            emoji="▶️",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page >= self.max_page,
+            row=1,
+        )
+        previous.callback = self.previous_page
+        following.callback = self.next_page
+        self.add_item(previous)
+        self.add_item(following)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("这个查看面板只属于发起它的人。", ephemeral=True)
+            return False
+        return True
+
+    async def _turn_page(self, interaction: discord.Interaction, page: int):
+        next_view = UsefulSubmissionListView(self.owner_id, self.rows, page)
+        await interaction.response.edit_message(
+            content=_useful_list_content(next_view.page, len(self.rows)),
+            view=next_view,
+        )
+
+    async def previous_page(self, interaction: discord.Interaction):
+        await self._turn_page(interaction, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await self._turn_page(interaction, self.page + 1)
 
 
 class SubmissionManageSelect(discord.ui.Select):

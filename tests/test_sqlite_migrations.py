@@ -297,6 +297,47 @@ class AppStateSQLiteMigrationTests(unittest.TestCase):
         )
         self.assertTrue(submissions.submission_notifications_enabled({"id": "legacy"}))
 
+    def test_list_useful_submissions_filters_by_user_guild_and_status(self):
+        data = submissions.load_data()
+        data["submissions"] = {
+            "liked": {
+                "id": "liked",
+                "kind": submissions.KIND_RECOMMENDATION,
+                "guild_id": "99",
+                "status": submissions.STATUS_OPEN,
+                "useful_user_ids": ["7"],
+                "created_at": "2026-09-02T12:00:00+08:00",
+            },
+            "not-liked": {
+                "id": "not-liked",
+                "kind": submissions.KIND_RECOMMENDATION,
+                "guild_id": "99",
+                "status": submissions.STATUS_OPEN,
+                "useful_user_ids": ["8"],
+                "created_at": "2026-09-02T13:00:00+08:00",
+            },
+            "deleted": {
+                "id": "deleted",
+                "kind": submissions.KIND_RECOMMENDATION,
+                "guild_id": "99",
+                "status": submissions.STATUS_DELETED,
+                "useful_user_ids": ["7"],
+                "created_at": "2026-09-02T14:00:00+08:00",
+            },
+            "other-guild": {
+                "id": "other-guild",
+                "kind": submissions.KIND_RECOMMENDATION,
+                "guild_id": "100",
+                "status": submissions.STATUS_OPEN,
+                "useful_user_ids": ["7"],
+                "created_at": "2026-09-02T15:00:00+08:00",
+            },
+        }
+        submissions.save_data(data)
+
+        rows = submissions.list_useful_submissions(7, 99)
+        self.assertEqual([row["id"] for row in rows], ["liked"])
+
     def test_task_progress_uses_authoritative_module_records(self):
         submissions.grant_comment_reward(guild_id=99, user_id=7, requested_reward=4.5)
         self.assertEqual(

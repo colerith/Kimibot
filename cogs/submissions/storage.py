@@ -596,6 +596,27 @@ def list_user_submissions(user_id: int, guild_id: int | None = None, include_del
     return sorted(rows, key=lambda row: row.get("created_at", ""), reverse=True)
 
 
+def list_useful_submissions(user_id: int, guild_id: int | None = None) -> list[dict]:
+    """Return non-deleted recommendations marked useful by one user."""
+    uid = str(user_id)
+    gid = str(guild_id) if guild_id else None
+    rows = []
+    for record in load_data().get("submissions", {}).values():
+        if not isinstance(record, dict):
+            continue
+        if record.get("kind") != KIND_RECOMMENDATION:
+            continue
+        if record.get("status") == STATUS_DELETED:
+            continue
+        if gid and record.get("guild_id") != gid:
+            continue
+        useful_user_ids = record.get("useful_user_ids", [])
+        if not isinstance(useful_user_ids, list) or uid not in useful_user_ids:
+            continue
+        rows.append(record)
+    return sorted(rows, key=lambda row: row.get("created_at", ""), reverse=True)
+
+
 def list_submissions(kind: str | None = None, include_deleted: bool = False) -> list[dict]:
     rows = []
     for record in load_data().get("submissions", {}).values():
