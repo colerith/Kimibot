@@ -7,6 +7,7 @@ import datetime
 import random
 import json
 import os
+import math
 
 from config import IDS, QUOTA, STYLE
 from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
@@ -214,18 +215,67 @@ class Tickets(commands.Cog):
         print("Tickets Cog Loaded & Views Registered.")
         print(f"当前审核暂停状态: {self.schedule_data.get('suspended')}")
 
+        await self.restore_ticket_creator_access()
         await self.restore_approved_tickets()
 
         # 启动定时任务
         if not self.reset_daily_quota.is_running(): self.reset_daily_quota.start()
         if not self.check_inactive_tickets.is_running(): self.check_inactive_tickets.start()
         if not self.check_group_confirmations.is_running(): self.check_group_confirmations.start()
+        if not self.reconcile_ticket_order.is_running(): self.reconcile_ticket_order.start()
         if not self.check_upload_windows.is_running(): self.check_upload_windows.start()
         if not self.close_tickets_at_night.is_running(): self.close_tickets_at_night.start()
 
     # ======================================================================================
     # --- 核心逻辑方法 (供 View 调用) ---
     # ======================================================================================
+
+    async def ensure_ticket_creator_access(self, channel, info, *, allow_upload):
+        """保留创建者独立的查看授权，禁言时仍可阅读消息并操作按钮。"""
+        creator_id = info.get("创建者ID")
+        if not creator_id:
+            return None
+        member = channel.guild.get_member(int(creator_id))
+        if member is None:
+            try:
+                member = await channel.guild.fetch_member(int(creator_id))
+            except discord.NotFound:
+                return None  # 用户已离开服务器，不把缓存缺失误判为退群。
+        overwrite = channel.overwrites_for(member)
+        required = {
+            "view_channel": True,
+            "read_message_history": True,
+            "send_messages": allow_upload,
+            "attach_files": allow_upload,
+        }
+        if any(getattr(overwrite, name) != value for name, value in required.items()):
+            overwrite.update(**required)
+            await channel.set_permissions(
+                member, overwrite=overwrite,
+                reason="保留工单查看与历史消息权限，仅按上传状态控制发言和附件",
+            )
+        return member
+
+    async def restore_ticket_creator_access(self):
+        """启动后修复现存工单，确保已提交、已过审用户仍能看到通知。"""
+        for category_id in (IDS.get("FIRST_REVIEW_CHANNEL_ID"),
+                            IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"),
+                            IDS.get("SECOND_REVIEW_CHANNEL_ID")):
+            category = self.bot.get_channel(category_id)
+            if not category:
+                continue
+            for channel in list(category.text_channels):
+                info = get_ticket_info(channel)
+                if not info.get("工单ID") or not info.get("创建者ID"):
+                    continue
+                approved = (str(channel.id) in self.group_confirmations
+                            or info.get("审核状态") == "已过审" or "已过审" in channel.name)
+                try:
+                    allow_upload = (not approved and info.get("上传状态") == "进行中"
+                                    and float(info.get("上传截止", 0)) > discord.utils.utcnow().timestamp())
+                    await self.ensure_ticket_creator_access(channel, info, allow_upload=allow_upload)
+                except (discord.HTTPException, TypeError, ValueError) as error:
+                    print(f"恢复工单查看权限失败: channel={channel.id} error={error!r}")
 
     async def create_ticket_logic(self, interaction: discord.Interaction, *, test_mode: bool = False):
         user = interaction.user
@@ -368,6 +418,7 @@ class Tickets(commands.Cog):
                 interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
                 interaction.user: discord.PermissionOverwrite(
                     read_messages=True,
+                    read_message_history=True,
                     send_messages=False,
                     attach_files=False,
                 ),
@@ -383,14 +434,7 @@ class Tickets(commands.Cog):
                 topic=" | ".join(f"{key}: {value}" for key, value in initial_info.items()),
             )
 
-            # 新建的待提交工单仍位于已过审队列之前。
-            order_lock = self.ticket_order_locks.setdefault(target_category.id, asyncio.Lock())
-            async with order_lock:
-                approved_channels = [c for c in target_category.text_channels
-                                     if str(c.id) in self.group_confirmations or "已过审" in c.name]
-                if approved_channels:
-                    await ch.move(before=min(approved_channels, key=lambda c: c.position),
-                                  reason="待提交工单排在已过审工单之前")
+            await self.synchronize_ticket_order(ch.guild)
 
             # 发送初始消息
             e_create = discord.Embed.from_dict(STRINGS["embeds"]["ticket_created"])
@@ -474,6 +518,7 @@ class Tickets(commands.Cog):
 
         overwrite = channel.overwrites_for(interaction.user)
         overwrite.read_messages = True
+        overwrite.read_message_history = True
         overwrite.send_messages = True
         overwrite.attach_files = True
         try:
@@ -513,82 +558,78 @@ class Tickets(commands.Cog):
         await channel.send(embed=embed)
         await interaction.followup.send("✅ 十分钟上传窗口已开启，请立即上传全部材料。", ephemeral=True)
 
-    @staticmethod
-    def _ticket_created_sort_key(channel):
-        return (channel.created_at.timestamp(), channel.id)
+    def _ticket_sort_key(self, channel):
+        info = get_ticket_info(channel)
+        created = channel.created_at.timestamp()
+
+        def timestamp(*values):
+            for value in values:
+                try:
+                    parsed = float(value)
+                    if math.isfinite(parsed) and parsed > 0:
+                        return parsed
+                except (TypeError, ValueError):
+                    pass
+            return created
+
+        approval = self.group_confirmations.get(str(channel.id), {})
+        if approval or info.get("审核状态") == "已过审" or "已过审" in channel.name:
+            return (2, timestamp(approval.get("approved_at"), info.get("过审时间")), channel.id)
+        if (info.get("材料状态") == MATERIAL_STATE_SUBMITTED
+                or channel.id in self.material_submission_times or "已提交" in channel.name):
+            return (0, timestamp(self.material_submission_times.get(channel.id),
+                                 info.get("材料提交时间"), info.get("上传开始")), channel.id)
+        return (1, created, channel.id)
+
+    async def synchronize_ticket_order(self, guild):
+        """从最新服务器快照统一排序，避免连续 move 使用过期缓存。"""
+        lock = self.ticket_order_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            try:
+                snapshot = await guild.fetch_channels()
+                # Discord 在同一排序类型中共用位置。保留其他频道与非工单的相对位置。
+                channels = sorted(
+                    (c for c in snapshot if c._sorting_bucket == discord.ChannelType.text.value),
+                    key=lambda c: (c.position, c.id),
+                )
+                ordered = list(channels)
+                category_ids = {IDS.get("FIRST_REVIEW_CHANNEL_ID"),
+                                IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"),
+                                IDS.get("SECOND_REVIEW_CHANNEL_ID")}
+                category_ids.discard(None)
+                for category_id in category_ids:
+                    slots = [i for i, c in enumerate(channels)
+                             if c.category_id == category_id and get_ticket_info(c).get("工单ID")]
+                    tickets = sorted((channels[i] for i in slots), key=self._ticket_sort_key)
+                    for index, ticket in zip(slots, tickets):
+                        ordered[index] = ticket
+                if [c.id for c in ordered] == [c.id for c in channels]:
+                    return
+                # 与 Pycord GuildChannel.move 使用相同的批量接口；不修改分类或权限。
+                await guild._state.http.bulk_channel_update(
+                    guild.id, [{"id": c.id, "position": i} for i, c in enumerate(ordered)],
+                    reason="统一工单顺序：已提交、待提交、已过审；各组按时间排列",
+                )
+            except (discord.HTTPException, discord.InvalidArgument) as error:
+                print(f"校正工单排序失败，稍后自动重试: guild={guild.id} error={error!r}")
 
     async def reposition_submitted_ticket(self, channel, submitted_at):
-        """Insert one submitted ticket into the category queue with one Discord move."""
-        category = channel.category
-        if not category:
-            return
+        saved = self.material_submission_times.get(channel.id)
+        self.material_submission_times[channel.id] = min(saved, submitted_at) if saved is not None else submitted_at
+        await self.synchronize_ticket_order(channel.guild)
 
-        lock = self.ticket_order_locks.setdefault(category.id, asyncio.Lock())
-        async with lock:
-            submitted = []
-            pending = []
-            for ticket_channel in category.text_channels:
-                info = get_ticket_info(ticket_channel)
-                if not info.get("工单ID"):
-                    continue
-                if str(ticket_channel.id) in self.group_confirmations or "已过审" in ticket_channel.name:
-                    continue
-
-                state = info.get("材料状态")
-                if ticket_channel.id == channel.id:
-                    state = MATERIAL_STATE_SUBMITTED
-                    submission_time = int(submitted_at)
-                else:
-                    submission_time = self.material_submission_times.get(ticket_channel.id)
-                    if submission_time is not None:
-                        state = MATERIAL_STATE_SUBMITTED
-                    if submission_time is None:
-                        try:
-                            submission_time = int(
-                                info.get("材料提交时间")
-                                or info.get("上传开始")
-                                or ticket_channel.created_at.timestamp()
-                            )
-                        except (TypeError, ValueError):
-                            submission_time = int(ticket_channel.created_at.timestamp())
-
-                if state == MATERIAL_STATE_SUBMITTED:
-                    submitted.append((submission_time, ticket_channel.id, ticket_channel))
-                elif state == MATERIAL_STATE_PENDING:
-                    pending.append(ticket_channel)
-
-            submitted.sort(key=lambda item: (item[0], item[1]))
-            pending.sort(key=self._ticket_created_sort_key)
-            target_index = next(
-                (index for index, item in enumerate(submitted) if item[2].id == channel.id),
-                None,
-            )
-            if target_index is None:
-                return
-
-            try:
-                if target_index + 1 < len(submitted):
-                    await channel.move(
-                        before=submitted[target_index + 1][2],
-                        reason="按材料提交顺序排列人工审核工单",
-                    )
-                elif target_index > 0:
-                    await channel.move(
-                        after=submitted[target_index - 1][2],
-                        reason="按材料提交顺序排列人工审核工单",
-                    )
-                elif pending:
-                    await channel.move(
-                        before=pending[0],
-                        reason="已提交工单置于待提交工单之前",
-                    )
-                else:
-                    await channel.move(
-                        beginning=True,
-                        reason="已提交工单置于审核频道列表最前",
-                    )
-            except (discord.Forbidden, discord.HTTPException, ValueError) as error:
-                print(f"调整工单审核队列失败: channel={channel.id} error={error!r}")
+    @tasks.loop(minutes=1)
+    async def reconcile_ticket_order(self):
+        await self.bot.wait_until_ready()
+        guilds = {}
+        for category_id in (IDS.get("FIRST_REVIEW_CHANNEL_ID"),
+                            IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"),
+                            IDS.get("SECOND_REVIEW_CHANNEL_ID")):
+            category = self.bot.get_channel(category_id)
+            if category:
+                guilds[category.guild.id] = category.guild
+        for guild in guilds.values():
+            await self.synchronize_ticket_order(guild)
 
     async def mark_material_submitted(self, channel, *, submitted_at=None):
         """Persist the first valid upload and expose it in the ticket channel prefix."""
@@ -604,7 +645,8 @@ class Tickets(commands.Cog):
             if info.get("材料状态") == MATERIAL_STATE_SUBMITTED:
                 try:
                     saved_submission_at = int(
-                        info.get("材料提交时间")
+                        self.material_submission_times.get(channel.id)
+                        or info.get("材料提交时间")
                         or submitted_at
                         or info.get("上传开始")
                         or channel.created_at.timestamp()
@@ -620,6 +662,7 @@ class Tickets(commands.Cog):
                 if isinstance(submitted_at, datetime.datetime)
                 else submitted_at or discord.utils.utcnow().timestamp()
             )
+            submitted_at = min(submitted_at, self.material_submission_times.get(channel.id, submitted_at))
             info["材料状态"] = MATERIAL_STATE_SUBMITTED
             info["材料提交时间"] = str(submitted_at)
             await channel.edit(
@@ -689,7 +732,12 @@ class Tickets(commands.Cog):
 
         info = get_ticket_info(channel)
         uid = info.get("创建者ID")
-        user = guild.get_member(int(uid)) if uid else None
+        try:
+            user = await self.ensure_ticket_creator_access(channel, info, allow_upload=False)
+        except discord.HTTPException as error:
+            print(f"过审前恢复工单查看权限失败: channel={channel.id} error={error!r}")
+            await interaction_or_ctx.followup.send("❌ 无法保留用户的工单查看权限，请检查机器人权限后重试。", ephemeral=True)
+            return False
         test_mode = info.get("测试模式") == "是"
 
         existing = self.group_confirmations.get(str(channel.id))
@@ -789,7 +837,6 @@ class Tickets(commands.Cog):
                         message = await channel.send(embed=embed, view=ArchiveRequestView())
                         state["message_id"] = message.id
                         self.save_group_confirmations()
-                    await self.reposition_approved_ticket(channel)
                 except discord.HTTPException as error:
                     print(f"恢复已过审工单失败: channel={key} error={error!r}")
 
@@ -797,33 +844,7 @@ class Tickets(commands.Cog):
         save_json_namespace("ticket_group_confirmations", self.group_confirmations)
 
     async def reposition_approved_ticket(self, channel):
-        category = channel.category
-        if not category:
-            return
-        lock = self.ticket_order_locks.setdefault(category.id, asyncio.Lock())
-        async with lock:
-            approved = []
-            others = []
-            for candidate in category.text_channels:
-                info = get_ticket_info(candidate)
-                if not info.get("工单ID"):
-                    continue
-                state = self.group_confirmations.get(str(candidate.id))
-                if state or "已过审" in candidate.name:
-                    timestamp = state["approved_at"] if state else candidate.created_at.timestamp()
-                    approved.append((timestamp, candidate.id, candidate))
-                else:
-                    others.append(candidate)
-            approved.sort(key=lambda item: (item[0], item[1]))
-            index = next((i for i, item in enumerate(approved) if item[1] == channel.id), None)
-            if index is None:
-                return
-            if index:
-                await channel.move(after=approved[index - 1][2], reason="按过审顺序排列已过审工单")
-            elif others:
-                await channel.move(after=max(others, key=lambda item: item.position), reason="已过审工单排在未提交工单下方")
-            elif len(approved) > 1:
-                await channel.move(before=approved[1][2], reason="按过审顺序排列已过审工单")
+        await self.synchronize_ticket_order(channel.guild)
 
     async def finish_group_confirmation(self, channel, choice=None, interaction=None):
         key = str(channel.id)
@@ -871,6 +892,7 @@ class Tickets(commands.Cog):
         self.reset_daily_quota.cancel()
         self.check_inactive_tickets.cancel()
         self.check_upload_windows.cancel()
+        self.reconcile_ticket_order.cancel()
         self.check_group_confirmations.cancel()
         self.close_tickets_at_night.cancel()
 
@@ -1015,21 +1037,18 @@ class Tickets(commands.Cog):
                     submitted_at=first_attachment_at,
                 )
 
-                member = channel.guild.get_member(creator_id)
-                if member:
-                    overwrite = channel.overwrites_for(member)
-                    overwrite.send_messages = False
-                    overwrite.attach_files = False
-                    try:
-                        await channel.set_permissions(
-                            member,
-                            overwrite=overwrite,
-                            reason="人工审核材料上传时间已截止",
-                        )
-                    except (discord.Forbidden, discord.HTTPException) as error:
-                        print(f"锁定工单上传权限失败: channel={channel.id} error={error!r}")
-                        continue
+                try:
+                    member = await self.ensure_ticket_creator_access(channel, info, allow_upload=False)
+                except discord.HTTPException as error:
+                    print(f"保留工单查看权限并锁定上传失败: channel={channel.id} error={error!r}")
+                    continue
 
+                # mark_material_submitted 的 Topic 更新可能尚未同步到缓存，不能用旧 info 覆盖时间。
+                first_submission = self.material_submission_times.get(channel.id)
+                if first_submission is None and first_attachment_at is not None:
+                    first_submission = int(first_attachment_at.timestamp())
+                if first_submission is not None:
+                    info["材料提交时间"] = str(first_submission)
                 info["上传状态"] = "已截止"
                 info["材料状态"] = MATERIAL_STATE_SUBMITTED
                 info["上传材料数"] = str(attachment_count)
@@ -1044,7 +1063,7 @@ class Tickets(commands.Cog):
                         title="🔒 材料上传已截止",
                         description=(
                             f"已收集 **{attachment_count} 个附件**，"
-                            f"{member.mention if member else f'<@{creator_id}>'} 现已停止补充材料。\n"
+                            f"{member.mention if member else f'<@{creator_id}>'} 现已停止补充材料，仍可查看本工单和后续过审通知。\n"
                             "审核小蛋请开始审核。"
                         ),
                         color=0xF0A45D,

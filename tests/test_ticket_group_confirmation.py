@@ -17,6 +17,7 @@ class GroupConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.cog.group_confirmation_locks = {}
         self.cog.ticket_order_locks = {}
         self.cog.save_group_confirmations = Mock()
+        self.cog.ensure_ticket_creator_access = AsyncMock(return_value=None)
         self.channel = SimpleNamespace(id=12)
         self.cog.group_confirmations = {"12": {
             "approved_at": 100, "deadline": core.discord.utils.utcnow().timestamp() + 1800,
@@ -67,20 +68,6 @@ class GroupConfirmationTests(unittest.IsolatedAsyncioTestCase):
         await ArchiveRequestView().process(interaction, "已加群")
         interaction.response.send_message.assert_awaited_once()
 
-    async def test_approved_order_uses_approval_time(self):
-        def channel(cid, position):
-            return SimpleNamespace(id=cid, position=position, topic=f"工单ID: {cid}",
-                                   name="已提交", move=AsyncMock())
-        pending, later, target, earlier = [channel(i, i) for i in (1, 2, 12, 3)]
-        category = SimpleNamespace(id=9, text_channels=[pending, later, target, earlier])
-        target.category = category
-        self.cog.group_confirmations.update({"2": {"approved_at": 200}, "3": {"approved_at": 50}})
-        await self.cog.reposition_approved_ticket(target)
-        self.assertIs(target.move.call_args.kwargs["after"], earlier)
-        self.cog.group_confirmations["12"]["approved_at"] = 10
-        await self.cog.reposition_approved_ticket(target)
-        self.assertIs(target.move.call_args.kwargs["after"], pending)
-
     async def test_approval_sends_qr_and_keeps_ticket_open(self):
         self.cog.group_confirmations = {}
         self.cog.reposition_approved_ticket = AsyncMock()
@@ -94,6 +81,7 @@ class GroupConfirmationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(core, "execute_archive", new=AsyncMock()) as archive:
             self.assertTrue(await self.cog._approve_ticket_logic_unlocked(interaction))
             archive.assert_not_awaited()
+        self.assertFalse(self.cog.ensure_ticket_creator_access.call_args.kwargs["allow_upload"])
         state = self.cog.group_confirmations["12"]
         self.assertEqual(state["deadline"] - state["approved_at"], 1800)
         self.assertEqual(channel.send.call_args.kwargs["embed"].image.url,
