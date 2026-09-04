@@ -64,10 +64,10 @@ class ArchiveRequestView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         await cog.finish_group_confirmation(interaction.channel, choice, interaction)
 
-    @discord.ui.button(label="已加群", style=discord.ButtonStyle.success, custom_id="req_archive_1")
+    @discord.ui.button(label="我已经加群啦", style=discord.ButtonStyle.success, custom_id="req_archive_1")
     async def btn_Applied(self, button, interaction): await self.process(interaction, "已加群")
 
-    @discord.ui.button(label="不加群", style=discord.ButtonStyle.secondary, custom_id="req_archive_2")
+    @discord.ui.button(label="暂时不加群", style=discord.ButtonStyle.secondary, custom_id="req_archive_2")
     async def btn_NoIssue(self, button, interaction): await self.process(interaction, "不加群")
 
 # --- 视图: 确认放弃审核 ---

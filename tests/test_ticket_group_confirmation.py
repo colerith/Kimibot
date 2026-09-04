@@ -99,7 +99,7 @@ class GroupConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.send.call_args.kwargs["embed"].image.url,
                          "https://i.postimg.cc/sxh3MQkh/2tytko.png")
         self.assertEqual([b.label for b in channel.send.call_args.kwargs["view"].children],
-                         ["已加群", "不加群"])
+                         ["我已经加群啦", "暂时不加群"])
         self.assertTrue(channel.edit.call_args.kwargs["name"].startswith("已过审-"))
         original_deadline = state["deadline"]
         await self.cog._approve_ticket_logic_unlocked(interaction)

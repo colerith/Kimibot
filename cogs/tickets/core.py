@@ -108,38 +108,49 @@ def build_ticket_approved_dm(
 ) -> discord.Embed:
     """Build the private confirmation card for a successfully approved audit."""
     embed = discord.Embed(
-        title="🎉 人工审核顺利通过！",
+        title="🎉 啵啵！人工审核顺利通过啦～",
         description=(
-            f"恭喜你，**{user.display_name}**！你在 **{guild.name}** 的人工审核已经完成。\n"
-            "正式成员身份已发放，更多社区内容现已解锁啦 ✨"
+            f"恭喜 **{user.display_name}** 宝宝！你在 **{guild.name}** 的正式成员身份已经发放好啦 ✨\n"
+            "社区里的更多内容已经解锁，欢迎来一起玩！"
         ),
         color=0x73C991,
     )
+    embed.add_field(name="🧾 你的工单", value=f"`{ticket_id}`", inline=False)
     embed.add_field(
-        name="🧾 工单编号",
-        value=f"`{ticket_id}`",
-        inline=False,
-    )
-    embed.add_field(
-        name="✅ 当前状态",
-        value="审核结果：**已通过**\n身份状态：**正式成员身份已更新**",
-        inline=False,
-    )
-    embed.add_field(
-        name="📮 最后一步",
+        name="💬 想来闲聊群玩吗？",
         value=(
-            f"请返回 [审核工单频道]({channel.jump_url}) 查看通过说明，扫描加群二维码，选择 **已加群** 或 **不加群**。\n"
-            "如果暂时没有确认，系统会在过审 30 分钟后自动归档；已获得的身份和权限不会受影响。"
+            "我们还有一个 **QQ 闲聊群**，平时可以聊天、唠嗑和认识新朋友～\n"
+            "**加不加都完全自愿**，不会影响你的 Discord 身份和任何社区权限，请按自己的意愿选择就好啦！"
         ),
         inline=False,
     )
     embed.add_field(
-        name="💛 欢迎加入",
-        value="感谢你的配合！记得遵守社区守则，祝你在社区玩得开心～",
+        name="🌷 最后点一下就好",
+        value=(
+            f"请回到 [审核工单频道]({channel.jump_url}) 扫描二维码，然后选择 **我已经加群啦** 或 **暂时不加群**。\n"
+            "工单会在选择后归档；如果忙忘了，30 分钟后也会自动收好，不影响已经获得的权限哦。"
+        ),
         inline=False,
     )
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text="权限已生效 · 请回到工单完成最后确认")
+    embed.set_footer(text="欢迎加入社区 · 闲聊群自愿添加")
+    return embed
+
+
+def build_group_confirmation_embed(deadline: float) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎊 审核通过啦！欢迎宝宝加入社区～",
+        description=(
+            "正式成员身份已经发放好啦，辛苦你完成审核！✨\n\n"
+            "下面是我们的 **QQ 闲聊群**二维码，群里主要是日常聊天、唠嗑和认识新朋友。\n"
+            "🌷 **是否加入完全自愿**，不加群也不会影响你的 Discord 身份和任何社区权限，请放心按自己的意愿选择～\n\n"
+            "扫码后请点击 **我已经加群啦**；如果不想加入，点击 **暂时不加群** 就可以啦。\n"
+            f"工单会在选择后归档；若暂时没有操作，将于 <t:{int(deadline)}:F> 自动归档。"
+        ),
+        color=0x73C991,
+    )
+    embed.set_image(url=APPROVAL_QR_IMAGE_URL)
+    embed.set_footer(text="闲聊群自愿添加 · 选择不会影响社区权限")
     return embed
 
 
@@ -725,14 +736,7 @@ class Tickets(commands.Cog):
             reason="人工审核通过，等待加群确认",
         )
         if not state.get("message_id"):
-            embed = discord.Embed(
-                title="🎉 审核已通过，请确认是否加群",
-                description=("正式成员权限已生效！可扫描下方二维码加入 QQ 群。\n"
-                             "请点击 **已加群** 或 **不加群**，点击后工单将归档。\n"
-                             f"确认截止：<t:{int(state['deadline'])}:F>（30 分钟）；逾期自动归档。"),
-                color=0x73C991,
-            )
-            embed.set_image(url=APPROVAL_QR_IMAGE_URL)
+            embed = build_group_confirmation_embed(state["deadline"])
             message = await channel.send(
                 f"<@{uid}>" if uid else None, embed=embed, view=ArchiveRequestView(),
                 allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
@@ -781,13 +785,7 @@ class Tickets(commands.Cog):
                     if channel.name != build_ticket_channel_name(info, "已过审"):
                         channel = await channel.edit(name=build_ticket_channel_name(info, "已过审"))
                     if not state.get("message_id"):
-                        embed = discord.Embed(
-                            title="🎉 审核已通过，请确认是否加群",
-                            description=("请扫描二维码，选择 **已加群** 或 **不加群** 后归档。\n"
-                                         f"确认截止：<t:{int(state['deadline'])}:F>；逾期自动归档。"),
-                            color=0x73C991,
-                        )
-                        embed.set_image(url=APPROVAL_QR_IMAGE_URL)
+                        embed = build_group_confirmation_embed(state["deadline"])
                         message = await channel.send(embed=embed, view=ArchiveRequestView())
                         state["message_id"] = message.id
                         self.save_group_confirmations()

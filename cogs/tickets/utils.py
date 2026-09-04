@@ -32,35 +32,31 @@ ARCHIVE_STYLES = {
 def build_approved_archive_dm(member, guild, ticket_id, *, automatic=False):
     """Build the DM sent after an approved audit ticket is archived."""
     archive_note = (
-        "由于等待确认超时，系统已经自动完成归档。"
+        "刚才没有等到你的选择，所以系统已经帮你把工单收好啦～"
         if automatic
-        else "你已完成最后确认，审核工单现已安全归档。"
+        else "你的选择已经收到，工单也替你收好啦～"
     )
     embed = discord.Embed(
-        title="🎉 人工审核已通过｜正式成员权限已生效",
+        title="🌟 审核完成啦，欢迎加入社区！",
         description=(
-            f"嗨，**{member.display_name}**！你在 **{guild.name}** 的人工审核流程已经全部完成。\n"
-            f"{archive_note} 已获得的正式成员身份和社区权限不会受到影响。"
+            f"嗨，**{member.display_name}** 宝宝！你在 **{guild.name}** 的审核流程已经完成。\n"
+            f"{archive_note} 正式成员身份和社区权限都会继续有效，请放心！"
         ),
         color=0x8FA8C7,
     )
     embed.add_field(name="🧾 工单编号", value=f"`{ticket_id}`", inline=False)
     embed.add_field(
-        name="💬 还想加入 QQ 闲聊群？",
+        name="💬 关于 QQ 闲聊群",
         value=(
-            "如果你还想加入社区 QQ 闲聊群，可以前往 "
-            f"[QQ群二维码领取频道]({QQ_GROUP_QR_URL}) 获取最新二维码。\n"
-            "加入闲聊群是可选的，不会影响你的 Discord 社区权限。"
+            "闲聊群只是给大家日常聊天、唠嗑和认识朋友的小窝，**完全自愿加入**。\n"
+            "之后想加入的话，也可以前往 "
+            f"[QQ群二维码领取频道]({QQ_GROUP_QR_URL}) 看看；不加入不会影响任何 Discord 权限哦～"
         ),
         inline=False,
     )
-    embed.add_field(
-        name="💛 欢迎常来玩",
-        value="审核辛苦啦！之后请继续遵守社区守则，祝你玩得开心～",
-        inline=False,
-    )
+    embed.add_field(name="💛 欢迎常来玩", value="审核辛苦啦！祝宝宝在社区玩得开心～", inline=False)
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.set_footer(text="审核流程已完成 · 正式成员权限继续有效")
+    embed.set_footer(text="审核流程已完成 · 闲聊群自愿添加")
     return embed
 
 
@@ -167,8 +163,7 @@ class TicketArchiveQQModal(discord.ui.Modal):
                 embed.set_field_at(index, name=field.name, value=f"`{qq_number}`", inline=False)
                 break
         else:
-            embed.add_field(name="💬 加群状态", value=group_status, inline=False)
-        embed.add_field(name="🐧 QQ 号码", value=f"`{qq_number}`", inline=False)
+            embed.add_field(name="🐧 QQ 号码", value=f"`{qq_number}`", inline=False)
 
         await interaction.response.defer(ephemeral=True)
         await self.archive_message.edit(embed=embed, view=ApprovedTicketArchiveView())
