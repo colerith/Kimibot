@@ -189,7 +189,7 @@ class Tickets(commands.Cog):
         self.material_state_lock = set()
         self.ticket_order_locks = {}
         self.material_submission_times = {}
-        self.group_confirmations = load_json_namespace("ticket_group_confirmations", default={})
+        self.group_confirmations = load_json_namespace("ticket_group_confirmations", legacy_file=None, default={})
         self.group_confirmation_locks = {}
 
     @commands.Cog.listener()

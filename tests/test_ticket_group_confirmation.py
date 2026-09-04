@@ -1,5 +1,7 @@
 import asyncio
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -114,3 +116,28 @@ class GroupConfirmationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_test_ticket_also_starts_with_approved_prefix(self):
         self.assertTrue(build_ticket_channel_name({"测试模式": "是"}, "已过审").startswith("已过审-"))
+
+
+class TicketExtensionLoadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extension_loads_with_real_storage_and_restores_confirmation(self):
+        from cogs.shared import sqlite_store
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "test.sqlite3")
+            with patch.object(sqlite_store, "APP_STATE_DB_FILE", database), \
+                 patch.object(sqlite_store, "_SCHEMA_READY", False), \
+                 patch.object(core, "AUDIT_SCHEDULE_FILE", str(Path(directory) / "missing.json")):
+                bot = core.discord.Bot(intents=core.discord.Intents.none())
+                try:
+                    bot.load_extension("cogs.tickets")
+                    cog = bot.get_cog("Tickets")
+                    self.assertIsNotNone(cog)
+                    self.assertEqual(cog.group_confirmations, {})
+                    state = {"approved_at": 100, "deadline": 1900, "status": "待确认"}
+                    cog.group_confirmations["12"] = state
+                    cog.save_group_confirmations()
+                    bot.unload_extension("cogs.tickets")
+                    bot.load_extension("cogs.tickets")
+                    self.assertEqual(bot.get_cog("Tickets").group_confirmations["12"], state)
+                finally:
+                    if bot.get_cog("Tickets"):
+                        bot.unload_extension("cogs.tickets")
