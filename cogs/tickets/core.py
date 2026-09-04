@@ -12,6 +12,7 @@ from config import IDS, QUOTA, STYLE
 from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 from .utils import (
     STRINGS, REVIEWER_ROLE_ID, TIMEOUT_HOURS_ARCHIVE, TIMEOUT_HOURS_REMIND,
+    APPROVAL_QR_IMAGE_URL, GROUP_CONFIRM_SECONDS,
     is_reviewer_egg, get_ticket_info, load_quota_data, save_quota_data, execute_archive,
     ApprovedTicketArchiveView, ARCHIVE_KIND_APPROVED, ARCHIVE_KIND_REJECTED, ARCHIVE_KIND_TIMEOUT,
 )
@@ -30,7 +31,7 @@ MATERIAL_STATE_SUBMITTED = "已提交"
 def build_ticket_channel_name(info, material_state):
     """Build a compact ticket name whose prefix exposes material submission state."""
     is_test = info.get("测试模式") == "是"
-    prefix = f"测试{material_state}" if is_test else material_state
+    prefix = ("已过审-测试" if is_test else "已过审") if material_state == "已过审" else (f"测试{material_state}" if is_test else material_state)
     ticket_id = info.get("工单ID") or "未知工单"
     creator = info.get("创建者") or "未知用户"
     return f"{prefix}-{ticket_id}-{creator}"[:100]
@@ -127,8 +128,8 @@ def build_ticket_approved_dm(
     embed.add_field(
         name="📮 最后一步",
         value=(
-            f"请返回 [审核工单频道]({channel.jump_url}) 查看通过说明，并完成最后的归档确认。\n"
-            "如果暂时没有确认，系统会在等待一段时间后自动归档；已获得的身份和权限不会受影响。"
+            f"请返回 [审核工单频道]({channel.jump_url}) 查看通过说明，扫描加群二维码，选择 **已加群** 或 **不加群**。\n"
+            "如果暂时没有确认，系统会在过审 30 分钟后自动归档；已获得的身份和权限不会受影响。"
         ),
         inline=False,
     )
@@ -188,6 +189,8 @@ class Tickets(commands.Cog):
         self.material_state_lock = set()
         self.ticket_order_locks = {}
         self.material_submission_times = {}
+        self.group_confirmations = load_json_namespace("ticket_group_confirmations", default={})
+        self.group_confirmation_locks = {}
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -200,9 +203,12 @@ class Tickets(commands.Cog):
         print("Tickets Cog Loaded & Views Registered.")
         print(f"当前审核暂停状态: {self.schedule_data.get('suspended')}")
 
+        await self.restore_approved_tickets()
+
         # 启动定时任务
         if not self.reset_daily_quota.is_running(): self.reset_daily_quota.start()
         if not self.check_inactive_tickets.is_running(): self.check_inactive_tickets.start()
+        if not self.check_group_confirmations.is_running(): self.check_group_confirmations.start()
         if not self.check_upload_windows.is_running(): self.check_upload_windows.start()
         if not self.close_tickets_at_night.is_running(): self.close_tickets_at_night.start()
 
@@ -366,6 +372,15 @@ class Tickets(commands.Cog):
                 topic=" | ".join(f"{key}: {value}" for key, value in initial_info.items()),
             )
 
+            # 新建的待提交工单仍位于已过审队列之前。
+            order_lock = self.ticket_order_locks.setdefault(target_category.id, asyncio.Lock())
+            async with order_lock:
+                approved_channels = [c for c in target_category.text_channels
+                                     if str(c.id) in self.group_confirmations or "已过审" in c.name]
+                if approved_channels:
+                    await ch.move(before=min(approved_channels, key=lambda c: c.position),
+                                  reason="待提交工单排在已过审工单之前")
+
             # 发送初始消息
             e_create = discord.Embed.from_dict(STRINGS["embeds"]["ticket_created"])
             if e_create.title: e_create.title = e_create.title.replace("{ticket_id}", str(tid))
@@ -505,6 +520,8 @@ class Tickets(commands.Cog):
                 info = get_ticket_info(ticket_channel)
                 if not info.get("工单ID"):
                     continue
+                if str(ticket_channel.id) in self.group_confirmations or "已过审" in ticket_channel.name:
+                    continue
 
                 state = info.get("材料状态")
                 if ticket_channel.id == channel.id:
@@ -569,6 +586,8 @@ class Tickets(commands.Cog):
         self.material_state_lock.add(channel.id)
         try:
             info = get_ticket_info(channel)
+            if str(channel.id) in self.group_confirmations or "已过审" in channel.name:
+                return False
             if info.get("上传状态") != "进行中":
                 return False
             if info.get("材料状态") == MATERIAL_STATE_SUBMITTED:
@@ -662,6 +681,12 @@ class Tickets(commands.Cog):
         user = guild.get_member(int(uid)) if uid else None
         test_mode = info.get("测试模式") == "是"
 
+        existing = self.group_confirmations.get(str(channel.id))
+        if existing and existing.get("message_id"):
+            await self.reposition_approved_ticket(channel)
+            await interaction_or_ctx.followup.send("此工单已过审，正在等待加群确认，原截止时间保持不变。", ephemeral=True)
+            return True
+
         # 1. 给身份
         if user and not test_mode:
             r_new = guild.get_role(IDS["VERIFICATION_ROLE_ID"])
@@ -681,17 +706,175 @@ class Tickets(commands.Cog):
                 )
                 return False
 
-        # 2. 归档记录成功后立即删除原工单，不再进入二审待清理区。
-        return await execute_archive(
-            self.bot,
-            interaction_or_ctx,
-            channel,
-            "管理员测试工单已完成" if test_mode else "人工审核通过",
-            is_timeout=False,
-            archive_kind=ARCHIVE_KIND_APPROVED,
-            automatic=False,
-            notify_user=True,
+        # 先持久化截止时间，重启和重复过审不会延长确认窗口。
+        key = str(channel.id)
+        if key not in self.group_confirmations:
+            approved_at = discord.utils.utcnow().timestamp()
+            self.group_confirmations[key] = {
+                "approved_at": approved_at,
+                "deadline": approved_at + GROUP_CONFIRM_SECONDS,
+                "status": "待确认",
+            }
+            self.save_group_confirmations()
+        state = self.group_confirmations[key]
+        info.update({"审核状态": "已过审", "过审时间": str(state["approved_at"]),
+                     "加群确认截止": str(state["deadline"]), "上传状态": "已结束"})
+        channel = await channel.edit(
+            name=build_ticket_channel_name(info, "已过审"),
+            topic=" | ".join(f"{k}: {v}" for k, v in info.items()),
+            reason="人工审核通过，等待加群确认",
         )
+        if not state.get("message_id"):
+            embed = discord.Embed(
+                title="🎉 审核已通过，请确认是否加群",
+                description=("正式成员权限已生效！可扫描下方二维码加入 QQ 群。\n"
+                             "请点击 **已加群** 或 **不加群**，点击后工单将归档。\n"
+                             f"确认截止：<t:{int(state['deadline'])}:F>（30 分钟）；逾期自动归档。"),
+                color=0x73C991,
+            )
+            embed.set_image(url=APPROVAL_QR_IMAGE_URL)
+            message = await channel.send(
+                f"<@{uid}>" if uid else None, embed=embed, view=ArchiveRequestView(),
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+            state["message_id"] = message.id
+            self.save_group_confirmations()
+            if user and not test_mode:
+                try:
+                    await user.send(embed=build_ticket_approved_dm(user, guild, channel, info.get("工单ID")),
+                                    view=build_ticket_approved_link_view(channel))
+                except discord.HTTPException:
+                    pass
+        await self.reposition_approved_ticket(channel)
+        await interaction_or_ctx.followup.send("✅ 已过审，已发送加群确认，30 分钟后自动归档。", ephemeral=True)
+        return True
+
+    async def restore_approved_tickets(self):
+        """接管升级前尚未清理的已过审工单，并恢复队列位置。"""
+        for category_id in (IDS.get("FIRST_REVIEW_CHANNEL_ID"),
+                            IDS.get("FIRST_REVIEW_EXTRA_CHANNEL_ID"),
+                            IDS.get("SECOND_REVIEW_CHANNEL_ID")):
+            category = self.bot.get_channel(category_id)
+            if not category:
+                continue
+            channels = [c for c in category.text_channels
+                        if "已过审" in c.name or str(c.id) in self.group_confirmations]
+            for channel in channels:
+                info = get_ticket_info(channel)
+                if not info.get("工单ID"):
+                    continue
+                key = str(channel.id)
+                try:
+                    if key not in self.group_confirmations:
+                        # 旧工单没有可靠时间时，升级后重新给予完整的确认窗口。
+                        now = discord.utils.utcnow().timestamp()
+                        try:
+                            approved_at = float(info.get("过审时间", now))
+                        except (TypeError, ValueError):
+                            approved_at = now
+                        self.group_confirmations[key] = {
+                            "approved_at": approved_at, "deadline": approved_at + GROUP_CONFIRM_SECONDS,
+                            "status": "待确认",
+                        }
+                        self.save_group_confirmations()
+                    state = self.group_confirmations[key]
+                    if channel.name != build_ticket_channel_name(info, "已过审"):
+                        channel = await channel.edit(name=build_ticket_channel_name(info, "已过审"))
+                    if not state.get("message_id"):
+                        embed = discord.Embed(
+                            title="🎉 审核已通过，请确认是否加群",
+                            description=("请扫描二维码，选择 **已加群** 或 **不加群** 后归档。\n"
+                                         f"确认截止：<t:{int(state['deadline'])}:F>；逾期自动归档。"),
+                            color=0x73C991,
+                        )
+                        embed.set_image(url=APPROVAL_QR_IMAGE_URL)
+                        message = await channel.send(embed=embed, view=ArchiveRequestView())
+                        state["message_id"] = message.id
+                        self.save_group_confirmations()
+                    await self.reposition_approved_ticket(channel)
+                except discord.HTTPException as error:
+                    print(f"恢复已过审工单失败: channel={key} error={error!r}")
+
+    def save_group_confirmations(self):
+        save_json_namespace("ticket_group_confirmations", self.group_confirmations)
+
+    async def reposition_approved_ticket(self, channel):
+        category = channel.category
+        if not category:
+            return
+        lock = self.ticket_order_locks.setdefault(category.id, asyncio.Lock())
+        async with lock:
+            approved = []
+            others = []
+            for candidate in category.text_channels:
+                info = get_ticket_info(candidate)
+                if not info.get("工单ID"):
+                    continue
+                state = self.group_confirmations.get(str(candidate.id))
+                if state or "已过审" in candidate.name:
+                    timestamp = state["approved_at"] if state else candidate.created_at.timestamp()
+                    approved.append((timestamp, candidate.id, candidate))
+                else:
+                    others.append(candidate)
+            approved.sort(key=lambda item: (item[0], item[1]))
+            index = next((i for i, item in enumerate(approved) if item[1] == channel.id), None)
+            if index is None:
+                return
+            if index:
+                await channel.move(after=approved[index - 1][2], reason="按过审顺序排列已过审工单")
+            elif others:
+                await channel.move(after=max(others, key=lambda item: item.position), reason="已过审工单排在未提交工单下方")
+            elif len(approved) > 1:
+                await channel.move(before=approved[1][2], reason="按过审顺序排列已过审工单")
+
+    async def finish_group_confirmation(self, channel, choice=None, interaction=None):
+        key = str(channel.id)
+        lock = self.group_confirmation_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            state = self.group_confirmations.get(key)
+            if not state:
+                if interaction:
+                    await interaction.followup.send("此工单不在等待加群确认，或已归档。", ephemeral=True)
+                return False
+            if state["status"] == "待确认":
+                expired = discord.utils.utcnow().timestamp() >= state["deadline"]
+                if not expired and choice is None:
+                    return False
+                state["status"] = "超时未确认" if expired else choice
+                self.save_group_confirmations()
+            automatic = state["status"] == "超时未确认"
+            archived = await execute_archive(
+                self.bot, interaction, channel,
+                f"人工审核通过；加群状态：{state['status']}",
+                is_timeout=False, archive_kind=ARCHIVE_KIND_APPROVED,
+                automatic=automatic, group_status=state["status"],
+            )
+            if archived:
+                self.group_confirmations.pop(key, None)
+                self.save_group_confirmations()
+            return archived
+
+    @tasks.loop(seconds=30)
+    async def check_group_confirmations(self):
+        await self.bot.wait_until_ready()
+        for key, state in list(self.group_confirmations.items()):
+            if state["status"] == "待确认" and discord.utils.utcnow().timestamp() < state["deadline"]:
+                continue
+            try:
+                channel = self.bot.get_channel(int(key)) or await self.bot.fetch_channel(int(key))
+                await self.finish_group_confirmation(channel)
+            except discord.NotFound:
+                self.group_confirmations.pop(key, None)
+                self.save_group_confirmations()
+            except discord.HTTPException as error:
+                print(f"加群确认自动归档失败: channel={key} error={error!r}")
+
+    def cog_unload(self):
+        self.reset_daily_quota.cancel()
+        self.check_inactive_tickets.cancel()
+        self.check_upload_windows.cancel()
+        self.check_group_confirmations.cancel()
+        self.close_tickets_at_night.cancel()
 
 
     async def update_panel_message(self):
@@ -794,6 +977,8 @@ class Tickets(commands.Cog):
                 continue
             for channel in list(category.text_channels):
                 info = get_ticket_info(channel)
+                if str(channel.id) in self.group_confirmations or "已过审" in channel.name:
+                    continue
                 if info.get("上传状态") != "进行中":
                     continue
                 try:
@@ -900,6 +1085,8 @@ class Tickets(commands.Cog):
 
                 try:
                     info = get_ticket_info(channel)
+                    if str(channel.id) in self.group_confirmations:
+                        continue
                     if info.get("上传状态") == "进行中":
                         continue
                     creator_id = info.get("创建者ID")
@@ -946,20 +1133,6 @@ class Tickets(commands.Cog):
 
 
                     # --- 逻辑分支 ---
-
-                    # 1. 兼容升级前遗留的已过审频道：超过 1 小时自动生成记录并清理。
-                    if is_name_approved and diff_active > datetime.timedelta(hours=1):
-                        await execute_archive(
-                            self.bot,
-                            None,
-                            channel,
-                            "已过审工单超过 1 小时未完成旧流程，系统自动归档",
-                            is_timeout=False,
-                            archive_kind=ARCHIVE_KIND_APPROVED,
-                            automatic=True,
-                        )
-                        continue
-
 
                     # 2. 常规超时归档 (12小时)
                     if is_name_approved:

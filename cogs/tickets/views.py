@@ -55,27 +55,20 @@ class ArchiveRequestView(discord.ui.View):
         self.reviewer = reviewer
 
     async def process(self, interaction, choice):
-        await interaction.response.defer()
-        # 禁用按钮
-        for item in self.children: item.disabled = True
-        await interaction.message.edit(view=self)
-
         info = get_ticket_info(interaction.channel)
-        await execute_archive(
-            interaction.client,
-            interaction,
-            interaction.channel,
-            f"审核通过；用户最终选择：{choice}",
-            is_timeout=False,
-            archive_kind=ARCHIVE_KIND_APPROVED,
-            automatic=False,
-        )
+        if str(interaction.user.id) != info.get("创建者ID"):
+            return await interaction.response.send_message("只有工单创建者可以确认加群状态。", ephemeral=True)
+        cog = interaction.client.get_cog("Tickets")
+        if not cog:
+            return await interaction.response.send_message("工单模块尚未加载，请稍后重试。", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        await cog.finish_group_confirmation(interaction.channel, choice, interaction)
 
-    @discord.ui.button(label="已申请加群", style=discord.ButtonStyle.primary, custom_id="req_archive_1")
-    async def btn_Applied(self, button, interaction): await self.process(interaction, "已申请加群")
+    @discord.ui.button(label="已加群", style=discord.ButtonStyle.success, custom_id="req_archive_1")
+    async def btn_Applied(self, button, interaction): await self.process(interaction, "已加群")
 
-    @discord.ui.button(label="不打算加群，没问题了", style=discord.ButtonStyle.secondary, custom_id="req_archive_2")
-    async def btn_NoIssue(self, button, interaction): await self.process(interaction, "不打算加群")
+    @discord.ui.button(label="不加群", style=discord.ButtonStyle.secondary, custom_id="req_archive_2")
+    async def btn_NoIssue(self, button, interaction): await self.process(interaction, "不加群")
 
 # --- 视图: 确认放弃审核 ---
 class ConfirmAbandonView(discord.ui.View):
@@ -89,6 +82,10 @@ class ConfirmAbandonView(discord.ui.View):
         user = interaction.user
         info = get_ticket_info(channel)
         
+        cog = interaction.client.get_cog("Tickets")
+        if info.get("审核状态") == "已过审" or (cog and str(channel.id) in cog.group_confirmations):
+            return await interaction.followup.send("工单已过审，请使用加群确认按钮。", ephemeral=True)
+
         # 1. 写入统一归档记录后自动清理工单。
         archived = await execute_archive(
             interaction.client,
@@ -143,8 +140,8 @@ def build_approve_confirmation_embed(channel) -> discord.Embed:
     embed = discord.Embed(
         title="⚠️ 确认将此工单标记为已过审？",
         description=(
-            "确认后会立即发放正式身份、发送过审私信、写入归档记录并删除原工单。\n"
-            "此操作会改变用户权限，请再次核对下方信息。"
+            "确认后会发放正式身份、发送过审私信，并在工单内展示加群二维码。\n"
+            "用户点击已加群／不加群后归档；30 分钟未确认则自动归档。请再次核对下方信息。"
         ),
         color=0xF0A45D,
     )

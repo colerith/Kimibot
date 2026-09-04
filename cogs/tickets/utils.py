@@ -16,6 +16,8 @@ TIMEOUT_HOURS_ARCHIVE = 6
 TIMEOUT_HOURS_REMIND = 3
 STRINGS_PATH = os.path.join(os.path.dirname(__file__), 'strings.json')
 QQ_GROUP_QR_URL = "https://discord.com/channels/1397629012292931726/1520276633498419220"
+APPROVAL_QR_IMAGE_URL = "https://i.postimg.cc/sxh3MQkh/2tytko.png"
+GROUP_CONFIRM_SECONDS = 30 * 60
 ARCHIVE_KIND_APPROVED = "approved"
 ARCHIVE_KIND_TIMEOUT = "timeout"
 ARCHIVE_KIND_REJECTED = "rejected"
@@ -107,6 +109,7 @@ def build_ticket_archive_embed(
     archive_kind: str,
     operator: str = "系统自动",
     qq_number: str | None = None,
+    group_status: str = "未确认",
 ) -> discord.Embed:
     """Build the durable archive record posted to the ticket log channel."""
     title, color = ARCHIVE_STYLES.get(archive_kind, ARCHIVE_STYLES[ARCHIVE_KIND_REJECTED])
@@ -124,6 +127,7 @@ def build_ticket_archive_embed(
     embed.add_field(name="👤 用户名", value=str(creator_name or "未知用户"), inline=True)
     embed.add_field(name="🛡️ 处理人", value=str(operator or "系统自动"), inline=True)
     if archive_kind == ARCHIVE_KIND_APPROVED:
+        embed.add_field(name="💬 加群状态", value=group_status, inline=False)
         embed.add_field(name="🐧 QQ 号码", value=f"`{qq_number}`" if qq_number else "`尚未录入`", inline=False)
     embed.set_footer(text="人工审核归档 · 原工单频道已自动清理")
     return embed
@@ -163,7 +167,8 @@ class TicketArchiveQQModal(discord.ui.Modal):
                 embed.set_field_at(index, name=field.name, value=f"`{qq_number}`", inline=False)
                 break
         else:
-            embed.add_field(name="🐧 QQ 号码", value=f"`{qq_number}`", inline=False)
+            embed.add_field(name="💬 加群状态", value=group_status, inline=False)
+        embed.add_field(name="🐧 QQ 号码", value=f"`{qq_number}`", inline=False)
 
         await interaction.response.defer(ephemeral=True)
         await self.archive_message.edit(embed=embed, view=ApprovedTicketArchiveView())
@@ -256,6 +261,7 @@ async def execute_archive(
     archive_kind=None,
     automatic=False,
     notify_user=True,
+    group_status=None,
 ):
     """
     执行归档操作的核心逻辑
@@ -295,6 +301,7 @@ async def execute_archive(
         closed_at=closed_at,
         archive_kind=archive_kind,
         operator=operator,
+        group_status=group_status or info.get("加群状态", "超时未确认" if automatic else "未确认"),
     )
     try:
         await log_channel.send(

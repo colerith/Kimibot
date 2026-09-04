@@ -21,7 +21,7 @@ ApprovedTicketArchiveView = ticket_utils.ApprovedTicketArchiveView
 build_ticket_archive_embed = ticket_utils.build_ticket_archive_embed
 
 
-class TicketArchiveRecordTests(unittest.TestCase):
+class TicketArchiveRecordTests(unittest.IsolatedAsyncioTestCase):
     def _build(self, archive_kind: str):
         opened_at = datetime.datetime(2026, 8, 23, 9, 30, tzinfo=datetime.timezone.utc)
         closed_at = datetime.datetime(2026, 8, 23, 10, 45, tzinfo=datetime.timezone.utc)
@@ -46,6 +46,7 @@ class TicketArchiveRecordTests(unittest.TestCase):
         self.assertIn("<t:", fields["⏱️ 工单开启时间"])
         self.assertIn("<t:", fields["🔒 工单关闭时间"])
         self.assertEqual(fields["🐧 QQ 号码"], "`尚未录入`")
+        self.assertEqual(fields["💬 加群状态"], "未确认")
 
     def test_archive_reasons_use_distinct_colors(self):
         colors = {
@@ -57,7 +58,7 @@ class TicketArchiveRecordTests(unittest.TestCase):
         timeout_fields = {field.name for field in self._build(ARCHIVE_KIND_TIMEOUT).fields}
         self.assertNotIn("🐧 QQ 号码", timeout_fields)
 
-    def test_approved_record_view_has_persistent_qq_button(self):
+    async def test_approved_record_view_has_persistent_qq_button(self):
         view = ApprovedTicketArchiveView()
         self.assertIsNone(view.timeout)
         self.assertEqual(view.children[0].custom_id, "ticket_archive_record_qq")
