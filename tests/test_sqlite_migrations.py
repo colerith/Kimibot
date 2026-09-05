@@ -81,6 +81,34 @@ class PointsSQLiteMigrationTests(unittest.TestCase):
         self.assertFalse(rejected["success"])
         self.assertEqual(points.get_user_points(1, 99), 2.5)
 
+    def test_many_point_changes_share_one_ordered_transaction(self):
+        balances = points.modify_many_user_points([
+            {
+                "user_id": 1,
+                "guild_id": 99,
+                "amount": 1.0,
+                "source": "red_packet_claim",
+                "reason": "packet=a",
+            },
+            {
+                "user_id": 1,
+                "guild_id": 99,
+                "amount": 2.0,
+                "source": "red_packet_claim",
+                "reason": "packet=b",
+            },
+            {
+                "user_id": 2,
+                "guild_id": 99,
+                "amount": 0.5,
+                "source": "red_packet_claim",
+                "reason": "packet=a",
+            },
+        ])
+        self.assertEqual(balances, [13.5, 15.5, 0.5])
+        self.assertEqual(points.get_user_points(1, 99), 15.5)
+        self.assertEqual(points.get_user_points(2, 99), 0.5)
+
     def test_legacy_snapshot_writer_remains_compatible(self):
         result = points.claim_daily_task_bonus(1, 99, "basic", 10.0)
         self.assertTrue(result["success"])

@@ -5,7 +5,11 @@ import discord
 from discord import Option
 from discord.ext import commands, tasks
 
-from cogs.points.storage import get_user_points, modify_user_points
+from cogs.points.storage import (
+    get_user_points,
+    modify_many_user_points,
+    modify_user_points,
+)
 
 from . import storage
 
@@ -13,6 +17,8 @@ from . import storage
 MIN_PACKET_UNIT = 0.1
 CLAIM_QUEUE_SIZE = max(1, int(os.getenv("RED_PACKET_CLAIM_QUEUE_SIZE", "500")))
 CLAIM_BATCH_SIZE = max(1, int(os.getenv("RED_PACKET_CLAIM_BATCH_SIZE", "50")))
+RESULT_QUEUE_SIZE = max(1, int(os.getenv("RED_PACKET_RESULT_QUEUE_SIZE", "1000")))
+RESULT_WORKER_COUNT = max(1, int(os.getenv("RED_PACKET_RESULT_WORKERS", "8")))
 MESSAGE_REFRESH_INTERVAL = max(
     0.25, float(os.getenv("RED_PACKET_MESSAGE_REFRESH_INTERVAL", "1.0"))
 )
@@ -125,7 +131,11 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
         self._claim_queue: asyncio.Queue[tuple[discord.Interaction, str]] = asyncio.Queue(
             maxsize=CLAIM_QUEUE_SIZE
         )
+        self._result_queue: asyncio.Queue[
+            tuple[discord.Interaction, str, dict]
+        ] = asyncio.Queue(maxsize=RESULT_QUEUE_SIZE)
         self._claim_worker_task: asyncio.Task | None = None
+        self._result_worker_tasks: list[asyncio.Task] = []
         self._refund_lock = asyncio.Lock()
         self._refresh_dirty: set[str] = set()
         self._refresh_tasks: dict[str, asyncio.Task] = {}
@@ -134,6 +144,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
         if not self.cleanup_expired_packets.is_running():
             self.cleanup_expired_packets.start()
         self._ensure_claim_worker()
+        self._ensure_result_workers()
         await self._register_saved_packet_views()
 
     def _ensure_claim_worker(self) -> None:
@@ -146,11 +157,34 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
                 self._claim_worker(), name="red-packet-claim-worker"
             )
 
+    def _ensure_result_workers(self) -> None:
+        running = []
+        for task in self._result_worker_tasks:
+            if task.done():
+                if not task.cancelled() and task.exception() is not None:
+                    print(
+                        f"[RedPackets] restarting stopped result worker: "
+                        f"{task.exception()!r}",
+                        flush=True,
+                    )
+            else:
+                running.append(task)
+        self._result_worker_tasks = running
+        while len(self._result_worker_tasks) < RESULT_WORKER_COUNT:
+            worker_number = len(self._result_worker_tasks) + 1
+            self._result_worker_tasks.append(asyncio.create_task(
+                self._result_worker(worker_number),
+                name=f"red-packet-result-worker-{worker_number}",
+            ))
+
     def cog_unload(self):
         if self.cleanup_expired_packets.is_running():
             self.cleanup_expired_packets.cancel()
         if self._claim_worker_task is not None:
             self._claim_worker_task.cancel()
+        for task in self._result_worker_tasks:
+            task.cancel()
+        self._result_worker_tasks.clear()
         for task in self._refresh_tasks.values():
             task.cancel()
         self._refresh_tasks.clear()
@@ -277,7 +311,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
         # follow-up behavior during a large backlog.
         try:
             await interaction.response.send_message(
-                "🧧 正在排队抢红包，请稍候…",
+                "🧧 正在抢红包，请稍候…",
                 ephemeral=True,
             )
         except (discord.NotFound, discord.HTTPException):
@@ -288,6 +322,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             return
 
         self._ensure_claim_worker()
+        self._ensure_result_workers()
         try:
             self._claim_queue.put_nowait((interaction, packet_id))
         except asyncio.QueueFull:
@@ -311,18 +346,29 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
                     for interaction, packet_id in batch
                 ]
                 results = await asyncio.to_thread(storage.claim_packets, claim_inputs)
+                successful_indexes = [
+                    index for index, result in enumerate(results)
+                    if result.get("success")
+                ]
+                if successful_indexes:
+                    point_changes = []
+                    for index in successful_indexes:
+                        interaction, packet_id = batch[index]
+                        point_changes.append({
+                            "user_id": interaction.user.id,
+                            "guild_id": interaction.guild.id,
+                            "amount": storage.round_shells(results[index]["amount"]),
+                            "source": "red_packet_claim",
+                            "reason": f"packet={packet_id}",
+                        })
+                    balances = await asyncio.to_thread(
+                        modify_many_user_points, point_changes
+                    )
+                    for index, balance in zip(successful_indexes, balances):
+                        results[index]["balance"] = balance
+
                 for (interaction, packet_id), result in zip(batch, results):
-                    try:
-                        await self._process_claim(interaction, packet_id, result)
-                    except Exception as error:
-                        print(
-                            f"[RedPackets] claim result failed: packet={packet_id} "
-                            f"user={getattr(interaction.user, 'id', 0)} error={error!r}",
-                            flush=True,
-                        )
-                        await self._send_claim_result(
-                            interaction, "抢红包时发生错误，请稍后再试。"
-                        )
+                    await self._result_queue.put((interaction, packet_id, result))
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -337,6 +383,26 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             finally:
                 for _ in batch:
                     self._claim_queue.task_done()
+
+    async def _result_worker(self, worker_number: int) -> None:
+        while True:
+            interaction, packet_id, result = await self._result_queue.get()
+            try:
+                await self._process_claim(interaction, packet_id, result)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(
+                    f"[RedPackets] result worker {worker_number} failed: "
+                    f"packet={packet_id} user={getattr(interaction.user, 'id', 0)} "
+                    f"error={error!r}",
+                    flush=True,
+                )
+                await self._send_claim_result(
+                    interaction, "抢红包时发生错误，请稍后再试。"
+                )
+            finally:
+                self._result_queue.task_done()
 
     async def _process_claim(
         self,
@@ -367,14 +433,7 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             return
 
         amount = storage.round_shells(result["amount"])
-        balance = await asyncio.to_thread(
-            modify_user_points,
-            interaction.user.id,
-            amount,
-            interaction.guild.id,
-            source="red_packet_claim",
-            reason=f"packet={packet_id}",
-        )
+        balance = storage.round_shells(result.get("balance", 0))
 
         await self._send_claim_result(
             interaction,

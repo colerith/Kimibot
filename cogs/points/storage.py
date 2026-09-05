@@ -764,6 +764,40 @@ def modify_user_points(
 
 
 @_locked_points_data
+def modify_many_user_points(changes: list[dict]) -> list[float]:
+    """Apply ordered balance changes in one SQLite transaction."""
+    if not changes:
+        return []
+    _ensure_points_db()
+    balances = []
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for change in changes:
+            user_id = int(change["user_id"])
+            guild_id = change.get("guild_id")
+            amount = change.get("amount", 0)
+            source = str(change.get("source", "manual"))
+            reason = str(change.get("reason", ""))
+            record, key = _db_get_user(connection, user_id, guild_id)
+            current_shells = _round_shells(record.get("shells", 0))
+            new_shells = _round_shells(current_shells + _round_delta(amount))
+            actual_delta = _round_delta(new_shells - current_shells)
+            record["shells"] = record["points"] = new_shells
+            _db_append_transaction(
+                connection,
+                record,
+                user_id=user_id,
+                guild_id=guild_id,
+                amount=actual_delta,
+                source=source,
+                reason=reason,
+            )
+            _db_put_user(connection, key, record)
+            balances.append(new_shells)
+    return balances
+
+
+@_locked_points_data
 def spend_user_points(
     user_id: int,
     amount: float,
