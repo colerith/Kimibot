@@ -294,7 +294,7 @@ def _normalize_role_data(data: dict) -> dict:
     panel_info = data.get("panel_info", {})
     if not isinstance(panel_info, dict):
         panel_info = {}
-    collection_config = _normalize_collection_config(data.get("collection_config"), lottery)
+    collection_config = _normalize_collection_config(data.get("collection_config"), lottery + redeem)
 
     return {
         "claimable_roles": claimable,
@@ -512,14 +512,18 @@ def update_lottery_config(
     return cfg
 
 
+def get_collectible_role_ids(data: dict) -> list[int]:
+    return _uniq_ids(data.get("lottery_roles", []) + data.get("redeem_roles", []))
+
+
 def get_collection_config(role_data: dict | None = None) -> dict:
     data = role_data if role_data is not None else load_role_data()
-    return _normalize_collection_config(data.get("collection_config"), data.get("lottery_roles", []))
+    return _normalize_collection_config(data.get("collection_config"), get_collectible_role_ids(data))
 
 
 def save_collection_config(config_data: dict) -> dict:
     data = load_role_data()
-    data["collection_config"] = _normalize_collection_config(config_data, data.get("lottery_roles", []))
+    data["collection_config"] = _normalize_collection_config(config_data, get_collectible_role_ids(data))
     save_role_data(data)
     return data["collection_config"]
 
@@ -549,7 +553,7 @@ def claim_completed_collection_rewards(user_id: int, owned_role_ids, role_data: 
     """Reserve newly completed achievements atomically; each reward is returned once."""
     data = role_data if role_data is not None else load_role_data()
     cfg = get_collection_config(data)
-    owned, pool_ids, eligible = set(_uniq_ids(owned_role_ids)), set(data.get("lottery_roles", [])), []
+    owned, pool_ids, eligible = set(_uniq_ids(owned_role_ids)), set(get_collectible_role_ids(data)), []
     with _collection_reward_lock:
         claims = load_collection_reward_claims()
         record = claims.setdefault(str(user_id), {"groups": [], "full": False})

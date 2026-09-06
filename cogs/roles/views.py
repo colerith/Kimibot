@@ -9,6 +9,7 @@ import uuid
 import config
 from datetime import datetime, timezone, timedelta
 
+from .coupons import CouponShopButton
 from .lottery_up import UpPoolView, active_up_weights
 
 from .storage import (
@@ -32,6 +33,7 @@ from .storage import (
     set_redeem_role_config,
     update_lottery_config,
     get_collection_config,
+    get_collectible_role_ids,
     save_collection_config,
     get_collection_reward_role_ids,
     claim_completed_collection_rewards,
@@ -66,6 +68,7 @@ from cogs.points.storage import (
     claim_monthly_card_first_role,
     get_monthly_card_config,
     get_monthly_card_status,
+    get_monthly_coupon_record,
     purchase_monthly_card,
     update_monthly_card_config,
 )
@@ -275,7 +278,7 @@ def _weighted_shell_reward(min_amount: float, max_amount: float) -> float:
 
 def _settle_collection_rewards(user_id: int, guild_id: int, owned_ids: set[int], role_data: dict) -> list[dict]:
     all_rewards = []
-    owned = set(owned_ids)
+    owned = set(owned_ids) | set(get_user_redeem_ownership(user_id))
     # A reward role may itself complete another configured series.
     for _ in range(len(get_collection_config(role_data).get("groups", [])) + 2):
         rewards = claim_completed_collection_rewards(user_id, owned, role_data)
@@ -341,8 +344,8 @@ def build_collection_embed(
 ) -> discord.Embed:
     data = load_role_data()
     cfg = get_collection_config(data)
-    pool_ids = _role_ids_in_server_order(guild, data.get("lottery_roles", []))
-    owned = set(get_user_collection(user_id))
+    pool_ids = _role_ids_in_server_order(guild, get_collectible_role_ids(data))
+    owned = set(get_user_collection(user_id)) | set(get_user_redeem_ownership(user_id))
     groups = cfg.get("groups", [])
     selected = next((g for g in groups if g.get("id") == selected_group_id), None)
     shown_ids = pool_ids if selected is None else _role_ids_in_server_order(
@@ -461,7 +464,7 @@ class CollectionCatalogView(discord.ui.View):
         data = load_role_data()
         cfg = get_collection_config(data)
         groups = cfg.get("groups", [])
-        pool_ids = _role_ids_in_server_order(self.guild, data.get("lottery_roles", []))
+        pool_ids = _role_ids_in_server_order(self.guild, get_collectible_role_ids(data))
         selected = next((group for group in groups if group.get("id") == self.selected_group_id), None)
         shown_ids = pool_ids if selected is None else _role_ids_in_server_order(
             self.guild,
@@ -1195,8 +1198,8 @@ class RoleLotteryView(discord.ui.View):
         except discord.NotFound:
             return
         data = await asyncio.to_thread(load_role_data)
-        if not data.get("lottery_roles", []):
-            return await interaction.followup.send("🌑 这片星域空空如也（奖池未配置）。", ephemeral=True)
+        if not get_collectible_role_ids(data):
+            return await interaction.followup.send("🌑 尚未配置抽奖或兑换身份组。", ephemeral=True)
         owned = set(await asyncio.to_thread(get_user_collection, interaction.user.id))
         rewards = await asyncio.to_thread(
             _settle_collection_rewards,
@@ -1426,6 +1429,7 @@ def build_redeem_shop_embed(guild: discord.Guild, user_id: int) -> discord.Embed
 
     balance = get_user_points(user_id, guild.id)
     monthly = get_monthly_card_status(user_id, guild.id)
+    coupon_balance = get_monthly_coupon_record(user_id, guild.id)["balance"]
     monthly_state = (
         f"启用中，剩余 **{_format_monthly_remaining(monthly)}**，已叠加 **{monthly['stacked_cards']} / {monthly['max_cards']}** 张"
         if monthly["active"]
@@ -1436,7 +1440,8 @@ def build_redeem_shop_embed(guild: discord.Guild, user_id: int) -> discord.Embed
     embed = discord.Embed(
         title="🥚 兑换商城",
         description=(
-            f"你的蛋壳：**{format_shells(balance)}**\n\n"
+            f"你的蛋壳：**{format_shells(balance)}**\n"
+            f"🎟️ 二星兑换券：**{coupon_balance}** 张（每购买一张月卡赠送一张）\n\n"
             "### 蛋壳月卡\n"
             f"售价 **{format_shells(monthly['price'])}** 蛋壳，购买后立即启用 **{monthly['duration_days']}** 天。\n"
             f"每日固定 +**{format_shells(monthly['daily_reward'])}** 蛋壳，活动收益 **{monthly['reward_multiplier']} 倍**。\n"
@@ -1609,6 +1614,7 @@ class RedeemConfirmButton(discord.ui.Button):
                 )
 
             await asyncio.to_thread(add_redeem_ownership, interaction.user.id, role.id)
+            await asyncio.to_thread(_settle_collection_rewards, interaction.user.id, interaction.guild_id, set(get_user_collection(interaction.user.id)), data)
             new_balance = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id)
 
         refreshed_embed = await asyncio.to_thread(
@@ -1636,6 +1642,7 @@ class RedeemShopView(discord.ui.View):
         self.confirm_button = RedeemConfirmButton(self)
         self.add_item(self.confirm_button)
         self.add_item(MonthlyCardPurchaseButton(guild))
+        self.add_item(CouponShopButton())
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -1650,6 +1657,7 @@ def _monthly_purchase_result_text(result: dict) -> str:
         "✅ **蛋壳月卡已经启用啦！**\n"
         f"本次消耗：**{format_shells(result.get('cost', 0))}** 蛋壳\n"
         f"本次固定结算：+**{format_shells(result.get('daily_reward', 0))}** 蛋壳\n"
+        f"🎟️ 本次赠送：**{result.get('coupon_granted', 0)}** 张二星兑换券，可在兑换商城使用\n"
         f"当前叠加：**{status.get('stacked_cards', 0)} / {status.get('max_cards', 3)}** 张\n"
         f"剩余时间：**{_format_monthly_remaining(status)}**\n"
         f"当前余额：**{format_shells(result.get('balance', 0))}** 蛋壳"
@@ -3417,7 +3425,9 @@ class RedeemConfigSelect(discord.ui.Select):
             parent_view.guild,
             [parent_view.guild.get_role(rid) for rid in data.get("redeem_roles", [])],
         )
-        for role in roles:
+        parent_view.total_pages = max(1, math.ceil(len(roles) / 25))
+        parent_view.page = min(parent_view.page, parent_view.total_pages - 1)
+        for role in roles[parent_view.page * 25:(parent_view.page + 1) * 25]:
             rid = role.id
             meta = get_redeem_role_config(rid, data)
             price, active = _effective_redeem_price(meta)
@@ -3436,13 +3446,13 @@ class RedeemConfigSelect(discord.ui.Select):
             )
 
         if not options:
-            options.append(discord.SelectOption(label="暂无兑换身份组", value="none", description="先用上方菜单添加身份组"))
+            options.append(discord.SelectOption(label="暂无兑换身份组", value="none", description="先在身份池管理中添加兑换身份组"))
             disabled = True
         else:
             disabled = False
 
         super().__init__(
-            placeholder="选择要配置价格的兑换身份组...",
+            placeholder=f"选择兑换身份组（{parent_view.page + 1}/{parent_view.total_pages} 页）",
             min_values=1,
             max_values=1,
             options=options[:25],
@@ -3585,11 +3595,13 @@ class RedeemManagerView(discord.ui.View):
         super().__init__(timeout=600)
         self.parent_view = parent_view
         self.guild = guild
+        self.page = 0
+        self.total_pages = 1
         self.refresh_items()
 
     def refresh_items(self):
         self.clear_items()
-        self.add_item(AdminAddRoleSelect(self, pool_type="redeem"))
+        # 兑换配置优先读取统一身份池管理中的兑换分类。
 
         data = load_role_data()
         role_map = {}
@@ -3602,6 +3614,10 @@ class RedeemManagerView(discord.ui.View):
         self.add_item(AdminRemoveSelect(role_map, self, page=0, page_size=25))
         self.add_item(RedeemBackButton(self.parent_view))
         self.add_item(RedeemRefreshButton(self))
+        if self.total_pages > 1:
+            button = discord.ui.Button(label=f"配置翻页 {self.page + 1}/{self.total_pages}", row=0)
+            button.callback = self.next_config_page
+            self.add_item(button)
 
     def build_embed(self) -> discord.Embed:
         data = load_role_data()
@@ -3610,7 +3626,7 @@ class RedeemManagerView(discord.ui.View):
             self.guild,
             [self.guild.get_role(rid) for rid in data.get("redeem_roles", [])],
         )
-        for role in roles:
+        for role in roles[self.page * 25:(self.page + 1) * 25]:
             rid = role.id
             meta = get_redeem_role_config(rid, data)
             lines.append(f"{role.mention} - {_redeem_price_line(meta)}")
@@ -3618,14 +3634,18 @@ class RedeemManagerView(discord.ui.View):
         embed = discord.Embed(
             title="🥚 身份兑换配置",
             description=(
-                "把身份组加入兑换池后，成员可以用蛋壳直接兑换。\n"
+                "在「身份池管理 → 兑换身份组」中添加身份组后，在这里设置价格与上架。\n"
                 "可配置常驻或限时上架；限时身份组只显示原价，窗口外无法兑换。\n"
                 "优惠与上架时间均按北京时间计算，格式建议 `YYYY-MM-DD HH:MM`。\n\n"
-                + ("\n".join(lines) if lines else "*当前兑换池为空。*")
+                + (_preview_lines(lines, 3000) if lines else "*当前兑换池为空。*")
             ),
             color=0x2B2D31,
         )
         return embed
+
+    async def next_config_page(self, interaction):
+        self.page = (self.page + 1) % self.total_pages
+        await self.refresh_content(interaction)
 
     async def refresh_content(self, interaction: discord.Interaction):
         self.refresh_items()
@@ -3641,11 +3661,11 @@ def _collection_admin_embed(guild: discord.Guild, selected_id: str) -> discord.E
     groups = cfg.get("groups", [])
     target = cfg.get("full_reward", {}) if selected_id == "__full__" else next((g for g in groups if g.get("id") == selected_id), None)
     embed = discord.Embed(title="📚 图鉴分组与收集奖励", color=0xE6C7FF,
-                          description="选择一个分组后可配置成员、文案、蛋壳与奖励身份组。每个奖池身份组只属于一个分组。")
+                          description="选择一个分组后可配置成员、文案、蛋壳与奖励身份组。抽奖与兑换身份组均可纳入，每个身份组只属于一个分组。")
     if not target:
         embed.add_field(name="当前配置", value="暂无分组，请先点击【新增分组】。", inline=False)
         return embed
-    role_ids = set(target.get("role_ids", [])) if selected_id != "__full__" else set(data.get("lottery_roles", []))
+    role_ids = set(target.get("role_ids", [])) if selected_id != "__full__" else set(get_collectible_role_ids(data))
     valid_roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
     reward_role = guild.get_role(int(target.get("reward_role_id", 0) or 0))
     embed.add_field(name=f"{target.get('emoji', '📚')} {target.get('name', '未命名')}",
@@ -3802,7 +3822,7 @@ class CollectionAdminView(discord.ui.View):
         if self.selected_id != "__full__" and not any(g.get("id") == self.selected_id for g in groups):
             self.selected_id = "__full__"
         self.add_item(CollectionAdminTargetSelect(groups, self.selected_id))
-        pool_ids = [rid for rid in data.get("lottery_roles", []) if self.parent_view.guild.get_role(rid)]
+        pool_ids = [rid for rid in get_collectible_role_ids(data) if self.parent_view.guild.get_role(rid)]
         self.total_pages = max(1, math.ceil(len(pool_ids) / 25))
         self.page = min(self.page, self.total_pages - 1)
         self.current_page_ids = pool_ids[self.page * 25:(self.page + 1) * 25]
@@ -3850,6 +3870,7 @@ ROLE_POOL_META = {
     "lottery": {"key": "lottery_roles", "label": "抽奖身份组", "emoji": "🎰"},
     "claimable": {"key": "claimable_roles", "label": "普通换装", "emoji": "🎨"},
     "notification": {"key": "notification_roles", "label": "通知订阅", "emoji": "🔔"},
+    "redeem": {"key": "redeem_roles", "label": "兑换身份组", "emoji": "🥚"},
 }
 
 
@@ -4015,6 +4036,9 @@ class RolePoolBrowseButton(discord.ui.Button):
 
     async def callback(self, interaction):
         panel = self.view
+        if self.action == "redeem_config":
+            view = RedeemManagerView(panel.parent_view, interaction.guild)
+            return await interaction.response.edit_message(embed=view.build_embed(), view=view)
         if self.action == "search":
             return await interaction.response.send_modal(RolePoolSearchModal(panel))
         if self.action == "refresh":
@@ -4083,6 +4107,8 @@ class RolePoolManagerView(discord.ui.View):
         self.add_item(RolePoolBrowseButton("add_prev", label="待添加上一页", disabled=self.add_page == 0))
         self.add_item(RolePoolBrowseButton("add_next", label="待添加下一页", disabled=self.add_page >= self.add_pages - 1))
         self.add_item(RolePoolBrowseButton("refresh", label="刷新服务器身份组"))
+        if self.pool_type == "redeem":
+            self.add_item(RolePoolBrowseButton("redeem_config", label="配置兑换价格 / 上架"))
         if self.page_roles:
             self.add_item(RolePoolConfiguredSelect(self, self.page_roles))
         else:
@@ -4136,7 +4162,7 @@ class RolePoolManagerView(discord.ui.View):
                     detail += f" · {_lottery_kind_label(get_lottery_role_kind(role.id, data))} · {_rarity_label(get_lottery_role_rarity(role.id, data))}"
                 detail_lines.append(detail)
             embed.add_field(name=f"已选择 {len(selected_roles)} 项", value="\n".join(detail_lines), inline=False)
-        embed.set_footer(text="身份组按服务器层级从上到下排列；兑换池请使用独立的「兑换配置」。")
+        embed.set_footer(text="身份组按服务器层级排列；兑换分类可直接进入价格与上架配置。")
         return embed
 
 
@@ -4296,7 +4322,7 @@ class RoleManagerView(discord.ui.View):
         embed.add_field(
             name="📚 图鉴概况",
             value=(
-                f"分组 **{len(groups)}** 个　已分组身份组 **{len(assigned_ids)}/{pool_counts['lottery_roles']}**\n"
+                f"分组 **{len(groups)}** 个　已分组身份组 **{len(assigned_ids)}/{len(get_collectible_role_ids(data))}**\n"
                 f"已配置奖励 **{configured_rewards}/{len(reward_items)}** 项"
             ),
             inline=False,

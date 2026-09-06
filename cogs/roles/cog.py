@@ -14,6 +14,7 @@ from .views import (
     refresh_role_panel,
 )
 from cogs.shared.utils import is_super_egg
+from .coupons import initialize_monthly_coupons
 from .storage import (
     get_collection_reward_role_ids,
     initialize_role_state_storage,
@@ -33,6 +34,9 @@ class RolesCog(commands.Cog):
     async def on_ready(self):
         try:
             await asyncio.to_thread(initialize_role_state_storage)
+            report = await asyncio.to_thread(initialize_monthly_coupons)
+            if not report.get("already_done"):
+                print(f"[月卡二星券] 历史补发完成：{report}")
         except Exception as error:
             print(f"[Roles] 抽卡 SQLite 初始化失败 error={error!r}")
             return

@@ -1127,6 +1127,7 @@ def get_monthly_card_status(user_id: int, guild_id: int) -> dict:
 
 @_locked_points_data
 def purchase_monthly_card(user_id: int, guild_id: int) -> dict:
+    backfill_monthly_coupons()
     data = load_points_data()
     config_data = _normalize_monthly_card_config(data.get("monthly_card_config"))
     record, _ = _ensure_user_record(data, user_id, guild_id)
@@ -1184,6 +1185,8 @@ def purchase_monthly_card(user_id: int, guild_id: int) -> dict:
         "reward_days": int(config_data["duration_days"]),
         "daily_rewards_granted": 0,
     }
+    record["monthly_two_star_coupons"] = int(record.get("monthly_two_star_coupons", 0)) + 1
+    record.setdefault("monthly_coupon_grants", []).append(purchase_id)
     all_periods.append(purchase)
     record["monthly_card_periods"] = all_periods[-24:]
 
@@ -1228,6 +1231,7 @@ def purchase_monthly_card(user_id: int, guild_id: int) -> dict:
         "cost": price,
         "daily_reward": daily_reward,
         "first_purchase": first_purchase,
+        "coupon_granted": 1,
         "balance": _round_shells(record.get("shells", 0)),
         "status": _monthly_card_status(record, config_data, now),
     }
@@ -2000,3 +2004,82 @@ def reward_daily_kimi_praise(
         "reward_date": today,
         "repaired_records": repaired,
     }
+
+
+@_locked_points_data
+def backfill_monthly_coupons() -> dict:
+    """One-time, atomic backfill from deduplicated verifiable purchases."""
+    _ensure_points_db()
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute("SELECT value FROM points_meta WHERE key='monthly_coupons_v1'").fetchone():
+            return {"already_done": True, "users": 0, "coupons": 0}
+        records = {row["user_key"]: _json_load(row["data"], {}) for row in connection.execute("SELECT user_key, data FROM point_users")}
+        evidence = {}
+        def add(key, purchase):
+            pid = str(purchase.get("purchase_id", "") or "")
+            stamp = str(purchase.get("purchased_at", "") or purchase.get("starts_at", "") or "")
+            if pid or stamp:
+                evidence.setdefault(key, []).append((pid, stamp))
+        for key, rec in records.items():
+            for item in rec.get("monthly_card_purchases", []) + rec.get("monthly_card_periods", []):
+                if isinstance(item, dict):
+                    add(key, item)
+        for row in connection.execute("SELECT data FROM point_sections WHERE namespace='monthly_card_purchases'"):
+            for item in _json_load(row["data"], []):
+                if isinstance(item, dict) and item.get("user_id"):
+                    key = _make_user_key(int(item["user_id"]), int(item["guild_id"]) if item.get("guild_id") else None)
+                    add(key, item)
+        for row in connection.execute("SELECT user_id, guild_id, time, reason FROM point_transactions WHERE source='monthly_card_purchase' AND amount<0"):
+            key = _make_user_key(int(row["user_id"]), int(row["guild_id"]) if row["guild_id"] else None)
+            pid = next((v.split("=", 1)[1] for v in str(row["reason"]).split(";") if v.startswith("purchase_id=")), "")
+            add(key, {"purchase_id": pid, "purchased_at": row["time"]})
+        users = coupons = 0
+        for key, items in evidence.items():
+            rec = _normalize_record(records.get(key, {}))
+            ids = {pid for pid, stamp in items if pid}
+            id_stamps = {stamp for pid, stamp in items if pid and stamp}
+            ids.update("legacy:" + stamp for pid, stamp in items if not pid and stamp not in id_stamps)
+            previous = set(rec.get("monthly_coupon_grants", []))
+            missing = ids - previous
+            if missing:
+                rec["monthly_two_star_coupons"] = int(rec.get("monthly_two_star_coupons", 0)) + len(missing)
+                rec["monthly_coupon_grants"] = sorted(previous | ids)
+                _db_put_user(connection, key, rec)
+                users += 1
+                coupons += len(missing)
+        unresolved = sum(1 for key, rec in records.items() if rec.get("monthly_card_ever_purchased") and key not in evidence)
+        report = {"users": users, "coupons": coupons, "unverifiable_users": unresolved, "time": _now_iso()}
+        connection.execute("INSERT INTO points_meta(key, value) VALUES ('monthly_coupons_v1', ?)", (_json_dump(report),))
+        return report
+
+
+def get_monthly_coupon_record(user_id: int, guild_id: int) -> dict:
+    backfill_monthly_coupons()
+    with _points_connection() as connection:
+        rec, _ = _db_get_user(connection, user_id, guild_id)
+        return {"balance": int(rec.get("monthly_two_star_coupons", 0)),
+                "redemptions": dict(rec.get("monthly_coupon_redemptions", {}))}
+
+
+@_locked_points_data
+def consume_monthly_coupon(user_id: int, guild_id: int, request_id: str, role_id: int) -> dict:
+    """Persist entitlement and debit together; roles are delivered by replayable receipts."""
+    backfill_monthly_coupons()
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        rec, key = _db_get_user(connection, user_id, guild_id)
+        receipts = rec.setdefault("monthly_coupon_redemptions", {})
+        if request_id in receipts:
+            return {"success": True, "duplicate": True, "role_id": receipts[request_id]}
+        balance = int(rec.get("monthly_two_star_coupons", 0))
+        if balance <= 0:
+            return {"success": False, "reason": "no_coupon"}
+        rec["monthly_two_star_coupons"] = balance - 1
+        receipts[request_id] = int(role_id)
+        if not role_id:
+            rec["shells"] = rec["points"] = _round_shells(rec.get("shells", 0) + 10)
+            _db_append_transaction(connection, rec, user_id=user_id, guild_id=guild_id,
+                amount=10, source="monthly_coupon_exchange", reason=f"request_id={request_id}")
+        _db_put_user(connection, key, rec)
+        return {"success": True, "role_id": role_id, "balance": balance - 1}
