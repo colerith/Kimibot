@@ -9,6 +9,8 @@ import uuid
 import config
 from datetime import datetime, timezone, timedelta
 
+from .lottery_up import UpPoolView, active_up_weights
+
 from .storage import (
     clear_role_panel_info,
     load_role_data,
@@ -484,6 +486,7 @@ def _pick_available_role(
     weights: list[int],
     *,
     forced_rarity: int | None = None,
+    up_weights: dict | None = None,
 ) -> tuple[discord.Role | None, int, str | None]:
     if forced_rarity is not None:
         candidate_rarities = [forced_rarity]
@@ -510,7 +513,9 @@ def _pick_available_role(
         if not available_kinds:
             continue
         picked_kind = random.choice(available_kinds)
-        return random.choice(pools_by_kind_rarity[picked_kind][rarity]), rarity, picked_kind
+        roles = pools_by_kind_rarity[picked_kind][rarity]
+        role_weights = [(up_weights or {}).get(role.id, 1.0) for role in roles]
+        return random.choices(roles, weights=role_weights, k=1)[0], rarity, picked_kind
     return None, 0, None
 
 
@@ -964,6 +969,7 @@ class RoleLotteryView(discord.ui.View):
         no_legendary_streak = int(stats_before.get("no_legendary_streak", 0))
         guarantee_notes = []
 
+        up_weights = active_up_weights(data, guild_id)
         for _ in range(draw_count):
             force_legendary = no_legendary_streak >= LEGENDARY_PITY_LIMIT - 1
             force_role = force_legendary or no_role_streak >= ROLE_PITY_LIMIT - 1
@@ -1001,6 +1007,7 @@ class RoleLotteryView(discord.ui.View):
                 rarity_pool,
                 weights,
                 forced_rarity=forced_rarity,
+                up_weights=up_weights,
             )
             if not won_role and force_legendary:
                 guarantee_notes.append("三星池为空，三星保底暂退为身份组保底")
@@ -1008,6 +1015,7 @@ class RoleLotteryView(discord.ui.View):
                     pools_by_kind_rarity,
                     rarity_pool,
                     weights,
+                    up_weights=up_weights,
                 )
             if not won_role:
                 results.append({"type": "empty", "role": None, "rarity": 0, "dupe": False, "refund": 0, "shell_reward": 0, "reason": "no_role"})
@@ -3822,6 +3830,11 @@ class LotteryConfigHubView(discord.ui.View):
     async def rarity(self, button, interaction: discord.Interaction):
         view = LotteryRarityConfigView(self.parent_view, interaction.guild)
         await interaction.response.edit_message(embed=discord.Embed(title="⚙️ 抽奖身份组批量配置", description="选择身份组、稀有度与类型后应用。", color=0x2B2D31), view=view)
+
+    @discord.ui.button(label="限时 UP 池", style=discord.ButtonStyle.primary, emoji="📈")
+    async def up_pool(self, button, interaction: discord.Interaction):
+        view = UpPoolView(self.parent_view, interaction.user.id)
+        await interaction.response.edit_message(embed=view.embed(), view=view)
 
     @discord.ui.button(label="图鉴与收集奖励", style=discord.ButtonStyle.success, emoji="📚")
     async def collection(self, button, interaction: discord.Interaction):

@@ -306,6 +306,7 @@ def _normalize_role_data(data: dict) -> dict:
         "redeem_role_meta": redeem_meta,
         "lottery_config": lottery_config,
         "collection_config": collection_config,
+        "lottery_up": data.get("lottery_up", {}),
     }
 
 # --- 身份组配置数据 ---
