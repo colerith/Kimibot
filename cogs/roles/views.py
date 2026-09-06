@@ -3880,12 +3880,12 @@ class RolePoolCategorySelect(discord.ui.Select):
 class RolePoolAddSelect(discord.ui.Select):
     def __init__(self, panel: "RolePoolManagerView"):
         meta = ROLE_POOL_META[panel.pool_type]
+        roles = panel.available_page_roles
         super().__init__(
-            placeholder=f"② 选择服务器身份组，添加到「{meta['label']}」",
-            min_values=1,
-            max_values=25,
-            row=1,
-            select_type=discord.ComponentType.role_select,
+            placeholder=f"② 添加到{meta['label']}（待添加 {panel.add_page + 1}/{panel.add_pages} 页）",
+            min_values=1, max_values=len(roles), row=1,
+            options=[discord.SelectOption(label=role.name[:100], value=str(role.id),
+                     description=f"ID {role.id} · 层级 {role.position}") for role in roles],
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -3899,7 +3899,7 @@ class RolePoolAddSelect(discord.ui.Select):
         added, skipped = [], []
         target = data.setdefault(target_key, [])
         for role_id in selected_ids:
-            role = interaction.guild.get_role(role_id)
+            role = panel.server_roles.get(role_id)
             if not role:
                 skipped.append(f"{role_id}（已失效）")
                 continue
@@ -3994,11 +3994,55 @@ class RolePoolActionButton(discord.ui.Button):
         await interaction.response.defer()
 
 
+class RolePoolSearchModal(discord.ui.Modal):
+    def __init__(self, panel):
+        super().__init__(title="搜索待添加身份组")
+        self.panel = panel
+        self.query = discord.ui.InputText(label="名称关键词或身份组 ID（留空显示全部）", required=False, max_length=100, value=panel.add_query)
+        self.add_item(self.query)
+
+    async def callback(self, interaction):
+        self.panel.add_query = self.query.value.strip()
+        self.panel.add_page = 0
+        self.panel.rebuild()
+        await interaction.response.edit_message(embed=self.panel.build_embed(), view=self.panel)
+
+
+class RolePoolBrowseButton(discord.ui.Button):
+    def __init__(self, action, *, label, disabled=False):
+        super().__init__(label=label, disabled=disabled, row=4)
+        self.action = action
+
+    async def callback(self, interaction):
+        panel = self.view
+        if self.action == "search":
+            return await interaction.response.send_modal(RolePoolSearchModal(panel))
+        if self.action == "refresh":
+            await interaction.response.defer()
+            try:
+                roles = await interaction.guild.fetch_roles()
+            except discord.HTTPException:
+                return await interaction.followup.send("❌ 拉取服务器身份组失败，请稍后重试。原列表已保留。", ephemeral=True)
+            panel.server_roles = {role.id: role for role in roles}
+            panel.add_page = 0
+            panel.add_query = ""
+        else:
+            panel.add_page = max(0, min(panel.add_page + (-1 if self.action == "add_prev" else 1), panel.add_pages - 1))
+        panel.rebuild()
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=panel.build_embed(), view=panel)
+        else:
+            await interaction.response.edit_message(embed=panel.build_embed(), view=panel)
+
+
 class RolePoolManagerView(discord.ui.View):
     def __init__(self, parent_view: "RoleManagerView", pool_type: str = "lottery"):
         super().__init__(timeout=600)
         self.parent_view = parent_view
         self.guild = parent_view.guild
+        self.server_roles = {role.id: role for role in self.guild.roles}
+        self.add_page = 0
+        self.add_query = ""
         self.pool_type = pool_type if pool_type in ROLE_POOL_META else "lottery"
         self.page = 0
         self.page_size = 25
@@ -4010,7 +4054,7 @@ class RolePoolManagerView(discord.ui.View):
     def _configured_roles(self) -> list[discord.Role]:
         data = load_role_data()
         ids = data.get(ROLE_POOL_META[self.pool_type]["key"], [])
-        return _roles_in_server_order(self.guild, [self.guild.get_role(role_id) for role_id in ids])
+        return _roles_in_server_order(self.guild, [self.server_roles.get(role_id) for role_id in ids])
 
     def rebuild(self):
         self.clear_items()
@@ -4021,7 +4065,24 @@ class RolePoolManagerView(discord.ui.View):
         valid_ids = {role.id for role in self.page_roles}
         self.selected_role_ids = [role_id for role_id in self.selected_role_ids if role_id in valid_ids]
         self.add_item(RolePoolCategorySelect(self))
-        self.add_item(RolePoolAddSelect(self))
+        data = load_role_data()
+        configured = {rid for key in ("lottery_roles", "claimable_roles", "notification_roles", "redeem_roles") for rid in data.get(key, [])}
+        available = sorted(
+            (r for r in self.server_roles.values() if r.id != self.guild.id and not r.managed and r.id not in configured
+             and (not self.add_query or self.add_query.casefold() in r.name.casefold() or self.add_query == str(r.id))),
+            key=lambda r: (r.position, r.id), reverse=True,
+        )
+        self.add_pages = max(1, math.ceil(len(available) / 25))
+        self.add_page = min(self.add_page, self.add_pages - 1)
+        self.available_page_roles = available[self.add_page * 25:(self.add_page + 1) * 25]
+        if self.available_page_roles:
+            self.add_item(RolePoolAddSelect(self))
+        else:
+            self.add_item(discord.ui.Button(label="没有匹配的待添加身份组，可搜索或刷新", disabled=True, row=1))
+        self.add_item(RolePoolBrowseButton("search", label="搜索名称 / ID"))
+        self.add_item(RolePoolBrowseButton("add_prev", label="待添加上一页", disabled=self.add_page == 0))
+        self.add_item(RolePoolBrowseButton("add_next", label="待添加下一页", disabled=self.add_page >= self.add_pages - 1))
+        self.add_item(RolePoolBrowseButton("refresh", label="刷新服务器身份组"))
         if self.page_roles:
             self.add_item(RolePoolConfiguredSelect(self, self.page_roles))
         else:
@@ -4040,14 +4101,16 @@ class RolePoolManagerView(discord.ui.View):
         meta = ROLE_POOL_META[self.pool_type]
         counts = []
         for pool_type, pool_meta in ROLE_POOL_META.items():
-            count = sum(1 for role_id in data.get(pool_meta["key"], []) if self.guild.get_role(role_id))
+            count = sum(1 for role_id in data.get(pool_meta["key"], []) if self.server_roles.get(role_id))
             marker = "▸" if pool_type == self.pool_type else "·"
             counts.append(f"{marker} {pool_meta['emoji']} **{pool_meta['label']}** {count}")
         embed = discord.Embed(
             title=f"{meta['emoji']} 身份池管理 · {meta['label']}",
             description=(
                 "按 **① 选择池 → ② 添加身份组 → ③ 查看/勾选** 连续操作；"
-                "切换池和翻页都在当前面板完成。\n\n" + "　".join(counts)
+                "新建身份组可点「刷新服务器身份组」，再按名称或 ID 搜索。\n"
+                f"待添加列表：第 {self.add_page + 1}/{self.add_pages} 页；搜索：{discord.utils.escape_markdown(self.add_query) if self.add_query else '全部'}。\n"
+                "已加入任一身份池的身份组不重复列出；系统管理身份组不可添加。\n\n" + "　".join(counts)
             ),
             color=0x5865F2,
         )
@@ -4060,7 +4123,7 @@ class RolePoolManagerView(discord.ui.View):
             value="\n".join(page_lines) if page_lines else "*当前身份池还没有配置身份组。*",
             inline=False,
         )
-        selected_roles = [self.guild.get_role(role_id) for role_id in self.selected_role_ids]
+        selected_roles = [self.server_roles.get(role_id) for role_id in self.selected_role_ids]
         selected_roles = [role for role in selected_roles if role]
         if selected_roles:
             detail_lines = []
@@ -4086,8 +4149,15 @@ class AdminActionButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         cfg = get_lottery_config(load_role_data())
         if self.action == "pools":
+            await interaction.response.defer()
+            try:
+                roles = await interaction.guild.fetch_roles()
+            except discord.HTTPException:
+                return await interaction.followup.send("❌ 无法读取服务器身份组，请稍后重试。", ephemeral=True)
             pool_view = RolePoolManagerView(self.parent_view)
-            return await interaction.response.edit_message(embed=pool_view.build_embed(), view=pool_view)
+            pool_view.server_roles = {role.id: role for role in roles}
+            pool_view.rebuild()
+            return await interaction.edit_original_response(embed=pool_view.build_embed(), view=pool_view)
         if self.action == "hub":
             return await interaction.response.edit_message(
                 embed=discord.Embed(title="🎰 奖池与图鉴配置", description="请选择要管理的内容。", color=0x2B2D31),
