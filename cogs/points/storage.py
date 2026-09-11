@@ -805,12 +805,18 @@ def spend_user_points(
     *,
     source: str,
     reason: str = "",
+    operation_id: str | None = None,
 ) -> dict:
     """原子检查并扣除蛋壳，避免余额检查与抽卡扣款之间被其他消费穿插。"""
     cost = _round_delta(max(0.0, float(amount)))
     _ensure_points_db()
     with _points_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if operation_id is not None:
+            connection.execute("CREATE TABLE IF NOT EXISTS shell_spend_receipts (operation_id TEXT PRIMARY KEY, result TEXT NOT NULL)")
+            previous = connection.execute("SELECT result FROM shell_spend_receipts WHERE operation_id=?", (operation_id,)).fetchone()
+            if previous:
+                return json.loads(previous[0])
         record, key = _db_get_user(connection, user_id, guild_id)
         balance = _round_shells(record.get("shells", 0))
         if balance < cost:
@@ -823,7 +829,10 @@ def spend_user_points(
             amount=actual_delta, source=source, reason=reason,
         )
         _db_put_user(connection, key, record)
-        return {"success": True, "reason": "spent", "cost": abs(actual_delta), "balance": after}
+        result = {"success": True, "reason": "spent", "cost": abs(actual_delta), "balance": after}
+        if operation_id is not None:
+            connection.execute("INSERT INTO shell_spend_receipts VALUES (?, ?)", (operation_id, json.dumps(result)))
+        return result
 
 
 @_locked_points_data
@@ -899,6 +908,42 @@ def _reconcile_daily_task_bonus_sql(
             "amount": abs(actual_delta) if result_reason == "revoked" else actual_delta,
             "balance": after,
         }
+
+
+@_locked_points_data
+def settle_kimi_daily_event(user_id: int, guild_id: int, action: str, day: str) -> dict:
+    """每天每人每服务器每玩法一次；余额、流水和随机结果在同一事务提交。"""
+    if action not in {"status", "fortune"}:
+        raise ValueError("unsupported Kimi daily event")
+    datetime.strptime(day, "%Y-%m-%d")
+    _ensure_points_db()
+    with _points_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("""CREATE TABLE IF NOT EXISTS kimi_daily_events (
+            guild_id INTEGER, user_id INTEGER, action TEXT, day TEXT, result TEXT NOT NULL,
+            PRIMARY KEY(guild_id, user_id, action, day))""")
+        event_key = (guild_id, user_id, action, day)
+        previous = connection.execute(
+            "SELECT result FROM kimi_daily_events WHERE guild_id=? AND user_id=? AND action=? AND day=?",
+            event_key,
+        ).fetchone()
+        if previous:
+            return json.loads(previous[0])
+        # Integer tenths avoid floating-point drift; rewards and penalties are equally likely.
+        requested = random.choice((-1, 1)) * random.randint(1, 100) / 10
+        record, key = _db_get_user(connection, user_id, guild_id)
+        before = _round_shells(record.get("shells", 0))
+        after = _round_shells(max(0, before + requested))
+        actual = _round_delta(after - before)
+        record["shells"] = record["points"] = after
+        _db_append_transaction(connection, record, user_id=user_id, guild_id=guild_id,
+                               amount=actual, source=f"kimi_{action}_event",
+                               reason=f"{day} 随机蛋壳事件，抽取{requested:+.1f}，实际{actual:+.1f}")
+        _db_put_user(connection, key, record)
+        result = {"requested": requested, "actual": actual, "balance": after}
+        connection.execute("INSERT INTO kimi_daily_events VALUES (?, ?, ?, ?, ?)",
+                           (*event_key, json.dumps(result)))
+        return result
 
 
 def get_user_points(user_id: int, guild_id: int | None = None) -> float:

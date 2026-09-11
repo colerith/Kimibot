@@ -4,10 +4,18 @@ import os
 import discord
 from discord.ext import commands
 
-from .engine import ALIASES, Entertainment
+from .engine import Entertainment
 
 # Prefix-free text aliases are deliberately distinct from the existing points cog.
-TEXT_COMMANDS = {'奇米签到', '奇米我来惹', '我的饭粒', '奇米饭粒', '喂奇米', '摸摸奇米', '看看奇米', '今日运势', '今日奇米', '奇米运势', '娱乐帮助', '奇米帮助'}
+TEXT_COMMANDS = {'喂奇米', '摸摸奇米', '看看奇米', '今日运势', '今日奇米', '奇米运势', '娱乐帮助', '奇米帮助'}
+
+
+def make_panel(text, command):
+    title, _, body = text.partition('\n')
+    color = 0xB49CFF if command in {'今日运势', '今日奇米', '奇米运势'} else 0xF2C879
+    embed = discord.Embed(title=title, description=body, color=color)
+    embed.set_footer(text='奇米游乐园 ♡ · 群宠由本服务器共同养育 · 每日签语北京时间零点刷新')
+    return embed
 
 
 class EntertainmentCog(commands.Cog):
@@ -20,19 +28,12 @@ class EntertainmentCog(commands.Cog):
             return await ctx.respond('请在服务器里找奇米玩捏♡', ephemeral=True)
         await ctx.defer()
         text = await asyncio.to_thread(self.game.handle, ctx.guild.id, ctx.author.id, command, ctx.interaction.id)
-        await ctx.followup.send(text, allowed_mentions=discord.AllowedMentions.none())
+        if text is not None:
+            await ctx.followup.send(embed=make_panel(text, command), allowed_mentions=discord.AllowedMentions.none())
 
-    kimi = discord.SlashCommandGroup('奇米', '签到、饭粒、群宠和今日运势')
+    kimi = discord.SlashCommandGroup('奇米', '蛋壳喂食、群宠和今日运势')
 
-    @kimi.command(name='签到', description='每天来领饭粒捏♡')
-    async def checkin(self, ctx):
-        await self.reply(ctx, '奇米签到')
-
-    @kimi.command(name='饭粒', description='看看你的小口袋')
-    async def balance(self, ctx):
-        await self.reply(ctx, '我的饭粒')
-
-    @kimi.command(name='喂食', description='花3粒米喂养本服务器的奇米')
+    @kimi.command(name='喂食', description='花3蛋壳喂养本服务器的奇米')
     async def feed(self, ctx):
         await self.reply(ctx, '喂奇米')
 
@@ -60,4 +61,5 @@ class EntertainmentCog(commands.Cog):
         if text not in TEXT_COMMANDS:
             return
         result = await asyncio.to_thread(self.game.handle, message.guild.id, message.author.id, text, message.id)
-        await message.channel.send(result, allowed_mentions=discord.AllowedMentions.none())
+        if result is not None:
+            await message.channel.send(embed=make_panel(result, text), allowed_mentions=discord.AllowedMentions.none())
