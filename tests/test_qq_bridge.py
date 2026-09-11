@@ -89,3 +89,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.channel.guild.text_channels = [types.SimpleNamespace(topic='创建者ID: 55 | 工单ID: 123456 | 材料状态: 待提交')]
         self.assertEqual((await self.worker.process(self.channel, self.row))[0], 'pending')
         self.message.edit.assert_not_awaited()
+
+    async def test_approved_live_ticket_can_admit_before_archive(self):
+        self.channel.guild.text_channels = [types.SimpleNamespace(id=5, topic='工单ID: 123456 | 审核状态: 已过审')]
+        self.worker.bot.fetch_channel = AsyncMock(return_value=self.channel.guild.text_channels[0])
+        self.assertEqual((await self.worker.process(self.channel, self.row))[0], 'ready')
+        self.message.edit.assert_not_awaited()
+
+    async def test_unapproved_live_ticket_cannot_admit(self):
+        self.channel.guild.text_channels = [types.SimpleNamespace(id=5, topic='工单ID: 123456 | 审核状态: 一审中')]
+        self.worker.bot.fetch_channel = AsyncMock(return_value=self.channel.guild.text_channels[0])
+        self.assertEqual((await self.worker.process(self.channel, self.row))[0], 'pending')
+
+    async def test_competing_qq_cannot_claim_ticket(self):
+        self.worker.box.index(42, '123456', True)
+        self.worker.box.reserve('123456', 99999)
+        self.assertEqual((await self.worker.process(self.channel, self.row))[0], 'conflict')
+        self.message.edit.assert_not_awaited()

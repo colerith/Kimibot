@@ -101,6 +101,20 @@ class QQBridge(commands.Cog):
         matches = self.box.matches(row['ticket'])
         if len(matches) > 1:
             return 'conflict', '工单编号重复，请人工核对Discord用户'
+        active_matches = [active for active in channel.guild.text_channels if re.search(
+            r'(?:^|\|)\s*工单ID:\s*' + re.escape(row['ticket']) + r'\s*(?:\||$)', active.topic or '')]
+        if len(active_matches) > 1:
+            return 'conflict', '多个现存工单使用相同编号'
+        if active_matches:
+            if matches:
+                return 'pending', '同编号原工单仍存在，等待归档清理后再核对'
+            active = await self.bot.fetch_channel(active_matches[0].id)
+            info = dict(part.strip().split(': ', 1) for part in (active.topic or '').split('|') if ': ' in part.strip())
+            if info.get('工单ID') != row['ticket'] or info.get('审核状态') != '已过审' or info.get('测试模式') == '是':
+                return 'pending', '工单尚未过审或为测试工单，不自动批准'
+            if not self.box.reserve(row['ticket'], row['qq']):
+                return 'conflict', '该工单已被其他QQ申请占用，请人工核对'
+            return 'ready', '现存工单已过审，可批准入群；等待归档后同步卡片'
         if not matches:
             if time.time() - row['requested'] > 7 * 86400:
                 return 'conflict', '7天内未找到归档，请人工核对'
@@ -108,11 +122,6 @@ class QQBridge(commands.Cog):
         match = matches[0]
         if not match['approved']:
             return 'conflict', '不是已过审工单'
-        # Live tickets with the same number can indicate a collision or an unfinished archive.
-        for active in channel.guild.text_channels:
-            topic = active.topic or ''
-            if re.search(r'(?:^|\|)\s*工单ID:\s*' + re.escape(row['ticket']) + r'\s*(?:\||$)', topic):
-                return 'pending', '同编号原工单仍存在，等待归档清理后再核对'
         async with archive_edit_lock(match['message']):
             try:
                 message = await channel.fetch_message(match['message'])
@@ -125,6 +134,8 @@ class QQBridge(commands.Cog):
                 embed = update_embed(message.embeds[0], row)
             except ValueError as exc:
                 return 'conflict', str(exc)
+            if not self.box.reserve(row['ticket'], row['qq']):
+                return 'conflict', '该工单已被其他QQ申请占用，请人工核对'
             if embed.to_dict() != message.embeds[0].to_dict():
                 await message.edit(embed=embed, view=ApprovedTicketArchiveView(), allowed_mentions=discord.AllowedMentions.none())
         return 'done', '已同步归档QQ' + ('及入群通知' if row['joined'] else '；等待入群通知')
