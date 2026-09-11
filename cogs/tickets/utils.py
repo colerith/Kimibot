@@ -3,6 +3,18 @@ from discord.ext import commands
 import json
 import os
 import datetime
+import asyncio
+from weakref import WeakValueDictionary
+
+_archive_edit_locks = WeakValueDictionary()
+
+
+def archive_edit_lock(message_id):
+    lock = _archive_edit_locks.get(message_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _archive_edit_locks[message_id] = lock
+    return lock
 
 # 相对导入可能在Cog加载时会有问题，建议从项目根目录绝对导入配置
 from config import IDS, QUOTA, STYLE
@@ -154,19 +166,28 @@ class TicketArchiveQQModal(discord.ui.Modal):
         qq_number = str(self.qq_input.value or "").strip()
         if not qq_number.isdigit() or not 5 <= len(qq_number) <= 12:
             return await interaction.response.send_message("❌ QQ 号码必须为 5～12 位数字。", ephemeral=True)
-        if not self.archive_message.embeds:
-            return await interaction.response.send_message("❌ 找不到原归档记录。", ephemeral=True)
-
-        embed = self.archive_message.embeds[0].copy()
-        for index, field in enumerate(embed.fields):
-            if field.name == "🐧 QQ 号码":
-                embed.set_field_at(index, name=field.name, value=f"`{qq_number}`", inline=False)
-                break
-        else:
-            embed.add_field(name="🐧 QQ 号码", value=f"`{qq_number}`", inline=False)
-
         await interaction.response.defer(ephemeral=True)
-        await self.archive_message.edit(embed=embed, view=ApprovedTicketArchiveView())
+        if not _is_archive_staff(interaction):
+            return await interaction.followup.send("❌ 只有审核管理人员可以录入 QQ。", ephemeral=True)
+        async with archive_edit_lock(self.archive_message.id):
+            current = await self.archive_message.channel.fetch_message(self.archive_message.id)
+            if not current.embeds:
+                return await interaction.followup.send("❌ 找不到原归档记录。", ephemeral=True)
+            embed = current.embeds[0].copy()
+            old_qq = next((str(f.value).strip('` ') for f in embed.fields if f.name == '🐧 QQ 号码'), '')
+            for index, field in enumerate(embed.fields):
+                if field.name == "🐧 QQ 号码":
+                    embed.set_field_at(index, name=field.name, value=f"`{qq_number}`", inline=False)
+                    break
+            else:
+                embed.add_field(name="🐧 QQ 号码", value=f"`{qq_number}`", inline=False)
+            if old_qq != qq_number:
+                for index, field in enumerate(embed.fields):
+                    if field.name == '🔗 QQ 同步来源':
+                        embed.set_field_at(index, name=field.name, value='管理员手动录入，以当前QQ为准', inline=False)
+                    elif field.name == '💬 加群状态':
+                        embed.set_field_at(index, name=field.name, value='管理员录入QQ，入群状态待核实', inline=False)
+            await current.edit(embed=embed, view=ApprovedTicketArchiveView())
         await interaction.followup.send(f"✅ 已录入 QQ：`{qq_number}`，归档记录已更新。", ephemeral=True)
 
 
