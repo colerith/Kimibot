@@ -30,7 +30,17 @@ def _save(data: dict) -> None:
     save_json_namespace(NAMESPACE, data)
 
 
-def create_entry(*, guild_id: int, author_id: int, author_name: str, kind: str, subject: str, content: str) -> dict:
+def create_entry(
+    *,
+    guild_id: int,
+    author_id: int,
+    author_name: str,
+    kind: str,
+    subject: str,
+    content: str,
+    scope: str = "phone",
+    category: str = "",
+) -> dict:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _LOCK:
         data = _load()
@@ -45,10 +55,13 @@ def create_entry(*, guild_id: int, author_id: int, author_name: str, kind: str, 
             "message_id": "",
             "author_id": str(author_id),
             "author_name": str(author_name)[:100],
+            "scope": scope,
             "kind": kind,
+            "category": str(category)[:100],
             "subject": str(subject).strip()[:120],
             "content": str(content).strip()[:3000],
             "status": "pending",
+            "status_reason": "",
             "replies": [],
             "created_at": now,
             "updated_at": now,
@@ -98,7 +111,7 @@ def delete_unpublished_entry(entry_id: str) -> bool:
         return True
 
 
-def set_entry_status(entry_id: str, status: str) -> dict | None:
+def set_entry_status(entry_id: str, status: str, *, reason: str = "") -> dict | None:
     if status not in {"accepted", "implemented", "rejected"}:
         raise ValueError("invalid wish status")
     with _LOCK:
@@ -107,6 +120,7 @@ def set_entry_status(entry_id: str, status: str) -> dict | None:
         if not isinstance(entry, dict):
             return None
         entry["status"] = status
+        entry["status_reason"] = str(reason).strip()[:1000] if status == "rejected" else ""
         entry["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         _save(data)
         return copy.deepcopy(entry)

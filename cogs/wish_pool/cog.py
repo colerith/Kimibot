@@ -6,6 +6,7 @@ from discord.ext import commands
 from config import PHONE_WISH_CHANNEL_ID, WISH_CHANNEL_ID
 from .general_views import (
     GENERAL_PANEL_MARKER,
+    GeneralWishEntryView,
     GeneralWishPanelView,
     WishActionView,
     build_general_panel_embed,
@@ -43,6 +44,7 @@ class WishPoolCog(commands.Cog):
             return
         self._ready_started = True
         self.bot.add_view(GeneralWishPanelView())
+        self.bot.add_view(GeneralWishEntryView())
         self.bot.add_view(WishActionView())
         self.bot.add_view(PhoneWishPanelView())
         self.bot.add_view(PhoneWishEntryView())

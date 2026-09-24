@@ -101,6 +101,12 @@ def build_entry_embed(entry: dict) -> discord.Embed:
     )
     embed.add_field(name="📌 处理状态", value=_status_label(str(entry.get("status", "pending"))), inline=True)
     embed.add_field(name="📝 投稿内容", value=_quote(str(entry.get("content", "")), 1000), inline=False)
+    if entry.get("status") == "rejected" and entry.get("status_reason"):
+        embed.add_field(
+            name="🌙 不受理理由",
+            value=_quote(str(entry.get("status_reason")), 950),
+            inline=False,
+        )
 
     replies = entry.get("replies", []) if isinstance(entry.get("replies", []), list) else []
     if replies:
@@ -274,6 +280,52 @@ class EntryReplyModal(discord.ui.Modal):
         await interaction.followup.send("✅ 你的补充回复已追加到投稿卡片。", ephemeral=True)
 
 
+class RejectionReasonModal(discord.ui.Modal):
+    def __init__(self, entry: dict):
+        self.entry_id = str(entry["id"])
+        super().__init__(title="不受理 · 填写理由")
+        self.add_item(discord.ui.InputText(
+            label="不受理理由",
+            placeholder="请具体说明未受理的原因，内容将公开显示并私信投稿人",
+            style=discord.InputTextStyle.paragraph,
+            min_length=2,
+            max_length=1000,
+            required=True,
+        ))
+
+    async def callback(self, interaction: discord.Interaction):
+        if not _is_owner(interaction.user):
+            return await interaction.response.send_message("只有服主可以修改处理状态。", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        reason = self.children[0].value.strip()
+        entry = set_entry_status(self.entry_id, "rejected", reason=reason)
+        if not entry:
+            return await interaction.followup.send("这条投稿记录不存在。", ephemeral=True)
+        await _refresh_entry_message(interaction, entry)
+
+        dm_sent = False
+        try:
+            user = interaction.client.get_user(int(entry["author_id"])) or await interaction.client.fetch_user(int(entry["author_id"]))
+            dm_embed = discord.Embed(
+                title="🌙 你的电波手机投稿暂未受理",
+                description=f"你提交的 **{entry.get('subject', '电波手机投稿')}** 已更新处理结果。",
+                color=BUG_COLOR,
+            )
+            dm_embed.add_field(name="📌 处理状态", value="🌙 不受理", inline=True)
+            dm_embed.add_field(name="📝 不受理理由", value=_quote(reason, 950), inline=False)
+            dm_embed.set_footer(text=f"电波手机投稿 #{entry['id']}")
+            view = discord.ui.View(timeout=86400)
+            jump_url = _entry_jump_url(entry)
+            if jump_url:
+                view.add_item(discord.ui.Button(label="查看投稿", emoji="🔗", style=discord.ButtonStyle.link, url=jump_url))
+            await user.send(embed=dm_embed, view=view)
+            dm_sent = True
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        notice = "私信已送达投稿人。" if dm_sent else "投稿人可能关闭了私信，状态与理由仍已公开更新。"
+        await interaction.followup.send(f"✅ 已标记为不受理；{notice}", ephemeral=True)
+
+
 class WishStatusSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
@@ -295,6 +347,8 @@ class WishStatusSelect(discord.ui.Select):
         entry = find_entry_by_message_id(interaction.message.id)
         if not entry:
             return await interaction.response.send_message("这条投稿记录不存在。", ephemeral=True)
+        if self.values[0] == "rejected":
+            return await interaction.response.send_modal(RejectionReasonModal(entry))
         entry = set_entry_status(entry["id"], self.values[0])
         if not entry:
             return await interaction.response.send_message("这条投稿记录不存在。", ephemeral=True)
