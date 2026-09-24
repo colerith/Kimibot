@@ -94,6 +94,15 @@ def migrate_runtime_json_namespaces() -> None:
                 "meaningless_submission_users": {},
             },
         ),
+        (
+            "wish_pool",
+            "data/wish_pool.json",
+            {
+                "version": 1,
+                "panel_info": {},
+                "entries": {},
+            },
+        ),
         ("red_packets", "data/red_packets.json", {"version": 1, "packets": {}}),
         ("prequiz_attempts", "data/prequiz_attempts.json", {"version": 1, "attempts": {}}),
         ("boost_thanks", "data/boost_thanks.json", {"version": 1, "processed": {}}),
