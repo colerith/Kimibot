@@ -179,6 +179,108 @@ class RoleStateSQLiteMigrationTests(unittest.TestCase):
         )
         self.assertEqual(roles.get_lottery_stats(7, 99)["last_ten_draw_at"], ten_draw_at)
 
+    def test_three_consecutive_duplicate_legendary_pities_award_ticket(self):
+        duplicate_pity = {
+            "type": roles.LOTTERY_OUTCOME_ROLE,
+            "role_id": 301,
+            "rarity": roles.RARITY_LEGENDARY,
+            "kind": roles.LOTTERY_KIND_COLOR,
+            "dupe": True,
+            "legendary_pity": True,
+        }
+        for index in range(2):
+            result = roles.record_lottery_draw(
+                7,
+                99,
+                results=[duplicate_pity],
+                spent_shells=1,
+                refund_shells=0,
+                reward_shells=0,
+                drawn_at=f"2026-09-0{index + 1}T00:00:00+08:00",
+            )
+            self.assertEqual(result["tickets_awarded_now"], 0)
+
+        awarded = roles.record_lottery_draw(
+            7,
+            99,
+            results=[duplicate_pity],
+            spent_shells=1,
+            refund_shells=0,
+            reward_shells=0,
+            drawn_at="2026-09-03T00:00:00+08:00",
+        )
+        self.assertEqual(awarded["tickets_awarded_now"], 1)
+        self.assertEqual(awarded["legendary_ticket_balance"], 1)
+        self.assertEqual(awarded["duplicate_legendary_pity_streak"], 0)
+        self.assertEqual(len(awarded["legendary_pity_history"]), 3)
+
+    def test_only_pity_outcomes_affect_duplicate_pity_sequence(self):
+        duplicate_pity = {
+            "type": "role",
+            "role_id": 301,
+            "rarity": roles.RARITY_LEGENDARY,
+            "kind": roles.LOTTERY_KIND_COLOR,
+            "dupe": True,
+            "legendary_pity": True,
+        }
+        ordinary_duplicate = dict(duplicate_pity, legendary_pity=False)
+        new_pity = dict(duplicate_pity, role_id=302, dupe=False)
+
+        roles.record_lottery_draw(
+            7, 99, results=[duplicate_pity, ordinary_duplicate], spent_shells=2,
+            refund_shells=0, reward_shells=0, drawn_at="2026-09-01T00:00:00+08:00",
+        )
+        self.assertEqual(roles.get_lottery_stats(7, 99)["duplicate_legendary_pity_streak"], 1)
+
+        roles.record_lottery_draw(
+            7, 99, results=[new_pity], spent_shells=1,
+            refund_shells=0, reward_shells=0, drawn_at="2026-09-02T00:00:00+08:00",
+        )
+        stats = roles.get_lottery_stats(7, 99)
+        self.assertEqual(stats["duplicate_legendary_pity_streak"], 0)
+        self.assertEqual(stats["legendary_ticket_balance"], 0)
+
+    def test_legendary_ticket_redemption_is_new_idempotent_and_month_limited(self):
+        duplicate_pity = {
+            "type": "role",
+            "role_id": 301,
+            "rarity": roles.RARITY_LEGENDARY,
+            "kind": roles.LOTTERY_KIND_COLOR,
+            "dupe": True,
+            "legendary_pity": True,
+        }
+        # Four groups of three pity duplicates provide four tickets.
+        roles.record_lottery_draw(
+            7, 99, results=[duplicate_pity] * 12, spent_shells=12,
+            refund_shells=0, reward_shells=0, drawn_at="2026-09-01T00:00:00+08:00",
+        )
+
+        pool = [101, 201, 202, 203, 204, 205]
+        first = roles.redeem_legendary_ticket(7, 99, "request-1", pool, "2026-09")
+        repeated = roles.redeem_legendary_ticket(7, 99, "request-1", pool, "2026-09")
+        second = roles.redeem_legendary_ticket(7, 99, "request-2", pool, "2026-09")
+        third = roles.redeem_legendary_ticket(7, 99, "request-3", pool, "2026-09")
+        blocked = roles.redeem_legendary_ticket(7, 99, "request-4", pool, "2026-09")
+
+        self.assertTrue(first["success"])
+        self.assertNotEqual(first["role_id"], 101)
+        self.assertTrue(repeated["duplicate"])
+        self.assertEqual(repeated["role_id"], first["role_id"])
+        self.assertTrue(second["success"])
+        self.assertTrue(third["success"])
+        self.assertEqual(len({first["role_id"], second["role_id"], third["role_id"]}), 3)
+        self.assertEqual(blocked, {"success": False, "reason": "monthly_limit"})
+
+        status = roles.get_legendary_ticket_status(7, 99, "2026-09")
+        self.assertEqual(status["balance"], 1)
+        self.assertEqual(status["used_this_month"], 3)
+        self.assertEqual(status["monthly_remaining"], 0)
+
+        next_month = roles.redeem_legendary_ticket(7, 99, "request-5", pool, "2026-10")
+        self.assertTrue(next_month["success"])
+        self.assertEqual(next_month["status"]["used_this_month"], 1)
+        self.assertEqual(len(roles.get_user_collection(7)), 5)
+
 
 class AppStateSQLiteMigrationTests(unittest.TestCase):
     def setUp(self):

@@ -3,6 +3,7 @@
 import json
 import os
 import copy
+import random
 import sqlite3
 import threading
 import uuid
@@ -850,6 +851,14 @@ def _empty_lottery_stats() -> dict:
         },
         "last_draw_at": "",
         "last_ten_draw_at": "",
+        "duplicate_legendary_pity_streak": 0,
+        "legendary_ticket_balance": 0,
+        "legendary_tickets_awarded": 0,
+        "legendary_tickets_used": 0,
+        "legendary_ticket_month": "",
+        "legendary_ticket_month_uses": 0,
+        "legendary_pity_history": [],
+        "legendary_ticket_redemptions": {},
     }
 
 
@@ -867,6 +876,11 @@ def _normalize_lottery_stats(raw: dict | None = None) -> dict:
         "no_legendary_streak",
         "new_roles",
         "duplicate_roles",
+        "duplicate_legendary_pity_streak",
+        "legendary_ticket_balance",
+        "legendary_tickets_awarded",
+        "legendary_tickets_used",
+        "legendary_ticket_month_uses",
     ):
         try:
             base[key] = max(0, int(raw.get(key, base[key])))
@@ -892,6 +906,25 @@ def _normalize_lottery_stats(raw: dict | None = None) -> dict:
 
     base["last_draw_at"] = str(raw.get("last_draw_at", "") or "")
     base["last_ten_draw_at"] = str(raw.get("last_ten_draw_at", "") or "")
+    base["legendary_ticket_month"] = str(raw.get("legendary_ticket_month", "") or "")[:7]
+    history = raw.get("legendary_pity_history", [])
+    if isinstance(history, list):
+        base["legendary_pity_history"] = [
+            {
+                "drawn_at": str(item.get("drawn_at", "") or ""),
+                "duplicate": bool(item.get("duplicate")),
+                "role_id": int(item.get("role_id", 0) or 0),
+            }
+            for item in history[-300:]
+            if isinstance(item, dict)
+        ]
+    redemptions = raw.get("legendary_ticket_redemptions", {})
+    if isinstance(redemptions, dict):
+        base["legendary_ticket_redemptions"] = {
+            str(key): int(value)
+            for key, value in list(redemptions.items())[-100:]
+            if str(value).isdigit() and int(value) > 0
+        }
     return base
 
 
@@ -940,9 +973,31 @@ def record_lottery_draw(
             stats["spent_shells"] = _normalize_shell_amount(stats["spent_shells"] + float(spent_shells or 0), 0.0)
             stats["refund_shells"] = _normalize_shell_amount(stats["refund_shells"] + float(refund_shells or 0), 0.0)
             stats["reward_shells"] = _normalize_shell_amount(stats["reward_shells"] + float(reward_shells or 0), 0.0)
+            tickets_awarded_now = 0
 
             for row in results or []:
                 row_type = row.get("type")
+                if bool(row.get("legendary_pity")):
+                    is_duplicate_pity = (
+                        row_type in {LOTTERY_OUTCOME_ROLE, "role"}
+                        and str(row.get("rarity", "")) == str(RARITY_LEGENDARY)
+                        and bool(row.get("dupe"))
+                    )
+                    stats["legendary_pity_history"].append({
+                        "drawn_at": str(drawn_at or ""),
+                        "duplicate": is_duplicate_pity,
+                        "role_id": int(row.get("role_id") or getattr(row.get("role"), "id", 0) or 0),
+                    })
+                    stats["legendary_pity_history"] = stats["legendary_pity_history"][-300:]
+                    if is_duplicate_pity:
+                        stats["duplicate_legendary_pity_streak"] += 1
+                        if stats["duplicate_legendary_pity_streak"] >= 3:
+                            stats["duplicate_legendary_pity_streak"] = 0
+                            stats["legendary_ticket_balance"] += 1
+                            stats["legendary_tickets_awarded"] += 1
+                            tickets_awarded_now += 1
+                    else:
+                        stats["duplicate_legendary_pity_streak"] = 0
                 if row_type == LOTTERY_OUTCOME_EMPTY or row_type == "empty":
                     stats["empty_hits"] += 1
                     stats["empty_streak"] += 1
@@ -980,4 +1035,104 @@ def record_lottery_draw(
                    ON CONFLICT(namespace, user_key) DO UPDATE SET data=excluded.data""",
                 (key, json.dumps(stats, ensure_ascii=False, separators=(",", ":"))),
             )
-            return stats
+            result = copy.deepcopy(stats)
+            result["tickets_awarded_now"] = tickets_awarded_now
+            return result
+
+
+def _legendary_ticket_status_from_stats(stats: dict, month_key: str, monthly_limit: int = 3) -> dict:
+    month_uses = int(stats.get("legendary_ticket_month_uses", 0)) if stats.get("legendary_ticket_month") == month_key else 0
+    limit = max(1, int(monthly_limit))
+    return {
+        "balance": int(stats.get("legendary_ticket_balance", 0)),
+        "month": str(month_key),
+        "used_this_month": month_uses,
+        "monthly_limit": limit,
+        "monthly_remaining": max(0, limit - month_uses),
+        "duplicate_pity_streak": int(stats.get("duplicate_legendary_pity_streak", 0)),
+        "awarded_total": int(stats.get("legendary_tickets_awarded", 0)),
+        "used_total": int(stats.get("legendary_tickets_used", 0)),
+    }
+
+
+def get_legendary_ticket_status(user_id: int, guild_id: int, month_key: str) -> dict:
+    return _legendary_ticket_status_from_stats(get_lottery_stats(user_id, guild_id), month_key)
+
+
+def redeem_legendary_ticket(
+    user_id: int,
+    guild_id: int,
+    request_id: str,
+    legendary_role_ids,
+    month_key: str,
+    *,
+    monthly_limit: int = 3,
+) -> dict:
+    """Atomically consume one ticket and add a random unowned three-star role."""
+    _ensure_role_state_db()
+    valid_ids = set(_uniq_ids(legendary_role_ids))
+    if not valid_ids:
+        return {"success": False, "reason": "empty_pool"}
+
+    with _lottery_stats_lock, _ownership_lock, _role_state_write_lock:
+        key = _make_lottery_user_key(user_id, guild_id)
+        uid = str(user_id)
+        with _role_state_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            stats_row = connection.execute(
+                "SELECT data FROM role_user_state WHERE namespace='lottery_stats' AND user_key=?", (key,)
+            ).fetchone()
+            stats = _normalize_lottery_stats(json.loads(stats_row["data"]) if stats_row else {})
+            receipts = stats.setdefault("legendary_ticket_redemptions", {})
+            request_key = str(request_id)
+            if request_key in receipts:
+                return {
+                    "success": True,
+                    "duplicate": True,
+                    "role_id": int(receipts[request_key]),
+                    "status": _legendary_ticket_status_from_stats(stats, month_key, monthly_limit),
+                }
+
+            if int(stats.get("legendary_ticket_balance", 0)) <= 0:
+                return {"success": False, "reason": "no_ticket"}
+            used_this_month = (
+                int(stats.get("legendary_ticket_month_uses", 0))
+                if stats.get("legendary_ticket_month") == str(month_key)
+                else 0
+            )
+            if used_this_month >= max(1, int(monthly_limit)):
+                return {"success": False, "reason": "monthly_limit"}
+
+            collection_row = connection.execute(
+                "SELECT data FROM role_user_state WHERE namespace='collections' AND user_key=?", (uid,)
+            ).fetchone()
+            owned = set(_uniq_ids(json.loads(collection_row["data"]) if collection_row else []))
+            missing = sorted(valid_ids - owned)
+            if not missing:
+                return {"success": False, "reason": "complete"}
+
+            role_id = int(random.choice(missing))
+            owned.add(role_id)
+            stats["legendary_ticket_balance"] -= 1
+            stats["legendary_tickets_used"] += 1
+            stats["legendary_ticket_month"] = str(month_key)
+            stats["legendary_ticket_month_uses"] = used_this_month + 1
+            receipts[request_key] = role_id
+            stats["legendary_ticket_redemptions"] = dict(list(receipts.items())[-100:])
+
+            connection.execute(
+                """INSERT INTO role_user_state(namespace, user_key, data) VALUES ('collections', ?, ?)
+                   ON CONFLICT(namespace, user_key) DO UPDATE SET data=excluded.data""",
+                (uid, json.dumps(sorted(owned), separators=(",", ":"))),
+            )
+            connection.execute(
+                """INSERT INTO role_user_state(namespace, user_key, data) VALUES ('lottery_stats', ?, ?)
+                   ON CONFLICT(namespace, user_key) DO UPDATE SET data=excluded.data""",
+                (key, json.dumps(stats, ensure_ascii=False, separators=(",", ":"))),
+            )
+            return {
+                "success": True,
+                "duplicate": False,
+                "role_id": role_id,
+                "status": _legendary_ticket_status_from_stats(stats, month_key, monthly_limit),
+            }

@@ -25,9 +25,11 @@ from .storage import (
     get_lottery_role_kind,
     get_redeem_role_config,
     get_lottery_stats,
+    get_legendary_ticket_status,
     add_redeem_ownership,
     get_user_redeem_ownership,
     record_lottery_draw,
+    redeem_legendary_ticket,
     set_lottery_role_rarity,
     set_lottery_role_kind,
     set_redeem_role_config,
@@ -568,6 +570,11 @@ def _lottery_luck_lines(stats: dict) -> tuple[str, str]:
 
 def build_lottery_stats_embed(member: discord.Member, guild_id: int) -> discord.Embed:
     stats = get_lottery_stats(member.id, guild_id)
+    ticket_status = get_legendary_ticket_status(
+        member.id,
+        guild_id,
+        datetime.now(BEIJING_TZ).strftime("%Y-%m"),
+    )
     total = int(stats.get("total_draws", 0))
     title, luck_line = _lottery_luck_lines(stats)
     rarity_hits = stats.get("rarity_hits", {})
@@ -629,6 +636,15 @@ def build_lottery_stats_embed(member: discord.Member, guild_id: int) -> discord.
             f"未出身份：**{stats.get('no_role_streak', 0)} / {ROLE_PITY_LIMIT}**\n"
             f"未出三星：**{stats.get('no_legendary_streak', 0)} / {LEGENDARY_PITY_LIMIT}**\n"
             "每抽都有正常三星概率，最迟第 80 抽必出"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🎟️ 三星保底券",
+        value=(
+            f"持有：**{ticket_status['balance']}** 张\n"
+            f"本月已用：**{ticket_status['used_this_month']} / {ticket_status['monthly_limit']}**\n"
+            f"连续重复三星保底：**{ticket_status['duplicate_pity_streak']} / 3**"
         ),
         inline=False,
     )
@@ -716,6 +732,7 @@ def _rules_text() -> str:
         f"- 🎁 结果权重(抽空/蛋壳/身份)：**{w_empty}/{w_shells}/{w_role}**\n"
         f"- 🥚 蛋壳结果：随机 **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
         f"- 🧷 保底：5 空后至少蛋壳，20 抽无身份必出身份；三星每抽均可出，最迟第 80 抽必出\n"
+        f"- 🎟️ 三星补偿：连续 3 次三星保底均重复，自动补发 1 张必出未拥有三星的抽奖券；每月最多使用 3 张\n"
         f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
         f"- 💬 有效发言：会提升蛋壳获取加成\n"
         f"- 🧵 社区发帖：任意论坛帖子每帖 **{format_shells(post_reward)}** 蛋壳，每人每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
@@ -755,6 +772,7 @@ def build_role_lottery_embed(points: float, role_data: dict) -> discord.Embed:
             f"💳 **十连消耗**: {format_shells(ten_cost)} 蛋壳\n"
             f"🥚 **蛋壳结果**: 随机 {shell_reward_line} 蛋壳\n"
             f"🔄 **重复补偿**: {refund_line} 蛋壳\n"
+            "🎟️ **三星保底券**: 连续 3 次三星保底重复自动获得；必出未拥有三星，每月最多使用 3 张\n"
             f"🥚 **你的蛋壳**: **{format_shells(points)}**\n\n"
             "📌 **蛋壳获取**\n"
             f"- 📅 小蛋报到：+{format_shells(sign_reward)} 起\n"
@@ -764,6 +782,142 @@ def build_role_lottery_embed(points: float, role_data: dict) -> discord.Embed:
         ),
         color=discord.Color.purple(),
     )
+
+def _legendary_ticket_pool(guild: discord.Guild, role_data: dict) -> list[int]:
+    return [
+        int(role_id)
+        for role_id in role_data.get("lottery_roles", [])
+        if guild.get_role(int(role_id))
+        and get_lottery_role_rarity(int(role_id), role_data) == RARITY_LEGENDARY
+    ]
+
+
+class LegendaryTicketUseView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, user_id: int, status: dict, missing_count: int):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.user_id = int(user_id)
+        self.status = status
+        self.missing_count = int(missing_count)
+        self.request_id = uuid.uuid4().hex
+        self.use_ticket.disabled = (
+            int(status.get("balance", 0)) <= 0
+            or int(status.get("monthly_remaining", 0)) <= 0
+            or self.missing_count <= 0
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("这不是你的三星保底券面板。", ephemeral=True)
+            return False
+        return True
+
+    def embed(self) -> discord.Embed:
+        if int(self.status.get("balance", 0)) <= 0:
+            notice = "你暂时没有三星保底券。连续三次三星保底均抽到重复款后，会自动补发一张。"
+        elif int(self.status.get("monthly_remaining", 0)) <= 0:
+            notice = "本月已经使用 3 张，请下个月再来；未使用的券会继续保留。"
+        elif self.missing_count <= 0:
+            notice = "你已经拥有奖池内全部三星，券会保留，不会被消耗。"
+        else:
+            notice = "点击下方按钮后随机获得一个尚未拥有的三星款式。抽取前不会消耗券。"
+        return discord.Embed(
+            title="🎟️ 三星保底补偿券",
+            description=(
+                f"持有：**{self.status.get('balance', 0)}** 张\n"
+                f"本月已使用：**{self.status.get('used_this_month', 0)} / {self.status.get('monthly_limit', 3)}**\n"
+                f"当前未拥有三星：**{self.missing_count}** 个\n\n"
+                f"{notice}"
+            ),
+            color=0xF4C95D,
+        )
+
+    @discord.ui.button(label="使用一张，抽取全新三星", emoji="🎟️", style=discord.ButtonStyle.success)
+    async def use_ticket(self, button, interaction: discord.Interaction):
+        await interaction.response.defer()
+        draw_lock = _LOTTERY_USER_LOCKS.setdefault((self.guild.id, self.user_id), asyncio.Lock())
+        async with draw_lock:
+            data = await asyncio.to_thread(load_role_data)
+            pool_ids = _legendary_ticket_pool(self.guild, data)
+            month_key = datetime.now(BEIJING_TZ).strftime("%Y-%m")
+            result = await asyncio.to_thread(
+                redeem_legendary_ticket,
+                self.user_id,
+                self.guild.id,
+                self.request_id,
+                pool_ids,
+                month_key,
+            )
+            if not result.get("success"):
+                messages = {
+                    "no_ticket": "你目前没有可使用的三星保底券。",
+                    "monthly_limit": "本月已经使用 3 张三星保底券，请下个月再来。",
+                    "empty_pool": "当前没有有效的三星奖池，券没有被消耗。",
+                    "complete": "你已经拥有奖池内全部三星，券没有被消耗。",
+                }
+                return await interaction.edit_original_response(
+                    embed=discord.Embed(
+                        title="🎟️ 暂时无法使用",
+                        description=messages.get(result.get("reason"), "使用失败，请稍后重试。"),
+                        color=0xED4245,
+                    ),
+                    view=None,
+                )
+
+            role = self.guild.get_role(int(result["role_id"]))
+            if role is None:
+                return await interaction.edit_original_response(
+                    embed=discord.Embed(
+                        title="⚠️ 三星已记入衣柜",
+                        description="目标身份组刚刚失效，但收藏记录已经保存，请联系管理组处理。",
+                        color=0xED4245,
+                    ),
+                    view=None,
+                )
+
+            owned = set(await asyncio.to_thread(get_user_collection, self.user_id))
+            rewards = await asyncio.to_thread(
+                _settle_collection_rewards,
+                self.user_id,
+                self.guild.id,
+                owned,
+                data,
+            )
+            equip_error = ""
+            try:
+                kind = get_lottery_role_kind(role.id, data)
+                exclusive_type = "lottery_color" if kind == LOTTERY_KIND_COLOR else "lottery_icon"
+                await remove_all_decorations(
+                    interaction.user,
+                    self.guild,
+                    keep_role_id=role.id,
+                    exclusive_type=exclusive_type,
+                )
+                await interaction.user.add_roles(role, reason="三星保底补偿券抽取")
+            except Exception as error:
+                equip_error = f"\n⚠️ 自动穿戴失败，但已加入永久衣柜：{type(error).__name__}"
+
+            reward_text = ""
+            if rewards:
+                reward_text = "\n\n🏆 同时达成：\n" + _preview_lines([
+                    f"{item.get('emoji', '🏆')} **{item.get('name', '收集成就')}**：{_collection_reward_text(item, self.guild)}"
+                    for item in rewards
+                ])
+            status = result.get("status", {})
+            await interaction.edit_original_response(
+                embed=discord.Embed(
+                    title="✨ 三星保底券抽取成功",
+                    description=(
+                        f"抽到了全新的三星款式：{role.mention}\n"
+                        f"剩余券：**{status.get('balance', 0)}** 张 · "
+                        f"本月已使用：**{status.get('used_this_month', 0)} / {status.get('monthly_limit', 3)}**"
+                        f"{equip_error}{reward_text}"
+                    ),
+                    color=0x57F287,
+                ),
+                view=None,
+            )
+
 
 # --- 抽奖界面 ---
 class RoleLotteryView(discord.ui.View):
@@ -1021,7 +1175,11 @@ class RoleLotteryView(discord.ui.View):
                     up_weights=up_weights,
                 )
             if not won_role:
-                results.append({"type": "empty", "role": None, "rarity": 0, "dupe": False, "refund": 0, "shell_reward": 0, "reason": "no_role"})
+                results.append({
+                    "type": "empty", "role": None, "rarity": 0, "dupe": False,
+                    "refund": 0, "shell_reward": 0, "reason": "no_role",
+                    "legendary_pity": force_legendary,
+                })
                 empty_streak += 1
                 no_role_streak += 1
                 no_legendary_streak += 1
@@ -1030,11 +1188,21 @@ class RoleLotteryView(discord.ui.View):
             if won_role.id in user_collection_ids:
                 refund_amt = max(0.0, float(refund_cfg.get(str(rarity), fallback_refund)))
                 total_refund += refund_amt
-                results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": True, "refund": refund_amt, "shell_reward": 0})
+                results.append({
+                    "type": "role", "role": won_role, "role_id": won_role.id,
+                    "rarity": rarity, "kind": picked_kind, "dupe": True,
+                    "refund": refund_amt, "shell_reward": 0,
+                    "legendary_pity": force_legendary,
+                })
             else:
                 user_collection_ids.add(won_role.id)
                 granted_roles.append(won_role)
-                results.append({"type": "role", "role": won_role, "rarity": rarity, "kind": picked_kind, "dupe": False, "refund": 0, "shell_reward": 0})
+                results.append({
+                    "type": "role", "role": won_role, "role_id": won_role.id,
+                    "rarity": rarity, "kind": picked_kind, "dupe": False,
+                    "refund": 0, "shell_reward": 0,
+                    "legendary_pity": force_legendary,
+                })
             empty_streak = 0
             no_role_streak = 0
             no_legendary_streak = 0 if rarity == RARITY_LEGENDARY else no_legendary_streak + 1
@@ -1067,7 +1235,7 @@ class RoleLotteryView(discord.ui.View):
             user_collection_ids,
             data,
         )
-        await asyncio.to_thread(
+        stats_after = await asyncio.to_thread(
             record_lottery_draw,
             user.id,
             guild_id,
@@ -1144,6 +1312,16 @@ class RoleLotteryView(discord.ui.View):
         if guarantee_notes:
             seen_notes = list(dict.fromkeys(guarantee_notes))
             embed.add_field(name="保底提示", value="\n".join(f"- {note}" for note in seen_notes[:5]), inline=False)
+        tickets_awarded = int(stats_after.get("tickets_awarded_now", 0) or 0)
+        if tickets_awarded:
+            embed.add_field(
+                name="🎟️ 三星保底补偿",
+                value=(
+                    f"连续三次三星保底均为重复，已自动补发 **{tickets_awarded}** 张三星抽奖券。\n"
+                    f"当前持有：**{stats_after.get('legendary_ticket_balance', 0)}** 张，可在下方「三星保底券」入口使用。"
+                ),
+                inline=False,
+            )
         embed.add_field(name="奇米蛋小声说", value=_lottery_result_message(results), inline=False)
         if equipped_role:
             embed.add_field(name="当前穿戴", value=f"已自动换装为 {equipped_role.mention}", inline=False)
@@ -1218,6 +1396,32 @@ class RoleLotteryView(discord.ui.View):
             view=CollectionCatalogView(interaction.guild, interaction.user.id),
             ephemeral=True,
         )
+
+    @discord.ui.button(
+        label="三星保底券",
+        style=discord.ButtonStyle.primary,
+        emoji="🎟️",
+        custom_id="lottery_legendary_ticket",
+        row=1,
+    )
+    async def legendary_ticket_callback(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        data, owned, status = await asyncio.gather(
+            asyncio.to_thread(load_role_data),
+            asyncio.to_thread(get_user_collection, interaction.user.id),
+            asyncio.to_thread(
+                get_legendary_ticket_status,
+                interaction.user.id,
+                interaction.guild_id,
+                datetime.now(BEIJING_TZ).strftime("%Y-%m"),
+            ),
+        )
+        pool = set(_legendary_ticket_pool(interaction.guild, data))
+        missing_count = len(pool - set(owned))
+        view = LegendaryTicketUseView(interaction.guild, interaction.user.id, status, missing_count)
+        await interaction.followup.send(embed=view.embed(), view=view, ephemeral=True)
 
 # --- 用户端视图 : 私密选择面板 ---
 class RoleClaimSelect(discord.ui.Select):
