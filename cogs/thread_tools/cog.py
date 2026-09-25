@@ -111,7 +111,8 @@ class ThreadToolsCog(commands.Cog, name="帖子工具"):
 
         await ctx.respond("正在删除该帖子...", ephemeral=True)
         try:
-            await ctx.channel.delete(reason=f"贴主 {ctx.author} 自助删帖")
+            # Pycord 的 Thread.delete() 不接受 reason 参数。
+            await ctx.channel.delete()
         except Exception as e:
             await ctx.followup.send(f"删除失败: {e}", ephemeral=True)
 
