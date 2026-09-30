@@ -1351,12 +1351,15 @@ class RoleLotteryView(discord.ui.View):
 
     @discord.ui.button(label="📜 查看蛋壳", style=discord.ButtonStyle.secondary, emoji="👛", custom_id="lottery_check_points")
     async def check_points(self, button, interaction: discord.Interaction):
+        if not interaction.guild_id:
+            return await interaction.response.send_message("❌ 该功能仅支持在服务器中使用。", ephemeral=True)
         try:
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             return
-        p = await asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id or 0)
-        await interaction.followup.send(f"🥚 你当前的蛋壳余额是：**{format_shells(p)}**", ephemeral=True)
+        from .wallet_view import WalletView
+        view = WalletView(interaction.user, interaction.guild_id)
+        await interaction.followup.send(embed=await view.prepare(), view=view, ephemeral=True)
 
     @discord.ui.button(label="我的战报", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="lottery_my_stats", row=1)
     async def lottery_stats_callback(self, button, interaction: discord.Interaction):
@@ -2479,7 +2482,7 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
         _task_line(
             signed,
             "小蛋报到",
-            f"+{format_shells(sign_amount)} 蛋壳" if sign_amount > 0 else ("已完成" if signed else "未完成"),
+            f"{sign_amount:+.1f} 蛋壳" if signed else "未完成",
         ),
         _task_line(praised, "赞美奇米蛋", f"+{format_shells(praise_amount)} 蛋壳"),
         _task_line(rec_count >= 1, "安利投稿", f"{rec_count}/1 · +{format_shells(rec_amount)}"),
@@ -2518,6 +2521,16 @@ async def build_daily_tasks_embed(user: discord.Member | discord.User, guild_id:
     )
     if bonus_lines:
         embed.add_field(name="🎁 今日任务奖励", value=" · ".join(bonus_lines), inline=False)
+    from cogs.points.wallet import festival_bonus
+    from cogs.points.festival import get_config as get_festival_config, parse_time as parse_festival_time
+    festival = await asyncio.to_thread(get_festival_config, guild_id)
+    festival_total = round(sum(festival_bonus(row) for row in tx_rows), 1)
+    festival_lines = ["上方任务收益为实际入账金额，已包含月卡与节日加成；任务进度仍按基础奖励计算。"]
+    if festival and festival.get('enabled') and parse_festival_time(festival['start_at']) <= datetime.now(timezone(timedelta(hours=8))) < parse_festival_time(festival['end_at']):
+        festival_lines.append(f"🎉 **{discord.utils.escape_markdown(festival['name'])}** · 活动收益 **×{festival['multiplier']:g}**")
+    if festival_total:
+        festival_lines.append(f"今日流水已记录节日额外奖励 **+{format_shells(festival_total)}** 蛋壳（已计入余额）。")
+    embed.add_field(name="🥚 加成与入账", value="\n".join(festival_lines), inline=False)
     embed.set_footer(text="北京时间每日刷新 · 每档奖励每天领取一次")
     return embed
 
@@ -2715,24 +2728,10 @@ class RoleClaimView(discord.ui.View):
         if not await self._begin_private_response(interaction, "🥚 正在查询你的蛋壳余额……"):
             return
 
-        summary, rules_text = await asyncio.gather(
-            asyncio.to_thread(get_user_summary, interaction.user.id, interaction.guild_id),
-            asyncio.to_thread(_rules_text),
-        )
-        monthly = summary.get("monthly_card", {})
-        monthly_text = (
-            f"蛋壳月卡：**启用中** · 剩余 **{_format_monthly_remaining(monthly)}** · 收益 **{monthly.get('reward_multiplier', 1.5)} 倍**\n"
-            if monthly.get("active")
-            else "蛋壳月卡：**未启用**\n"
-        )
-        text = (
-            f"🥚 **你的蛋壳余额：{format_shells(summary['shells'])}**\n"
-            f"{monthly_text}"
-            f"连续报到：**{summary['streak_days']}** 天\n"
-            f"今日有效发言：**{summary['daily_msg_count']}** 条\n\n"
-            f"{rules_text}"
-        )
-        await self._complete_private_response(interaction, content=text)
+        from .wallet_view import WalletView
+        view = WalletView(interaction.user, interaction.guild_id)
+        embed = await view.prepare()
+        await self._complete_private_response(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="使用帮助", style=discord.ButtonStyle.secondary, emoji="❔", custom_id="role_main_shell_help", row=0)
     async def shell_help_callback(self, button, interaction: discord.Interaction):

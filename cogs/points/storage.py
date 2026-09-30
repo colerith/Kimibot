@@ -940,7 +940,7 @@ def settle_kimi_daily_event(user_id: int, guild_id: int, action: str, day: str) 
         record["shells"] = record["points"] = after
         _db_append_transaction(connection, record, user_id=user_id, guild_id=guild_id,
                                amount=actual, source=f"kimi_{action}_event",
-                               reason=f"{day} 随机蛋壳事件，抽取{requested:+.1f}，实际{actual:+.1f}")
+                               reason=f"{day} 随机蛋壳事件，抽取{requested:+.1f}，实际{actual:+.1f};festival={festival_multiplier}x;festival_bonus={festival_bonus}")
         _db_put_user(connection, key, record)
         result = {"requested": requested, "actual": actual, "balance": after}
         connection.execute("INSERT INTO kimi_daily_events VALUES (?, ?, ?, ?, ?)",
@@ -1686,7 +1686,7 @@ def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
         record.update({"last_sign_date": today, "streak_days": streak_days, "shells": after, "points": after})
         _db_append_transaction(
             connection, record, user_id=user_id, guild_id=guild_id, amount=actual_delta,
-            source="sign_in", reason=f"rank={rank};event={event['id']};monthly_card={monthly_multiplier}x;festival={festival_multiplier}x",
+            source="sign_in", reason=f"rank={rank};event={event['id']};monthly_card={monthly_multiplier}x;festival={festival_multiplier}x;festival_bonus={festival_bonus}",
         )
         _db_put_user(connection, key, record)
         _db_put_section(connection, "daily_signins", daily_key, signers)
@@ -1767,7 +1767,7 @@ def add_post_points(
         guild_id=guild_id,
         amount=actual_delta,
         source="forum_post",
-        reason=f"legacy_forum_post_reward;monthly_card={multiplier}x;base={format_shells(can_add)};festival={festival_multiplier}x",
+        reason=f"legacy_forum_post_reward;monthly_card={multiplier}x;base={format_shells(can_add)};festival={festival_multiplier}x;festival_bonus={festival_bonus}",
     )
     save_points_data(data)
     return actual_delta
@@ -1852,7 +1852,7 @@ def reward_daily_forum_post(
         guild_id=guild_id,
         amount=actual_delta,
         source="daily_forum_post",
-        reason=f"channel={channel_id};thread={thread_id};daily_count={row['daily_count']};monthly_card={multiplier}x;festival={festival_multiplier}x",
+        reason=f"channel={channel_id};thread={thread_id};daily_count={row['daily_count']};monthly_card={multiplier}x;festival={festival_multiplier}x;festival_bonus={festival_bonus}",
     )
     save_points_data(data)
     return {"success": True, "reason": "rewarded", "daily_count": row["daily_count"], "amount": actual_delta}
@@ -2047,7 +2047,7 @@ def reward_daily_kimi_praise(
         guild_id=guild_id,
         amount=actual_delta,
         source="kimi_praise",
-        reason=f"message_id={message_id};rule={normalized_rule_id};monthly_card={multiplier}x;festival={festival_multiplier}x",
+        reason=f"message_id={message_id};rule={normalized_rule_id};monthly_card={multiplier}x;festival={festival_multiplier}x;festival_bonus={festival_bonus}",
     )
     save_points_data(data)
     return {
