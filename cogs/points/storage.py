@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import config
+from cogs.points.festival import apply_bonus as apply_festival_bonus
 
 POINTS_DATA_FILE = "data/user_points.json"
 POINTS_DB_FILE = "data/user_points.sqlite3"
@@ -931,6 +932,7 @@ def settle_kimi_daily_event(user_id: int, guild_id: int, action: str, day: str) 
             return json.loads(previous[0])
         # Integer tenths avoid floating-point drift; rewards and penalties are equally likely.
         requested = random.choice((-1, 1)) * random.randint(1, 100) / 10
+        requested, festival_bonus, festival_multiplier = apply_festival_bonus(guild_id, requested)
         record, key = _db_get_user(connection, user_id, guild_id)
         before = _round_shells(record.get("shells", 0))
         after = _round_shells(max(0, before + requested))
@@ -1372,13 +1374,14 @@ def grant_monthly_eligible_reward(
                 }
         base = _round_delta(amount)
         total, monthly_bonus, multiplier = _monthly_reward_amount(record, _db_monthly_config(connection), base)
+        total, festival_bonus, festival_multiplier = apply_festival_bonus(guild_id, total)
         before = _round_shells(record.get("shells", 0))
         after = _round_shells(before + total)
         actual_delta = _round_delta(after - before)
         record["shells"] = record["points"] = after
-        detail = reason
+        detail = f"{reason};festival={festival_multiplier}x;festival_bonus={festival_bonus}"
         if monthly_bonus > 0:
-            detail = f"{reason};monthly_card={multiplier}x;base={format_shells(base)}".strip(";")
+            detail = f"{detail};monthly_card={multiplier}x;base={format_shells(base)}".strip(";")
         _db_append_transaction(
             connection, record, user_id=user_id, guild_id=guild_id,
             amount=actual_delta, source=source, reason=detail, idempotency_key=normalized_key,
@@ -1388,6 +1391,7 @@ def grant_monthly_eligible_reward(
             "success": True,
             "duplicate": False,
             "base_amount": base,
+            "festival_bonus": festival_bonus, "festival_multiplier": festival_multiplier,
             "monthly_bonus": monthly_bonus,
             "amount": actual_delta,
             "multiplier": multiplier,
@@ -1675,13 +1679,14 @@ def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
         _, monthly_card_bonus, monthly_multiplier = _monthly_reward_amount(
             record, _db_monthly_config(connection), positive_rewards
         )
-        total_delta = _round_delta(base_reward + bonus_amount + rank_bonus + event_delta + monthly_card_bonus)
+        _, festival_bonus, festival_multiplier = apply_festival_bonus(guild_id, positive_rewards + monthly_card_bonus)
+        total_delta = _round_delta(base_reward + bonus_amount + rank_bonus + event_delta + monthly_card_bonus + festival_bonus)
         after = _round_shells(before + total_delta)
         actual_delta = _round_delta(after - before)
         record.update({"last_sign_date": today, "streak_days": streak_days, "shells": after, "points": after})
         _db_append_transaction(
             connection, record, user_id=user_id, guild_id=guild_id, amount=actual_delta,
-            source="sign_in", reason=f"rank={rank};event={event['id']};monthly_card={monthly_multiplier}x",
+            source="sign_in", reason=f"rank={rank};event={event['id']};monthly_card={monthly_multiplier}x;festival={festival_multiplier}x",
         )
         _db_put_user(connection, key, record)
         _db_put_section(connection, "daily_signins", daily_key, signers)
@@ -1691,6 +1696,7 @@ def sign_in_user(user_id: int, guild_id: int, reward: float = 1.0) -> dict:
             "streak_days": streak_days, "daily_msg_count": daily_msg_count, "rank": rank,
             "rank_bonus": rank_bonus, "event": event, "event_delta": event_delta,
             "monthly_card_bonus": monthly_card_bonus, "monthly_card_multiplier": monthly_multiplier,
+            "festival_bonus": festival_bonus, "festival_multiplier": festival_multiplier,
             "total_delta": actual_delta,
         }
 
@@ -1746,6 +1752,7 @@ def add_post_points(
 
     can_add = _round_delta(min(amount, daily_cap - today_pts))
     credited, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), can_add)
+    credited, festival_bonus, festival_multiplier = apply_festival_bonus(guild_id, credited)
     before = _round_shells(record.get("shells", 0))
     after = _round_shells(before + credited)
     actual_delta = _round_delta(after - before)
@@ -1760,7 +1767,7 @@ def add_post_points(
         guild_id=guild_id,
         amount=actual_delta,
         source="forum_post",
-        reason=f"legacy_forum_post_reward;monthly_card={multiplier}x;base={format_shells(can_add)}",
+        reason=f"legacy_forum_post_reward;monthly_card={multiplier}x;base={format_shells(can_add)};festival={festival_multiplier}x",
     )
     save_points_data(data)
     return actual_delta
@@ -1820,6 +1827,7 @@ def reward_daily_forum_post(
     before = _round_shells(record.get("shells", 0))
     base_amount = _round_delta(amount)
     delta, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), base_amount)
+    delta, festival_bonus, festival_multiplier = apply_festival_bonus(guild_id, delta)
     after = _round_shells(before + delta)
     actual_delta = _round_delta(after - before)
 
@@ -1844,7 +1852,7 @@ def reward_daily_forum_post(
         guild_id=guild_id,
         amount=actual_delta,
         source="daily_forum_post",
-        reason=f"channel={channel_id};thread={thread_id};daily_count={row['daily_count']};monthly_card={multiplier}x",
+        reason=f"channel={channel_id};thread={thread_id};daily_count={row['daily_count']};monthly_card={multiplier}x;festival={festival_multiplier}x",
     )
     save_points_data(data)
     return {"success": True, "reason": "rewarded", "daily_count": row["daily_count"], "amount": actual_delta}
@@ -2017,6 +2025,7 @@ def reward_daily_kimi_praise(
     base_amount = random.randint(minimum, maximum) / 10
     record, _ = _ensure_user_record(data, user_id, guild_id)
     amount, monthly_bonus, multiplier = _monthly_reward_amount(record, data.get("monthly_card_config"), base_amount)
+    amount, festival_bonus, festival_multiplier = apply_festival_bonus(guild_id, amount)
     before = _round_shells(record.get("shells", 0))
     after = _round_shells(before + amount)
     actual_delta = _round_delta(after - before)
@@ -2038,7 +2047,7 @@ def reward_daily_kimi_praise(
         guild_id=guild_id,
         amount=actual_delta,
         source="kimi_praise",
-        reason=f"message_id={message_id};rule={normalized_rule_id};monthly_card={multiplier}x",
+        reason=f"message_id={message_id};rule={normalized_rule_id};monthly_card={multiplier}x;festival={festival_multiplier}x",
     )
     save_points_data(data)
     return {

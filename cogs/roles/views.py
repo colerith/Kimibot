@@ -2906,6 +2906,8 @@ class RoleClaimView(discord.ui.View):
                 bonus_lines.append(f"连续/活跃加成：+{format_shells(result['bonus_amount'])} 蛋壳")
             if result.get("rank_bonus", 0) > 0:
                 bonus_lines.append(f"前十报到奖励：+{format_shells(result['rank_bonus'])} 蛋壳")
+            if result.get("festival_bonus", 0) > 0:
+                bonus_lines.append(f"节日福利加成：+{format_shells(result['festival_bonus'])} 蛋壳")
             if result.get("monthly_card_bonus", 0) > 0:
                 bonus_lines.append(f"月卡收益加成：+{format_shells(result['monthly_card_bonus'])} 蛋壳")
             bonus_text = "\n".join(bonus_lines) if bonus_lines else "今日暂无额外加成"
@@ -4780,6 +4782,69 @@ class MonthlyCardConfigModal(discord.ui.Modal):
         await interaction.response.edit_message(embed=build_monthly_card_admin_embed(), view=MonthlyCardAdminView())
 
 
+def build_festival_embed(guild_id):
+    from cogs.points.festival import get_config, parse_time, TZ_CN
+    value = get_config(guild_id)
+    description = "尚未设置节日福利。"
+    if value:
+        now = datetime.now(TZ_CN)
+        start, end = parse_time(value['start_at']), parse_time(value['end_at'])
+        status = "已停用" if not value['enabled'] else ("未开始" if now < start else "进行中" if now < end else "已结束")
+        description = (f"**{value['name']}** · {status}\n"
+                       f"北京时间：{start:%Y-%m-%d %H:%M} 至 {end:%Y-%m-%d %H:%M}\n"
+                       f"奖励 × **{value['multiplier']:g}**（额外 +{(value['multiplier'] - 1) * 100:g}%）")
+    embed = discord.Embed(title="🎉 节日蛋壳福利", description=description, color=0xF5B642)
+    embed.add_field(name="生效规则", value="关键词打卡、安利投稿及互动、小蛋问答、签到、论坛奖励和随机蛋壳事件。发言活跃加成在签到时结算。\n按实际发奖时间判断，开始时刻生效、结束时刻失效；在月卡加成后乘以节日倍率，保留一位小数。\n只增加正向活动奖励，扣款、转账、管理员补发和月卡每日固定领取不加倍。原有次数及基础奖励上限不变。", inline=False)
+    embed.set_footer(text="仅当前服务器生效；保存会替换当前方案，重启后仍保留。")
+    return embed
+
+
+class FestivalConfigModal(discord.ui.Modal):
+    def __init__(self, guild_id):
+        super().__init__(title="设置节日蛋壳福利")
+        from cogs.points.festival import get_config, parse_time
+        self.guild_id = guild_id
+        value = get_config(guild_id)
+        self.name_input = discord.ui.InputText(label="活动名称", value=value.get('name', '节日福利'), max_length=80)
+        self.start_input = discord.ui.InputText(label="开始（北京时间 YYYY-MM-DD HH:MM）", value=parse_time(value['start_at']).strftime('%Y-%m-%d %H:%M') if value else '', max_length=16)
+        self.end_input = discord.ui.InputText(label="结束（北京时间 YYYY-MM-DD HH:MM）", value=parse_time(value['end_at']).strftime('%Y-%m-%d %H:%M') if value else '', max_length=16)
+        self.multiplier_input = discord.ui.InputText(label="奖励倍率（如 1.5 为额外增加 50%）", value=str(value.get('multiplier', 1.5)), max_length=12)
+        for item in (self.name_input, self.start_input, self.end_input, self.multiplier_input):
+            self.add_item(item)
+
+    async def callback(self, interaction):
+        from cogs.points.festival import save_config
+        try:
+            save_config(self.guild_id, self.name_input.value, self.start_input.value, self.end_input.value, self.multiplier_input.value)
+        except ValueError as error:
+            return await interaction.response.send_message(f"❌ {error}", ephemeral=True)
+        await interaction.response.edit_message(embed=build_festival_embed(self.guild_id))
+
+
+class FestivalAdminView(discord.ui.View):
+    def __init__(self, owner_id):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("这个管理面板只属于发起它的人。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="设置 / 修改并启用", style=discord.ButtonStyle.primary)
+    async def configure(self, button, interaction):
+        await interaction.response.send_modal(FestivalConfigModal(interaction.guild_id))
+
+    @discord.ui.button(label="提前停用", style=discord.ButtonStyle.danger)
+    async def disable(self, button, interaction):
+        from cogs.points.festival import get_config, save_config
+        value = get_config(interaction.guild_id)
+        if value:
+            save_config(interaction.guild_id, **{**value, 'enabled': False})
+        await interaction.response.edit_message(embed=build_festival_embed(interaction.guild_id))
+
+
 class MonthlyCardAdminView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -5102,6 +5167,10 @@ class CommunityPanelManageView(discord.ui.View):
     @discord.ui.button(label="加速配置", style=discord.ButtonStyle.secondary, emoji="⚡", custom_id="community_admin_acceleration")
     async def acceleration_admin_callback(self, button, interaction: discord.Interaction):
         await interaction.response.send_message(embed=build_acceleration_admin_embed(), ephemeral=True)
+
+    @discord.ui.button(label="节日福利", style=discord.ButtonStyle.success, emoji="🎉", custom_id="community_admin_festival")
+    async def festival_admin_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=build_festival_embed(interaction.guild_id), view=FestivalAdminView(interaction.user.id), ephemeral=True)
 
     @discord.ui.button(label="月卡配置", style=discord.ButtonStyle.secondary, emoji="📅", custom_id="community_admin_monthly_card")
     async def monthly_card_admin_callback(self, button, interaction: discord.Interaction):
