@@ -977,12 +977,13 @@ def record_lottery_draw(
 
             for row in results or []:
                 row_type = row.get("type")
-                if bool(row.get("legendary_pity")):
-                    is_duplicate_pity = (
-                        row_type in {LOTTERY_OUTCOME_ROLE, "role"}
-                        and str(row.get("rarity", "")) == str(RARITY_LEGENDARY)
-                        and bool(row.get("dupe"))
-                    )
+                # Every three-star draw counts, including drops before hard pity.
+                # Other rarities and empty/shell draws do not break the sequence.
+                if (
+                    row_type in {LOTTERY_OUTCOME_ROLE, "role"}
+                    and str(row.get("rarity", "")) == str(RARITY_LEGENDARY)
+                ):
+                    is_duplicate_pity = bool(row.get("dupe"))
                     stats["legendary_pity_history"].append({
                         "drawn_at": str(drawn_at or ""),
                         "duplicate": is_duplicate_pity,

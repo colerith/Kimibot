@@ -39,6 +39,24 @@ def is_admin_packet_sender(member) -> bool:
     return isinstance(member, discord.Member) and member.guild_permissions.administrator
 
 
+def build_packet_completion_text(packet: dict) -> str:
+    claims = packet["claims"]
+    finished_at = max(storage.parse_time(claim["claimed_at"]) for claim in claims.values())
+    seconds = max(0, int((finished_at - storage.parse_time(packet["created_at"])).total_seconds()))
+    parts = []
+    for unit, label in ((86400, "天"), (3600, "小时"), (60, "分"), (1, "秒")):
+        value, seconds = divmod(seconds, unit)
+        if value:
+            parts.append(f"{value}{label}")
+    duration = "".join(parts) or "不到1秒"
+    # Dict insertion order preserves claim order when amounts are tied.
+    user_id, claim = max(claims.items(), key=lambda item: storage.round_shells(item[1]["amount"]))
+    return (
+        f"🧧 红包已抢完！历时 **{duration}**。\n"
+        f"🍀 手气最佳为 <@{user_id}>，抢到了 **{storage.format_shells(claim['amount'])}** 蛋壳！"
+    )
+
+
 def build_packet_embed(packet: dict, *, closed_note: str | None = None) -> discord.Embed:
     remaining_count = int(packet.get("remaining_count", 0))
     count = int(packet.get("count", 0))
@@ -441,6 +459,22 @@ class RedPacketCog(commands.Cog, name="蛋壳红包"):
             f" 当前余额：**{storage.format_shells(balance)}**。",
         )
         self._schedule_packet_refresh(packet_id)
+
+        # Only the successful claim that exhausts the packet announces completion.
+        # Later clicks and earlier snapshots in the same batch never announce it.
+        if packet and packet.get("status") == "empty" and interaction.message:
+            try:
+                await interaction.message.reply(
+                    build_packet_completion_text(packet),
+                    allowed_mentions=discord.AllowedMentions(
+                        everyone=False, roles=False, users=True, replied_user=False,
+                    ),
+                )
+            except discord.HTTPException as error:
+                print(
+                    f"[RedPackets] unable to announce completion: packet={packet_id} error={error!r}",
+                    flush=True,
+                )
 
     def _schedule_packet_refresh(self, packet_id: str) -> None:
         """Coalesce bursty claims into at most one message refresh per interval."""

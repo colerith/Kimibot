@@ -644,7 +644,7 @@ def build_lottery_stats_embed(member: discord.Member, guild_id: int) -> discord.
         value=(
             f"持有：**{ticket_status['balance']}** 张\n"
             f"本月已用：**{ticket_status['used_this_month']} / {ticket_status['monthly_limit']}**\n"
-            f"连续重复三星保底：**{ticket_status['duplicate_pity_streak']} / 3**"
+            f"连续重复三星进度：**{ticket_status['duplicate_pity_streak']} / 3**"
         ),
         inline=False,
     )
@@ -732,7 +732,7 @@ def _rules_text() -> str:
         f"- 🎁 结果权重(抽空/蛋壳/身份)：**{w_empty}/{w_shells}/{w_role}**\n"
         f"- 🥚 蛋壳结果：随机 **{format_shells(shell_reward.get('min', 0.1))}-{format_shells(shell_reward.get('max', 1.0))}** 蛋壳\n"
         f"- 🧷 保底：5 空后至少蛋壳，20 抽无身份必出身份；三星每抽均可出，最迟第 80 抽必出\n"
-        f"- 🎟️ 三星补偿：连续 3 次三星保底均重复，自动补发 1 张必出未拥有三星的抽奖券；每月最多使用 3 张\n"
+        f"- 🎟️ 三星补偿：连续 3 次抽到的三星均重复（含普通抽取），自动补发 1 张必出未拥有三星的抽奖券；每月最多使用 3 张\n"
         f"- 📅 每日报到：基础 **{format_shells(sign_reward)}** 蛋壳\n"
         f"- 💬 有效发言：会提升蛋壳获取加成\n"
         f"- 🧵 社区发帖：任意论坛帖子每帖 **{format_shells(post_reward)}** 蛋壳，每人每日最多 **{format_shells(post_daily_cap)}** 蛋壳"
@@ -772,7 +772,7 @@ def build_role_lottery_embed(points: float, role_data: dict) -> discord.Embed:
             f"💳 **十连消耗**: {format_shells(ten_cost)} 蛋壳\n"
             f"🥚 **蛋壳结果**: 随机 {shell_reward_line} 蛋壳\n"
             f"🔄 **重复补偿**: {refund_line} 蛋壳\n"
-            "🎟️ **三星保底券**: 连续 3 次三星保底重复自动获得；必出未拥有三星，每月最多使用 3 张\n"
+            "🎟️ **三星保底券**: 连续 3 次抽到的三星均重复自动获得（含普通抽取）；必出未拥有三星，每月最多使用 3 张\n"
             f"🥚 **你的蛋壳**: **{format_shells(points)}**\n\n"
             "📌 **蛋壳获取**\n"
             f"- 📅 小蛋报到：+{format_shells(sign_reward)} 起\n"
@@ -800,6 +800,7 @@ class LegendaryTicketUseView(discord.ui.View):
         self.status = status
         self.missing_count = int(missing_count)
         self.request_id = uuid.uuid4().hex
+        self._completed = False
         self.use_ticket.disabled = (
             int(status.get("balance", 0)) <= 0
             or int(status.get("monthly_remaining", 0)) <= 0
@@ -812,22 +813,25 @@ class LegendaryTicketUseView(discord.ui.View):
             return False
         return True
 
-    def embed(self) -> discord.Embed:
+    def availability_notice(self) -> str:
         if int(self.status.get("balance", 0)) <= 0:
-            notice = "你暂时没有三星保底券。连续三次三星保底均抽到重复款后，会自动补发一张。"
+            notice = "你暂时没有三星保底券。连续三次抽到的三星均为重复款后，会自动补发一张。"
         elif int(self.status.get("monthly_remaining", 0)) <= 0:
             notice = "本月已经使用 3 张，请下个月再来；未使用的券会继续保留。"
         elif self.missing_count <= 0:
             notice = "你已经拥有奖池内全部三星，券会保留，不会被消耗。"
         else:
             notice = "点击下方按钮后随机获得一个尚未拥有的三星款式。抽取前不会消耗券。"
+        return notice
+
+    def embed(self) -> discord.Embed:
         return discord.Embed(
             title="🎟️ 三星保底补偿券",
             description=(
                 f"持有：**{self.status.get('balance', 0)}** 张\n"
                 f"本月已使用：**{self.status.get('used_this_month', 0)} / {self.status.get('monthly_limit', 3)}**\n"
                 f"当前未拥有三星：**{self.missing_count}** 个\n\n"
-                f"{notice}"
+                f"{self.availability_notice()}"
             ),
             color=0xF4C95D,
         )
@@ -848,6 +852,11 @@ class LegendaryTicketUseView(discord.ui.View):
                 pool_ids,
                 month_key,
             )
+            if result.get("duplicate") and self._completed:
+                return await interaction.followup.send(
+                    "这次使用已经结算，请在最新面板使用剩余券；本次没有再次扣券。",
+                    ephemeral=True,
+                )
             if not result.get("success"):
                 messages = {
                     "no_ticket": "你目前没有可使用的三星保底券。",
@@ -904,6 +913,11 @@ class LegendaryTicketUseView(discord.ui.View):
                     for item in rewards
                 ])
             status = result.get("status", {})
+            # Each explicit next use gets its own receipt; queued clicks on the
+            # old view keep the old receipt and cannot consume another ticket.
+            next_view = LegendaryTicketUseView(
+                self.guild, self.user_id, status, len(set(pool_ids) - owned),
+            )
             await interaction.edit_original_response(
                 embed=discord.Embed(
                     title="✨ 三星保底券抽取成功",
@@ -911,12 +925,14 @@ class LegendaryTicketUseView(discord.ui.View):
                         f"抽到了全新的三星款式：{role.mention}\n"
                         f"剩余券：**{status.get('balance', 0)}** 张 · "
                         f"本月已使用：**{status.get('used_this_month', 0)} / {status.get('monthly_limit', 3)}**"
+                        f"\n{next_view.availability_notice()}"
                         f"{equip_error}{reward_text}"
                     ),
                     color=0x57F287,
                 ),
-                view=None,
+                view=next_view,
             )
+            self._completed = True
 
 
 # --- 抽奖界面 ---
@@ -1317,7 +1333,7 @@ class RoleLotteryView(discord.ui.View):
             embed.add_field(
                 name="🎟️ 三星保底补偿",
                 value=(
-                    f"连续三次三星保底均为重复，已自动补发 **{tickets_awarded}** 张三星抽奖券。\n"
+                    f"连续三次抽到的三星均为重复，已自动补发 **{tickets_awarded}** 张三星抽奖券。\n"
                     f"当前持有：**{stats_after.get('legendary_ticket_balance', 0)}** 张，可在下方「三星保底券」入口使用。"
                 ),
                 inline=False,
