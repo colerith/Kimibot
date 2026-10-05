@@ -1,6 +1,7 @@
 import datetime
 
 import discord
+from .formatting import format_entry_text as _quote
 
 from config import PHONE_WISH_CHANNEL_ID, SERVER_OWNER_ID, SUPER_EGG_ROLE_ID
 from .storage import (
@@ -44,13 +45,6 @@ def _kind_label(kind: str) -> tuple[str, str, int]:
     if kind == "bug":
         return "🐞", "Bug 反馈", BUG_COLOR
     return "🌠", "功能愿望", WISH_COLOR
-
-
-def _quote(text: str, limit: int = 700) -> str:
-    text = str(text or "").strip()
-    if len(text) > limit:
-        text = text[: limit - 3] + "..."
-    return "\n".join(f"> {line}" if line else ">" for line in (text.splitlines() or ["（空）"]))
 
 
 def build_panel_embed() -> discord.Embed:
@@ -114,10 +108,8 @@ def build_entry_embed(entry: dict) -> discord.Embed:
         for reply in replies[-6:]:
             role = "💌 电波回信" if reply.get("role") == "owner" else "📨 投稿人补充"
             name = str(reply.get("user_name") or "未知用户")[:40]
-            content = str(reply.get("content") or "").strip().replace("\n", " ")
-            if len(content) > 180:
-                content = content[:177] + "..."
-            blocks.append(f"**{role} · {name}**\n> {content}")
+            content = _quote(str(reply.get("content") or ""), 180)
+            blocks.append(f"**{role} · {name}**\n{content}")
         kept_blocks = []
         current_length = 0
         for block in reversed(blocks):

@@ -52,6 +52,17 @@ class WishPoolStorageTests(unittest.TestCase):
 
         self.assertEqual(wish_storage.find_entry_by_message_id(101)["scope"], "general")
         self.assertEqual(wish_storage.find_entry_by_message_id(201)["scope"], "phone")
+        published = wish_storage.get_published_entries()
+        self.assertEqual({entry["id"] for entry in published}, {general["id"], phone["id"]})
+        published[0]["content"] = "changed snapshot"
+        self.assertNotEqual(wish_storage.get_entry(published[0]["id"])["content"], "changed snapshot")
+
+    def test_unpublished_drafts_are_not_refreshed(self):
+        wish_storage.create_entry(
+            guild_id=1, author_id=10, author_name="Tester", kind="wish",
+            subject="未发送", content="草稿",
+        )
+        self.assertEqual(wish_storage.get_published_entries(), [])
 
     def test_rejection_reason_is_saved_and_cleared_by_new_status(self):
         entry = wish_storage.create_entry(

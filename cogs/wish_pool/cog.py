@@ -10,13 +10,15 @@ from .general_views import (
     GeneralWishPanelView,
     WishActionView,
     build_general_panel_embed,
+    build_general_entry_embed,
 )
-from .storage import get_panel_info, set_panel_info
+from .storage import get_entry, get_published_entries, get_panel_info, set_panel_info
 from .views import (
     PANEL_MARKER as PHONE_PANEL_MARKER,
     PhoneWishEntryView,
     PhoneWishPanelView,
     build_panel_embed as build_phone_panel_embed,
+    build_entry_embed as build_phone_entry_embed,
 )
 
 
@@ -37,6 +39,7 @@ class WishPoolCog(commands.Cog):
         }
         self._refresh_tasks = {}
         self._ready_started = False
+        self._entry_refresh_task = None
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -50,6 +53,42 @@ class WishPoolCog(commands.Cog):
         self.bot.add_view(PhoneWishEntryView())
         print("[Wish Pool] 通用许愿池与电波手机面板的持久化视图已注册。")
         asyncio.create_task(self.check_and_post_wish_panel())
+        self._entry_refresh_task = asyncio.create_task(self.refresh_saved_entries())
+
+    def cog_unload(self):
+        if self._entry_refresh_task is not None:
+            self._entry_refresh_task.cancel()
+        for task in self._refresh_tasks.values():
+            task.cancel()
+
+    async def refresh_saved_entries(self):
+        """Refresh stored cards in place once per startup, including older posts."""
+        await self.bot.wait_until_ready()
+        refreshed = 0
+        failed = 0
+        for saved in await asyncio.to_thread(get_published_entries):
+            try:
+                channel = await self._get_channel(int(saved["channel_id"]))
+                if channel is None:
+                    failed += 1
+                    continue
+                message = await channel.fetch_message(int(saved["message_id"]))
+                if message.author != self.bot.user:
+                    continue
+                # Read again after network I/O to include recent replies/status changes.
+                entry = await asyncio.to_thread(get_entry, saved["id"])
+                if not entry:
+                    continue
+                builder = build_general_entry_embed if entry.get("scope") == "general" else build_phone_entry_embed
+                embed = builder(entry)
+                if message.embeds and message.embeds[0].to_dict() == embed.to_dict():
+                    continue
+                await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                refreshed += 1
+            except (discord.HTTPException, ValueError, TypeError, KeyError) as error:
+                failed += 1
+                print(f"[Wish Pool] 投稿样式刷新失败：entry={saved.get('id')} error={error!r}")
+        print(f"[Wish Pool] 已刷新历史投稿样式 {refreshed} 条，跳过失败 {failed} 条。")
 
     @staticmethod
     def _is_general_panel_message(message: discord.Message) -> bool:

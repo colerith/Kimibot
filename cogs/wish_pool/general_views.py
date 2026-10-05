@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import discord
+from .formatting import format_entry_text as _quote
 
 from config import SERVER_OWNER_ID, STYLE, SUPER_EGG_ROLE_ID, WISH_CHANNEL_ID
 from .storage import (
@@ -36,13 +37,6 @@ def _status_label(status: str) -> str:
         "implemented": "✨ 已实现",
         "rejected": "🌙 不受理",
     }.get(status, "🕰️ 待处理")
-
-
-def _quote(text: str, limit: int = 700) -> str:
-    text = str(text or "").strip()
-    if len(text) > limit:
-        text = text[: limit - 3] + "..."
-    return "\n".join(f"> {line}" if line else ">" for line in (text.splitlines() or ["（空）"]))
 
 
 def build_general_panel_embed() -> discord.Embed:
@@ -91,10 +85,8 @@ def build_general_entry_embed(entry: dict) -> discord.Embed:
         for reply in replies[-6:]:
             role = "💌 电波回信" if reply.get("role") == "owner" else "📨 投稿人补充"
             name = str(reply.get("user_name") or "未知用户")[:40]
-            content = str(reply.get("content") or "").strip().replace("\n", " ")
-            if len(content) > 180:
-                content = content[:177] + "..."
-            blocks.append(f"**{role} · {name}**\n> {content}")
+            content = _quote(str(reply.get("content") or ""), 180)
+            blocks.append(f"**{role} · {name}**\n{content}")
         kept = []
         length = 0
         for block in reversed(blocks):

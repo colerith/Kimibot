@@ -77,6 +77,14 @@ def get_entry(entry_id: str) -> dict | None:
         return copy.deepcopy(entry) if isinstance(entry, dict) else None
 
 
+def get_published_entries() -> list[dict]:
+    with _LOCK:
+        return [
+            copy.deepcopy(entry) for entry in _load()["entries"].values()
+            if isinstance(entry, dict) and entry.get("channel_id") and entry.get("message_id")
+        ]
+
+
 def find_entry_by_message_id(message_id: int | str) -> dict | None:
     needle = str(message_id)
     with _LOCK:
