@@ -5,6 +5,9 @@ import datetime
 
 TZ_CN = datetime.timezone(datetime.timedelta(hours=8))
 
+# 人工审核已停用；保留工单代码和数据，恢复时统一开启此开关。
+MANUAL_REVIEW_ENABLED = False
+
 # --- 身份组和频道ID配置 ---
 IDS = {
     "SUPER_EGG_ROLE_ID": 1417724603253395526,

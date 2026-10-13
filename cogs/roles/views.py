@@ -4893,6 +4893,8 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
             discord.SelectOption(label="助力鸣谢消息", value="boost_thanks", emoji="💎"),
             discord.SelectOption(label="论坛统计面板", value="forum_stats", emoji="📊"),
         ]
+        if not config.MANUAL_REVIEW_ENABLED:
+            options = [option for option in options if option.value not in {"ticket_test", "tickets"}]
         super().__init__(placeholder="选择要刷新或重发的其他面板…", options=options, row=4)
 
     async def callback(self, interaction: discord.Interaction):
@@ -5211,7 +5213,9 @@ def build_community_manage_embed(guild: discord.Guild | None):
             "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
             "预答题、投稿、小蛋问答及各类面板刷新入口已统一接入这里。\n"
             "误发面板可通过【撤销面板】下拉菜单停止维护并删除。\n"
-            "需要创建测试工单，或维护工单、许愿池、投诉、入站答题、助力鸣谢及论坛统计时，请使用下拉菜单。\n"
+            + ("需要创建测试工单，或维护工单、许愿池、投诉、入站答题、助力鸣谢及论坛统计时，请使用下拉菜单。\n"
+               if config.MANUAL_REVIEW_ENABLED else
+               "需要维护许愿池、投诉、入站答题、助力鸣谢及论坛统计时，请使用下拉菜单。\n") +
             f"当前识别奖励规则：**{len(load_praise_rules())}** 条。"
         ),
         color=0x2B2D31,

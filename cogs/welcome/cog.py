@@ -5,7 +5,7 @@ from discord.ext import commands
 import asyncio
 import random
 
-from config import IDS, STYLE
+from config import IDS, STYLE, MANUAL_REVIEW_ENABLED
 from .data import QUIZ_QUESTIONS
 from .views import QuizStartView
 
@@ -33,22 +33,24 @@ def build_newbie_approved_dm(member: discord.Member, guild: discord.Guild, score
         value=f"最终得分：**{score}/100**\n身份状态：✅ 已通过并发放",
         inline=False,
     )
-    embed.add_field(
-        name="🔓 想解锁更多内容？（可选）",
-        value=(
-            "人工审核是用于申请更多社区权限的**自愿选项，并不是必须步骤**。\n"
-            "不参加人工审核也不会影响你已经获得的【新兵蛋子】身份和现有权限。\n\n"
-            f"如果之后有需要，可以前往 [人工审核入口]({MANUAL_REVIEW_URL}) 查看说明。"
-        ),
-        inline=False,
-    )
+    if MANUAL_REVIEW_ENABLED:
+        embed.add_field(
+            name="🔓 想解锁更多内容？（可选）",
+            value=(
+                "人工审核是用于申请更多社区权限的**自愿选项，并不是必须步骤**。\n"
+                "不参加人工审核也不会影响你已经获得的【新兵蛋子】身份和现有权限。\n\n"
+                f"如果之后有需要，可以前往 [人工审核入口]({MANUAL_REVIEW_URL}) 查看说明。"
+            ),
+            inline=False,
+        )
     embed.add_field(
         name="💛 温馨提醒",
         value="记得阅读频道说明和社区守则；慢慢逛、开心玩就好～",
         inline=False,
     )
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.set_footer(text="人工审核完全自愿 · 不申请不会影响当前的新兵蛋子身份")
+    embed.set_footer(text=("人工审核完全自愿 · 不申请不会影响当前的新兵蛋子身份"
+                           if MANUAL_REVIEW_ENABLED else "欢迎加入社区 · 祝你玩得开心"))
     return embed
 
 
@@ -77,7 +79,7 @@ class WelcomeCog(commands.Cog):
         self.bot.add_view(QuizStartView(self))
         print("[Welcome & Quiz] Cog loaded and views registered.")
 
-    # --- 欢迎新成员 (保持不变) ---
+    # --- 欢迎新成员与入门指引 ---
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         if member.bot: return
@@ -86,15 +88,15 @@ class WelcomeCog(commands.Cog):
         if not channel:
             print(f"无法找到欢迎频道 (ID: {channel_id})")
             return
-        quiz_channel_id = IDS.get("QUIZ_CHANNEL_ID", "未知频道")
-        ticket_channel_id = IDS.get("TICKET_PANEL_CHANNEL_ID", "未知频道")
         embed = discord.Embed(
             title=f"🎉 欢迎来到 \"🔮LOFI-加载中\" 社区！",
             description=f"你好呀，{member.mention}！\n\n"
-                        f"🚪 **第一步：获取基础权限**\n"
-                        f"请前往 <#{quiz_channel_id}> 参与答题，答对后即可获得【新兵蛋子】身份。\n\n"
-                        f"🔑 **可选：解锁更多内容**\n"
-                        f"人工审核并非必须；如有需要，可前往 <#{ticket_channel_id}> 申请更多社区权限。\n\n"
+                        "💡 **新蛋入门指引**\n"
+                        "• **先读规则：**请仔细阅读 <#1417568378889175071>。\n"
+                        "• **答题领身份：**[前往答题](https://discord.com/channels/1397629012292931726/1467034060026286090/1499984826931871808)，通过后获得【新兵蛋子】身份，即可下载预设。账号注册满30天可立即答题，未满30天需按注册时间等待缓冲期。\n"
+                        "• **安心等待：**缓冲期内只要遵守社区规则，不会因暂时无法答题被清理。\n"
+                        "• **蛋壳加速：**积攒蛋壳可兑换加速卡，缩短缓冲期。获取方式见 <#1468483568601927921> 的【使用帮助】；[参与预答题](https://discord.com/channels/1397629012292931726/1417568378889175071/1541643432202608781)可直接获得 **5个蛋壳**。\n"
+                        "• **使用预设前：**请认真阅读 <#1536381368580178002> 和 <#1536941892288127016>。\n\n"
                         f"祝你玩得开心捏！✨",
             color=STYLE["KIMI_YELLOW"]
         )
@@ -201,7 +203,7 @@ class WelcomeCog(commands.Cog):
             try:
                 await approved_member.send(
                     embed=build_newbie_approved_dm(approved_member, interaction.guild, score),
-                    view=build_manual_review_link_view(),
+                    view=build_manual_review_link_view() if MANUAL_REVIEW_ENABLED else None,
                 )
             except discord.Forbidden:
                 print(f"无法发送新兵蛋子通过私信: user={user_id} reason=dm_closed")
