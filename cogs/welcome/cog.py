@@ -100,8 +100,7 @@ class WelcomeCog(commands.Cog):
                         f"祝你玩得开心捏！✨",
             color=STYLE["KIMI_YELLOW"]
         )
-        if member.avatar:
-            embed.set_thumbnail(url=member.avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)
         embed.set_footer(text="记得先看社区守则哦~")
         try:
             await channel.send(content=member.mention, embed=embed)
