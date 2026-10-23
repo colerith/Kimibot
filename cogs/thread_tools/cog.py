@@ -61,7 +61,8 @@ class ThreadToolsCog(commands.Cog, name="帖子工具"):
 
     # --- 命令 ---
 
-    @discord.message_command(name="⚠️ 第三方违规提醒")
+    # Use a single-codepoint emoji: Discord's returned name must match Pycord exactly.
+    @discord.message_command(name="🚨第三方违规提醒")
     @is_super_egg()
     async def third_party_notice(self, ctx: discord.ApplicationContext, message: discord.Message):
         if not ctx.guild:

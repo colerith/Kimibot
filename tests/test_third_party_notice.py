@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import discord
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -38,6 +39,20 @@ class NoticeStorageTests(unittest.TestCase):
 
 
 class NoticeCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_command_registration_matches_normalized_discord_response(self):
+        bot = discord.Bot()
+        bot.add_cog(ThreadToolsCog(bot))
+
+        async def register(application_id, guild_id, payload):
+            return [dict(item, id=str(index), type=item.get("type", 1), name=item["name"].replace("\ufe0f", "").replace(" ", ""))
+                    for index, item in enumerate(payload, 1)]
+
+        with patch.object(bot.http, "bulk_upsert_guild_commands", new=AsyncMock(side_effect=register)):
+            registered = await bot.register_commands(guild_id=123, force=True)
+        notice = next(item for item in registered if "第三方违规提醒" in item["name"])
+        self.assertEqual(notice["name"], "🚨第三方违规提醒")
+        self.assertIs(bot._application_commands[notice["id"]], bot.get_cog("帖子工具").third_party_notice)
+
     async def test_reply_uses_current_content_without_mass_mentions(self):
         ctx = SimpleNamespace(guild=SimpleNamespace(id=1), defer=AsyncMock(), followup=SimpleNamespace(send=AsyncMock()))
         message = SimpleNamespace(reply=AsyncMock())
