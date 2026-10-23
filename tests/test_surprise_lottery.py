@@ -37,6 +37,35 @@ class StorageFixture:
 
 
 class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
+    def test_twentieth_spin_guarantees_role_and_replay_does_not_advance(self):
+        store.update_config(9, role_id=2, entry={"weight": 1, "symbol": "🍋"})
+        store.update_config(9, settings={"chance": 0})
+        for i in range(19):
+            result = store.settle_spin(7, 9, str(i), {1, 2})
+            self.assertIsNone(result["winner"])
+            self.assertEqual(result["miss_streak"], i + 1)
+        points._POINTS_DB_READY = False
+        self.assertEqual(store.get_account(7, 9)["miss_streak"], 19)
+        result = store.settle_spin(7, 9, "20th", {1, 2})
+        self.assertTrue(result["pity_triggered"])
+        self.assertEqual(len(set(result["reels"])), 1)
+        self.assertEqual(result["pity_remaining"], 20)
+        self.assertEqual(store.settle_spin(7, 9, "20th", {1, 2}), result)
+        self.assertEqual(store.get_account(7, 9)["draws"], 20)
+        self.assertFalse(store.settle_spin(7, 9, "no-money", {1, 2})["success"])
+        self.assertEqual(store.get_account(7, 9)["miss_streak"], 0)
+
+    def test_early_duplicate_win_resets_surprise_pity(self):
+        store.update_config(9, role_id=2, entry={"weight": 1, "symbol": "🍋"})
+        store.update_config(9, settings={"chance": 0})
+        store.settle_spin(7, 9, "miss", {1, 2})
+        store.update_config(9, settings={"chance": 100})
+        result = store.settle_spin(7, 9, "early", {1}, member_role_ids=[1])
+        self.assertTrue(result["duplicate"])
+        self.assertFalse(result["pity_triggered"])
+        self.assertEqual(result["miss_streak"], 0)
+        self.assertEqual(result["shards_gained"], 1)
+
     def test_batch_weights_preserve_symbols_and_reject_conflicts_atomically(self):
         store.set_role_weights(9, [1, 2], 5)
         cfg = store.get_config(9)

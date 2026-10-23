@@ -6,6 +6,8 @@ import os
 from cogs.points import storage as points
 from . import storage as roles
 
+PITY_LIMIT = 20
+
 
 def _ensure_storage():
     points._ensure_points_db()
@@ -172,8 +174,11 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
                 if balance < cfg["cost"]:
                     return {"success": False, "reason": f"蛋壳不足：需要 {cfg['cost']:g}，当前 {balance:g}。"}
                 account = _get(con, "surprise_accounts", key, {"owned": [], "shards": 0, "draws": 0})
-                reels = roll_reels(pool, cfg["chance"], rng)
+                misses_before = max(0, int(account.get("miss_streak", 0)))
+                pity_triggered = misses_before >= PITY_LIMIT - 1
+                reels = roll_reels(pool, 100 if pity_triggered else cfg["chance"], rng)
                 winner = reels[0] if len(set(reels)) == 1 else None
+                account["miss_streak"] = 0 if winner else misses_before + 1
                 duplicate = bool(winner and winner in owned | set(account["owned"]))
                 shards = cfg["duplicate_shards"] if duplicate else 0
                 if winner:
@@ -188,7 +193,9 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
                 points._db_put_user(con, key, record)
                 result = {"success": True, "reels": reels, "winner": winner, "duplicate": duplicate,
                           "shards_gained": shards, "shards": account["shards"], "cost": cfg["cost"],
-                          "balance": balance, "chance": cfg["chance"]}
+                          "balance": balance, "chance": cfg["chance"],
+                          "pity_triggered": pity_triggered, "miss_streak": account["miss_streak"],
+                          "pity_remaining": PITY_LIMIT - account["miss_streak"]}
                 if symbols:
                     result["symbols"] = [symbols[rid] for rid in reels]
                 account["last_result"] = result

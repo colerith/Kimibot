@@ -96,13 +96,15 @@ class SurpriseLotteryView(OwnerView):
             asyncio.to_thread(get_user_points, self.owner_id, self.guild.id))
         _, error = playable_pool(self.guild, cfg)
         self.spin.disabled = not cfg["enabled"] or bool(error)
-        embed = discord.Embed(title="🎰 惊喜抽奖", color=0xF4B942, description=(
-            "## ❔ ┃ ❔ ┃ ❔\n三个相同身份组图标 → 获得该身份组！\n\n"
-            f"每次 **{format_shells(cfg['cost'])}** 蛋壳 · 三图标一致概率 **{cfg['chance']:g}%**\n"
+        embed = discord.Embed(title="🎰 奇米蛋 · 惊喜抽奖", color=0xF4B942, description=(
+            "## ❔ ┃ ❔ ┃ ❔\n本大王把惊喜藏进转轮里惹！三个图标排排站，一样就把新衣服带回家～\n\n"
+            f"每次 **{format_shells(cfg['cost'])}** 蛋壳 · 基础三图标一致概率 **{cfg['chance']:g}%**\n"
             f"重复转换 **{cfg['duplicate_shards']}** 碎片 · 当前碎片 **{account['shards']}**\n"
             f"蛋壳余额 **{format_shells(balance)}**\n\n"
             "中奖后按身份组权重分配；未中奖会显示不完全相同的图标。\n"
-            "惊喜抽奖使用独立奖池，不计入普通抽奖保底。碎片暂只累计和查询。"))
+            f"🥚 本大王兜底：最多再 **{store.PITY_LIMIT - account.get('miss_streak', 0)} 抽**必出身份组！\n"
+            "每抽都有机会提前中奖；连续 19 抽未中，第 20 抽必出。抽到重复身份组也重置保底。\n"
+            "惊喜保底独立计算，不影响普通抽奖。碎片暂只累计和查询。"))
         if not cfg["enabled"] or error:
             embed.add_field(name="当前状态", value="暂未开放" if not cfg["enabled"] else error, inline=False)
         return embed
@@ -116,7 +118,7 @@ class SurpriseLotteryView(OwnerView):
             await interaction.response.defer()
             for child in self.children:
                 child.disabled = True
-            await interaction.edit_original_response(embeds=[discord.Embed(title="🎰 转动中……", description="## ❔ ┃ ❔ ┃ ❔", color=0xF4B942)], view=self)
+            await interaction.edit_original_response(embeds=[discord.Embed(title="🎰 本大王的惊喜转轮转起来惹……", description="## ❔ ┃ ❔ ┃ ❔\n咕噜咕噜～看看这次是哪件小衣服来找你！", color=0xF4B942)], view=self)
             cfg = await asyncio.to_thread(store.get_config, self.guild.id)
             entries, error = playable_pool(self.guild, cfg)
             if error:
@@ -167,11 +169,15 @@ class SurpriseLotteryView(OwnerView):
             rows.append((role, symbol))
         slots = "图标见下方三个位置" if any(symbol[1] for _, symbol in rows) else " ┃ ".join(symbol[0] for _, symbol in rows)
         winner = result["winner"]
-        status = (f"重复身份组 <@&{winner}> → **+{result['shards_gained']} 碎片**" if result["duplicate"] else
-                  f"🎉 获得 <@&{winner}>！已加入永久衣柜。") if winner else "这次图标没有完全一致，未中奖。"
-        embed = discord.Embed(title="🎰 惊喜抽奖结果", description=f"## {slots}\n{status}\n\n"
+        status = (f"🥚 哎呀，是熟悉的 <@&{winner}>！本大王给你收好 **{result['shards_gained']} 枚碎片**啦～" if result["duplicate"] else
+                  f"🎉 三个图标贴贴成功！获得 <@&{winner}>，本大王帮你放进永久衣柜惹～") if winner else "🥚 呜，三个图标这次没站好队……本大王已经记住这次啦，保底进度 +1！"
+        embed = discord.Embed(title="🎰 奇米蛋的惊喜揭晓啦！", description=f"## {slots}\n{status}\n\n"
             f"本次消耗 **{format_shells(result['cost'])}** 蛋壳 · 结算余额 **{format_shells(result['balance'])}**\n"
             f"结算碎片余额 **{result['shards']}**", color=0xF4B942 if winner else 0x95A5A6)
+        if "pity_remaining" in result:
+            embed.add_field(name="🥚 本大王的 20 抽约定", value=(
+                ("这抽触发大保底，三个图标乖乖排好队啦！\n" if result.get("pity_triggered") else "")
+                + ("已抽到身份组，保底重新开始～" if winner else f"最多再 {result['pity_remaining']} 抽必出身份组！")), inline=False)
         embeds = [embed]
         for index, (role, symbol) in enumerate(rows, 1):
             reel = discord.Embed(title=f"{index} 号位", description=f"{symbol[0]} {role.mention if role else '已删除身份组'}", color=0xBB8FCE)
@@ -216,12 +222,13 @@ class SurpriseCatalogView(OwnerView):
         self.page = max(0, min(self.page, pages - 1))
         self.prev.disabled, self.next.disabled = self.page == 0, self.page == pages - 1
         embed = discord.Embed(title="📚 惊喜抽奖奖池", description=f"我的碎片：**{account['shards']}** · 累计 **{account['draws']}** 抽\n"
-            f"总中奖率 **{cfg['chance']:g}%** · 碎片暂只累计和查询。", color=0xBB8FCE)
+            f"基础中奖率 **{cfg['chance']:g}%** · 最多再 **{store.PITY_LIMIT - account.get('miss_streak', 0)} 抽**必出！\n碎片暂只累计和查询。", color=0xBB8FCE)
         for role, entry, symbol in entries[self.page * 10:(self.page + 1) * 10]:
-            probability = cfg["chance"] * entry["weight"] / total_weight if total_weight else 0
+            chance = 100 if account.get("miss_streak", 0) >= store.PITY_LIMIT - 1 else cfg["chance"]
+            probability = chance * entry["weight"] / total_weight if total_weight else 0
             icon = f"[查看图标]({symbol[1]})" if symbol[1] else symbol[0]
             embed.add_field(name=role.name[:256], value=f"{icon} {role.mention}\n"
-                f"{'✅ 已拥有' if role.id in owned else '尚未拥有'} · 单次获得概率 {probability:.4g}%"
+                f"{'✅ 已拥有' if role.id in owned else '尚未拥有'} · 下一抽获得概率 {probability:.4g}%"
                 + (" · 已暂停" if not entry["weight"] else ""), inline=False)
         if not entries:
             embed.description += "\n\n奖池暂未配置。"
@@ -256,7 +263,7 @@ class SurpriseSettingsModal(discord.ui.Modal):
         self.panel = panel
         cfg = panel.cfg
         self.cost = discord.ui.InputText(label="单次蛋壳费用（0 为免费）", value=str(cfg["cost"]))
-        self.chance = discord.ui.InputText(label="三个图标一致的概率（0–100%）", value=str(cfg["chance"]))
+        self.chance = discord.ui.InputText(label="基础中奖概率（0–100%；20 抽保底）", value=str(cfg["chance"]))
         self.shards = discord.ui.InputText(label="重复身份组转换碎片数量", value=str(cfg["duplicate_shards"]))
         for item in (self.cost, self.chance, self.shards):
             self.add_item(item)
@@ -415,7 +422,8 @@ class SurpriseAdminView(OwnerView):
             f"状态：**{'已开放' if self.cfg['enabled'] else '已暂停'}**\n"
             f"单抽 **{self.cfg['cost']:g}** 蛋壳 · 三图标一致概率 **{self.cfg['chance']:g}%**\n"
             f"重复转换 **{self.cfg['duplicate_shards']}** 碎片\n\n"
-            "中奖时按权重分配身份组；例如中奖率 10%，两组权重 1:3，单次概率分别为 2.5% 和 7.5%。\n"
+            "固定 20 抽大保底：连续 19 抽未中，第 20 抽必出；任何身份组中奖（含重复）重置计数。\n"
+            "非保底抽按基础概率开奖，中奖后按权重分配身份组。\n"
             "三图标不是独立抽取：先按总中奖率决定是否一致，再分配身份组。\n"
             "添加身份组后设置权重和独立图标；权重 0 为暂停。\n\n" + ("\n".join(lines) or "尚未配置奖池。")))
         if self.selected_id:
