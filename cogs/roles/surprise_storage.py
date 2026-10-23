@@ -89,6 +89,26 @@ def get_account(user_id, guild_id, *, recover=True):
     return result
 
 
+def set_role_weights(guild_id, role_ids, weight):
+    """Validate the entire selection before saving; preserve each role's own symbol."""
+    weight = float(weight)
+    if not math.isfinite(weight) or not 0 <= weight <= 1000000:
+        raise ValueError("权重应在 0–1000000 之间；0 为暂停。")
+    ids = set(int(rid) for rid in role_ids)
+    if not ids:
+        raise ValueError("请先选择身份组。")
+    with roles._role_data_lock, points._POINTS_DATA_LOCK:
+        if ids & set(roles.load_role_data().get("lottery_roles", [])):
+            raise ValueError("所选身份组中有普通奖池身份组，本次未保存，请刷新后重选。")
+        cfg = get_config(guild_id)
+        for rid in ids:
+            entry = cfg["roles"].setdefault(str(rid), {"symbol": ""})
+            entry["weight"] = weight
+        with points._points_connection() as con:
+            _put(con, "surprise_config", str(guild_id), cfg)
+    return cfg
+
+
 def recover_all_rewards():
     _ensure_storage()
     with points._points_connection() as con:

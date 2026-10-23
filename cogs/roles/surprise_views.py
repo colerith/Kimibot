@@ -274,13 +274,45 @@ class SurpriseSettingsModal(discord.ui.Modal):
         await interaction.followup.send("✅ 概率与费用已保存。", ephemeral=True)
 
 
+class OptionalEmojiInput(discord.ui.InputText):
+    def to_component_dict(self):
+        payload = super().to_component_dict()
+        # Explicit payload also supports deployments with older Pycord serializers.
+        payload.update(required=False, min_length=0)
+        return payload
+
+
+class SurpriseBatchWeightModal(discord.ui.Modal):
+    def __init__(self, panel, role_ids):
+        super().__init__(title=f"批量配置 {len(role_ids)} 个身份组")
+        self.panel, self.role_ids = panel, list(role_ids)
+        self.weight = discord.ui.InputText(label="统一中奖权重（0 暂停；保留各自 Emoji）", value="1")
+        self.add_item(self.weight)
+
+    async def callback(self, interaction):
+        if interaction.user.id != self.panel.owner_id:
+            return await interaction.response.send_message("仅原管理员可修改。", ephemeral=True)
+        await interaction.response.defer()
+        selected = [interaction.guild.get_role(rid) for rid in self.role_ids]
+        if any(not r or r.managed or r.id == interaction.guild_id or r.permissions.administrator for r in selected):
+            return await interaction.followup.send("❌ 所选身份组已失效或不可配置，请刷新后重选。本次未保存。", ephemeral=True)
+        try:
+            await asyncio.to_thread(store.set_role_weights, interaction.guild_id, self.role_ids, self.weight.value)
+        except ValueError as error:
+            return await interaction.followup.send(f"❌ {error}", ephemeral=True)
+        self.panel.selected_ids = self.role_ids
+        self.panel.selected_id = self.role_ids[0]
+        await self.panel.refresh(interaction)
+        await interaction.followup.send(f"✅ 已为 {len(self.role_ids)} 个身份组设置权重，各自 Emoji 保持不变。缺少原图标的可稍后单独编辑 Emoji。", ephemeral=True)
+
+
 class SurpriseRoleModal(discord.ui.Modal):
     def __init__(self, panel, role):
         super().__init__(title="惊喜奖池身份组配置")
         self.panel, self.role = panel, role
         entry = panel.cfg["roles"].get(str(role.id), {})
         self.weight = discord.ui.InputText(label="中奖分配权重（0 暂停；默认 1）", value=str(entry.get("weight", 1)))
-        self.symbol = discord.ui.InputText(label="显示 Emoji（留空使用身份组原图标）", value=entry.get("symbol", ""), required=False, max_length=100)
+        self.symbol = OptionalEmojiInput(label="显示 Emoji（选填，留空使用原图标）", value=entry.get("symbol", ""), required=False, min_length=0, max_length=100)
         self.add_item(self.weight)
         self.add_item(self.symbol)
 
@@ -288,7 +320,7 @@ class SurpriseRoleModal(discord.ui.Modal):
         if interaction.user.id != self.panel.owner_id:
             return await interaction.response.send_message("仅原管理员可修改。", ephemeral=True)
         await interaction.response.defer()
-        entry = {"weight": self.weight.value, "symbol": self.symbol.value.strip()}
+        entry = {"weight": self.weight.value, "symbol": (self.symbol.value or "").strip()}
         symbol_text = entry["symbol"]
         if symbol_text and not re.fullmatch(r"<a?:[A-Za-z0-9_]+:[0-9]+>", symbol_text):
             # Unicode emoji may contain joiners, selectors and skin tones; reject prose/Markdown.
@@ -297,16 +329,15 @@ class SurpriseRoleModal(discord.ui.Modal):
             if not has_emoji or any(c.isspace() for c in symbol_text) or len(symbol_text) > 32:
                 return await interaction.followup.send("❌ 请填写一个 Emoji 或 Discord 自定义表情，不要填写普通文字或链接。", ephemeral=True)
         icon = symbol_for(self.role, entry)
-        if not icon[2]:
-            return await interaction.followup.send("❌ 该身份组没有图标，请填写一个 Emoji。", ephemeral=True)
         cfg = await asyncio.to_thread(store.get_config, interaction.guild_id)
-        if any(r.id != self.role.id and symbol[2] == icon[2] for r, _, symbol in pool_entries(interaction.guild, cfg)):
+        if icon[2] and any(r.id != self.role.id and symbol[2] == icon[2] for r, _, symbol in pool_entries(interaction.guild, cfg)):
             return await interaction.followup.send("❌ 该图标已被其他身份组使用，请换一个。", ephemeral=True)
         try:
             await asyncio.to_thread(store.update_config, interaction.guild_id, role_id=self.role.id, entry=entry)
         except ValueError as error:
             return await interaction.followup.send(f"❌ {error}", ephemeral=True)
         self.panel.selected_id = self.role.id
+        self.panel.selected_ids = [self.role.id]
         await self.panel.refresh(interaction)
         await interaction.followup.send("✅ 身份组已保存，可继续配置其他身份组。", ephemeral=True)
 
@@ -315,11 +346,14 @@ class SurpriseAdminRolePicker(discord.ui.Select):
     def __init__(self, panel, available):
         super().__init__(placeholder=f"待添加身份组（第 {panel.add_page + 1}/{panel.add_pages} 页）",
             options=[discord.SelectOption(label=r.name[:100], value=str(r.id),
-                description=f"服务器层级 {r.position} · ID {r.id}") for r in available], row=0)
+                description=f"服务器层级 {r.position} · ID {r.id}") for r in available], min_values=1, max_values=len(available), row=0)
 
     async def callback(self, interaction):
         panel = self.view
-        rid = int(interaction.data["values"][0])
+        ids = [int(value) for value in interaction.data["values"]]
+        if len(ids) > 1:
+            return await interaction.response.send_modal(SurpriseBatchWeightModal(panel, ids))
+        rid = ids[0]
         role = interaction.guild.get_role(rid)
         if not role or role.managed or role.id == interaction.guild_id or role.permissions.administrator:
             return await interaction.response.send_message("请选择普通装饰身份组。", ephemeral=True)
@@ -328,13 +362,14 @@ class SurpriseAdminRolePicker(discord.ui.Select):
 
 class SurpriseConfiguredPicker(discord.ui.Select):
     def __init__(self, panel, entries):
-        options = [discord.SelectOption(label=role.name[:100], value=str(role.id), default=role.id == panel.selected_id,
+        options = [discord.SelectOption(label=role.name[:100], value=str(role.id), default=role.id in panel.selected_ids,
                     description=f"权重 {entry['weight']:g} · 服务器层级 {role.position}") for role, entry, _ in entries]
-        super().__init__(placeholder=f"已配置奖池（第 {panel.page + 1}/{panel.pages} 页）", options=options, row=1)
+        super().__init__(placeholder=f"已配置奖池（第 {panel.page + 1}/{panel.pages} 页）", options=options, min_values=1, max_values=len(options), row=1)
 
     async def callback(self, interaction):
         panel = self.view
-        panel.selected_id = int(self.values[0])
+        panel.selected_ids = [int(value) for value in self.values]
+        panel.selected_id = panel.selected_ids[0]
         await interaction.response.defer()
         await panel.refresh(interaction)
 
@@ -345,6 +380,7 @@ class SurpriseAdminView(OwnerView):
         self.parent, self.guild = parent, parent.guild
         self.page, self.pages, self.selected_id = 0, 1, None
         self.cfg = None
+        self.selected_ids = []
         self.add_page, self.add_pages, self.add_query = 0, 1, ""
 
     async def prepare(self):
@@ -383,7 +419,7 @@ class SurpriseAdminView(OwnerView):
             "三图标不是独立抽取：先按总中奖率决定是否一致，再分配身份组。\n"
             "添加身份组后设置权重和独立图标；权重 0 为暂停。\n\n" + ("\n".join(lines) or "尚未配置奖池。")))
         if self.selected_id:
-            embed.add_field(name="当前选择", value=f"<@&{self.selected_id}>", inline=False)
+            embed.add_field(name="当前选择", value="、".join(f"<@&{rid}>" for rid in self.selected_ids)[:1024], inline=False)
         if error:
             embed.add_field(name="配置提示", value=error, inline=False)
         embed.set_footer(text=f"服务器层级从上到下 · 待添加 {self.add_page + 1}/{self.add_pages} 页 · 已配置 {self.page + 1}/{self.pages} 页")
@@ -397,8 +433,10 @@ class SurpriseAdminView(OwnerView):
     async def settings(self, button, interaction):
         await interaction.response.send_modal(SurpriseSettingsModal(self))
 
-    @discord.ui.button(label="编辑所选身份组", emoji="✏️", row=2)
+    @discord.ui.button(label="编辑所选 / 批量权重", emoji="✏️", row=2)
     async def edit_role(self, button, interaction):
+        if len(self.selected_ids) > 1:
+            return await interaction.response.send_modal(SurpriseBatchWeightModal(self, self.selected_ids))
         role = interaction.guild.get_role(self.selected_id)
         if not role:
             return await interaction.response.send_message("身份组已不存在，请重新选择。", ephemeral=True)
@@ -407,8 +445,10 @@ class SurpriseAdminView(OwnerView):
     @discord.ui.button(label="移除所选", emoji="🗑️", style=discord.ButtonStyle.danger, row=2)
     async def remove_role(self, button, interaction):
         await interaction.response.defer()
-        await asyncio.to_thread(store.update_config, interaction.guild_id, role_id=self.selected_id, remove=True)
+        for rid in self.selected_ids:
+            await asyncio.to_thread(store.update_config, interaction.guild_id, role_id=rid, remove=True)
         self.selected_id = None
+        self.selected_ids = []
         await self.refresh(interaction)
 
     @discord.ui.button(label="开放惊喜抽奖", emoji="🎰", style=discord.ButtonStyle.success, row=2)

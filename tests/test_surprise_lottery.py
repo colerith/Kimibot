@@ -37,6 +37,16 @@ class StorageFixture:
 
 
 class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
+    def test_batch_weights_preserve_symbols_and_reject_conflicts_atomically(self):
+        store.set_role_weights(9, [1, 2], 5)
+        cfg = store.get_config(9)
+        self.assertEqual(cfg["roles"]["1"], {"symbol": "🍒", "weight": 5})
+        self.assertEqual(cfg["roles"]["2"], {"symbol": "", "weight": 5})
+        roles.save_role_data({"lottery_roles": [3]})
+        with self.assertRaises(ValueError):
+            store.set_role_weights(9, [1, 3], 9)
+        self.assertEqual(store.get_config(9), cfg)
+
     def test_new_duplicate_and_replay(self):
         first = store.settle_spin(7, 9, "a", {1})
         self.assertEqual(first["reels"], [1, 1, 1])
@@ -118,6 +128,43 @@ class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
 
 
 class SurpriseViewTests(StorageFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_optional_emoji_payload_and_blank_submission(self):
+        guild = self.make_guild()
+        panel = ui.SurpriseAdminView(SimpleNamespace(guild=guild), 7)
+        await panel.prepare()
+        panel.refresh = AsyncMock()
+        modal = ui.SurpriseRoleModal(panel, guild.get_role(2))
+        payload = modal.symbol.to_component_dict()
+        self.assertIs(payload["required"], False)
+        self.assertEqual(payload["min_length"], 0)
+        modal.symbol.value = ""
+        interaction = SimpleNamespace(user=SimpleNamespace(id=7), guild_id=9, guild=guild,
+            response=SimpleNamespace(defer=AsyncMock()), followup=SimpleNamespace(send=AsyncMock()))
+        await modal.callback(interaction)
+        self.assertEqual(store.get_config(9)["roles"]["2"]["symbol"], "")
+        panel.refresh.assert_awaited_once()
+
+    async def test_multi_add_opens_batch_modal_and_keeps_panel(self):
+        guild = self.make_guild()
+        panel = ui.SurpriseAdminView(SimpleNamespace(guild=guild), 7)
+        await panel.prepare()
+        picker = next(c for c in panel.children if isinstance(c, ui.SurpriseAdminRolePicker))
+        self.assertEqual(picker.max_values, 25)
+        interaction = SimpleNamespace(user=SimpleNamespace(id=7), guild_id=9, guild=guild, data={"values": ["2", "3"]},
+            response=SimpleNamespace(send_modal=AsyncMock(), defer=AsyncMock()),
+            edit_original_response=AsyncMock(), followup=SimpleNamespace(send=AsyncMock()))
+        await picker.callback(interaction)
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, ui.SurpriseBatchWeightModal)
+        modal.weight.value = "7"
+        await modal.callback(interaction)
+        self.assertEqual(store.get_config(9)["roles"]["2"]["weight"], 7)
+        self.assertEqual(store.get_config(9)["roles"]["3"]["weight"], 7)
+        self.assertIs(interaction.edit_original_response.await_args.kwargs["view"], panel)
+        selected = next(c for c in panel.children if isinstance(c, ui.SurpriseConfiguredPicker))
+        self.assertEqual(selected.max_values, 3)
+        self.assertEqual({int(o.value) for o in selected.options if o.default}, {2, 3})
+
     def make_guild(self):
         guild = SimpleNamespace(id=9, roles=[])
         for rid, symbol in [(i, "🍒" if i == 1 else "🍋") for i in range(1, 33)]:
