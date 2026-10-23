@@ -180,7 +180,7 @@ class SurpriseLotteryView(OwnerView):
                 + ("已抽到身份组，保底重新开始～" if winner else f"最多再 {result['pity_remaining']} 抽必出身份组！")), inline=False)
         embeds = [embed]
         for index, (role, symbol) in enumerate(rows, 1):
-            reel = discord.Embed(title=f"{index} 号位", description=f"{symbol[0]} {role.mention if role else '已删除身份组'}", color=0xBB8FCE)
+            reel = discord.Embed(title=f"{index} 号位", description=role.mention if role else "已删除身份组", color=0xBB8FCE)
             if symbol[1]:
                 reel.set_thumbnail(url=symbol[1])
             embeds.append(reel)
