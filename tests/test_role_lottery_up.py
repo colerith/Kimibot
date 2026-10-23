@@ -77,7 +77,7 @@ class UpPoolTests(unittest.TestCase):
 
 class UpPanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_group_pagination_and_independent_drafts(self):
-        role = SimpleNamespace(id=1, name='role')
+        role = SimpleNamespace(id=1, name='role', position=1)
         parent = SimpleNamespace(guild=SimpleNamespace(id=9, roles=[role]))
         groups = [dict(id=str(i), name=f'group {i}', role_ids=[1]) for i in range(30)]
         data = {'lottery_roles': [1], 'lottery_up': {'9': {'groups': groups}}}
@@ -100,7 +100,7 @@ class UpPanelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLessEqual(width, 5)
 
     async def test_pagination_preserves_selection(self):
-        roles = [SimpleNamespace(id=i, name=str(i)) for i in range(1, 31)]
+        roles = [SimpleNamespace(id=i, name=str(i), position=i) for i in range(1, 31)]
         parent = SimpleNamespace(guild=SimpleNamespace(id=9, roles=roles))
         with patch('cogs.roles.lottery_up.load_role_data', return_value={'lottery_roles': list(range(1,31))}):
             view = UpPoolView(parent, 7)

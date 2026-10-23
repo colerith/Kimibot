@@ -177,7 +177,7 @@ class UpPoolView(discord.ui.View):
         self.delete_group.disabled = self.is_new
         self.stop.disabled = self.is_new
         ids = set(load_role_data().get("lottery_roles", []))
-        roles = [r for r in self.parent.guild.roles if r.id in ids]
+        roles = sorted((r for r in self.parent.guild.roles if r.id in ids), key=lambda r: (r.position, r.id), reverse=True)
         self.selected.intersection_update(r.id for r in roles)
         self.pages = max(1, math.ceil(len(roles) / 25))
         self.page = min(self.page, self.pages - 1)
@@ -201,7 +201,7 @@ class UpPoolView(discord.ui.View):
             "仅提高同稀有度、同类型内的身份组权重；保底规则保持原样。\n"
             "例如同池 10 个身份组，1 个设为 2 倍，该身份组条件概率由 10% 变为 2/11 ≈ 18.18%。全选同池则相对概率不变。\n"
             "时间输入为北京时间；显示时间随 Discord 客户端时区转换。到期自动失效。\n\n"
-            + ("、".join(f"<@&{rid}>" for rid in sorted(self.selected))[:1800] or "请在下方选择身份组。")))
+            + ("、".join(f"<@&{rid}>" for rid in [r.id for r in sorted(self.parent.guild.roles, key=lambda r: (r.position, r.id), reverse=True) if r.id in self.selected])[:1800] or "请在下方选择身份组。")))
 
     @discord.ui.button(label="上一页", row=1)
     async def previous(self, button, interaction):

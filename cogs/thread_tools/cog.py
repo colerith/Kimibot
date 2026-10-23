@@ -1,7 +1,11 @@
 # cogs/thread_tools/cog.py
 
+import asyncio
+
 import discord
 from discord.ext import commands
+from cogs.shared.utils import is_super_egg
+from cogs.shared.third_party_notice import load_notice
 
 class ThreadToolsCog(commands.Cog, name="帖子工具"):
     """
@@ -56,6 +60,23 @@ class ThreadToolsCog(commands.Cog, name="帖子工具"):
             await ctx.respond(f"标注失败: {e}", ephemeral=True)
 
     # --- 命令 ---
+
+    @discord.message_command(name="⚠️ 第三方违规提醒")
+    @is_super_egg()
+    async def third_party_notice(self, ctx: discord.ApplicationContext, message: discord.Message):
+        if not ctx.guild:
+            return await ctx.respond("❌ 无法在私信中使用。", ephemeral=True)
+        await ctx.defer(ephemeral=True)
+        content = await asyncio.to_thread(load_notice, ctx.guild.id)
+        try:
+            await message.reply(content, allowed_mentions=discord.AllowedMentions.none())
+        except discord.NotFound:
+            return await ctx.followup.send("❌ 原消息已删除，无法发送提醒。", ephemeral=True)
+        except discord.Forbidden:
+            return await ctx.followup.send("❌ 没有权限回复该消息，请检查频道的查看、发送及历史消息权限。", ephemeral=True)
+        except discord.HTTPException:
+            return await ctx.followup.send("❌ 提醒发送失败，请稍后重试。", ephemeral=True)
+        await ctx.followup.send("✅ 已回复第三方违规提醒。", ephemeral=True)
 
     # 1. 斜杠命令版本 (/回顶)
     @discord.slash_command(name="回顶", description="本大王带你坐穿梭机回到帖子最顶上！咻~")

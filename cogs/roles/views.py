@@ -763,7 +763,7 @@ def build_role_lottery_embed(points: float, role_data: dict) -> discord.Embed:
     )
 
     return discord.Embed(
-        title="🌌 **奇米蛋 · 身份抽奖**",
+        title="🌌 **奇米蛋 · 普通抽奖**",
         description=(
             "这里藏着一些无法直接领取的 **稀有款式**！\n"
             "你会是那个被命运选中的蛋子吗？\n\n"
@@ -939,6 +939,11 @@ class LegendaryTicketUseView(discord.ui.View):
 class RoleLotteryView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+
+    @discord.ui.button(label="返回模式选择", emoji="↩️", custom_id="lottery_mode_back", row=2)
+    async def mode_back(self, button, interaction: discord.Interaction):
+        from .surprise_views import LotteryModeView, mode_embed
+        await interaction.response.edit_message(embeds=[mode_embed()], view=LotteryModeView(interaction.user.id))
 
     def _set_controls_disabled(self, disabled: bool) -> None:
         for item in self.children:
@@ -1522,6 +1527,11 @@ class RoleClaimSelect(discord.ui.Select):
             exclusive_type = "redeem"
         elif target_role.id in collection_reward_ids:
             exclusive_type = "collection_reward"
+        else:
+            from .surprise_storage import get_account
+            surprise_account = await asyncio.to_thread(get_account, interaction.user.id, interaction.guild_id)
+            if target_role.id in surprise_account["owned"]:
+                exclusive_type = "surprise"
 
         # 2. 根据类型执行互斥移除并添加
         if target_role not in interaction.user.roles:
@@ -2868,12 +2878,8 @@ class RoleClaimView(discord.ui.View):
     async def lottery_entry_callback(self, button, interaction: discord.Interaction):
         if not await self._begin_private_response(interaction, "🎲 正在摇匀身份组奖池……"):
             return
-        data, points = await asyncio.gather(
-            asyncio.to_thread(load_role_data),
-            asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id or 0),
-        )
-        embed = build_role_lottery_embed(points, data)
-        await self._complete_private_response(interaction, embed=embed, view=RoleLotteryView())
+        from .surprise_views import LotteryModeView, mode_embed
+        await self._complete_private_response(interaction, embed=mode_embed(), view=LotteryModeView(interaction.user.id))
 
     @discord.ui.button(label="兑换商城", style=discord.ButtonStyle.secondary, emoji="🥚", custom_id="role_main_redeem", row=1)
     async def redeem_entry_callback(self, button, interaction: discord.Interaction):
@@ -3346,14 +3352,17 @@ class LotteryRarityApplyButton(discord.ui.Button):
         if not panel.selected_role_ids or panel.selected_rarity is None or panel.selected_kind is None:
             return await interaction.response.send_message("❌ 请先选择身份组、稀有度和分类。", ephemeral=True)
 
+        await interaction.response.defer()
         success_count = 0
         for rid in panel.selected_role_ids:
-            ok = set_lottery_role_rarity(rid, panel.selected_rarity)
-            ok_kind = set_lottery_role_kind(rid, panel.selected_kind)
+            ok = await asyncio.to_thread(set_lottery_role_rarity, rid, panel.selected_rarity)
+            ok_kind = await asyncio.to_thread(set_lottery_role_kind, rid, panel.selected_kind)
             if ok and ok_kind:
                 success_count += 1
 
-        await self.parent_view.refresh_content(interaction)
+        panel.reload_options()
+        panel._build()
+        await interaction.edit_original_response(view=panel)
         await interaction.followup.send(
             f"✅ 批量设置完成：{success_count}/{len(panel.selected_role_ids)} 项\n"
             f"目标：[{_lottery_kind_label(panel.selected_kind)}] {_rarity_label(panel.selected_rarity)}",
@@ -3363,7 +3372,7 @@ class LotteryRarityApplyButton(discord.ui.Button):
 
 class LotteryRarityBackButton(discord.ui.Button):
     def __init__(self, parent_view: "RoleManagerView"):
-        super().__init__(label="返回管理", emoji="↩️", style=discord.ButtonStyle.secondary, row=3)
+        super().__init__(label="返回上一级", emoji="↩️", style=discord.ButtonStyle.secondary, row=3)
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
@@ -3399,12 +3408,17 @@ class LotteryRarityConfigView(discord.ui.View):
         self.page_size = 25
         self.total_pages = 1
 
+        self.guild = guild
+        self.reload_options()
+        self._build()
+
+    def reload_options(self):
         data = load_role_data()
         self.all_options = []
-        for rid in data.get("lottery_roles", []):
-            role = guild.get_role(rid)
-            if not role:
-                continue
+        for role in _roles_in_server_order(
+            self.guild, [self.guild.get_role(rid) for rid in data.get("lottery_roles", [])]
+        ):
+            rid = role.id
             rarity = get_lottery_role_rarity(rid, data)
             kind = get_lottery_role_kind(rid, data)
             self.all_options.append(
@@ -3416,10 +3430,7 @@ class LotteryRarityConfigView(discord.ui.View):
                 )
             )
 
-        # 统一排序，分页时顺序稳定
-        self.all_options.sort(key=lambda o: o.label.lower())
         self.total_pages = max(1, math.ceil(len(self.all_options) / self.page_size)) if self.all_options else 1
-        self._build()
 
     def _build(self):
         self.clear_items()
@@ -3430,11 +3441,19 @@ class LotteryRarityConfigView(discord.ui.View):
             end = start + self.page_size
             page_options = self.all_options[start:end]
 
+            for option in page_options:
+                option.default = int(option.value) in self.selected_role_ids
             role_select = LotteryRarityRoleSelect(self.parent_view, page_options)
             role_select.placeholder = f"选择奖池身份组 ({self.page + 1}/{self.total_pages})"
             self.add_item(role_select)
-            self.add_item(LotteryRarityValueSelect(self.parent_view))
-            self.add_item(LotteryKindValueSelect(self.parent_view))
+            rarity_select = LotteryRarityValueSelect(self.parent_view)
+            kind_select = LotteryKindValueSelect(self.parent_view)
+            for option in rarity_select.options:
+                option.default = int(option.value) == self.selected_rarity
+            for option in kind_select.options:
+                option.default = option.value == self.selected_kind
+            self.add_item(rarity_select)
+            self.add_item(kind_select)
             self.add_item(LotteryRarityApplyButton(self.parent_view))
             self.add_item(LotteryRarityBackButton(self.parent_view))
             if self.total_pages > 1:
@@ -3887,7 +3906,7 @@ def _collection_admin_embed(guild: discord.Guild, selected_id: str) -> discord.E
         embed.add_field(name="当前配置", value="暂无分组，请先点击【新增分组】。", inline=False)
         return embed
     role_ids = set(target.get("role_ids", [])) if selected_id != "__full__" else set(get_collectible_role_ids(data))
-    valid_roles = [guild.get_role(rid) for rid in role_ids if guild.get_role(rid)]
+    valid_roles = _roles_in_server_order(guild, [guild.get_role(rid) for rid in role_ids])
     reward_role = guild.get_role(int(target.get("reward_role_id", 0) or 0))
     embed.add_field(name=f"{target.get('emoji', '📚')} {target.get('name', '未命名')}",
                     value=target.get("description") or "*无简介*", inline=False)
@@ -4043,7 +4062,7 @@ class CollectionAdminView(discord.ui.View):
         if self.selected_id != "__full__" and not any(g.get("id") == self.selected_id for g in groups):
             self.selected_id = "__full__"
         self.add_item(CollectionAdminTargetSelect(groups, self.selected_id))
-        pool_ids = [rid for rid in get_collectible_role_ids(data) if self.parent_view.guild.get_role(rid)]
+        pool_ids = _role_ids_in_server_order(self.parent_view.guild, get_collectible_role_ids(data))
         self.total_pages = max(1, math.ceil(len(pool_ids) / 25))
         self.page = min(self.page, self.total_pages - 1)
         self.current_page_ids = pool_ids[self.page * 25:(self.page + 1) * 25]
@@ -4066,26 +4085,41 @@ class LotteryConfigHubView(discord.ui.View):
     def __init__(self, parent_view: "RoleManagerView"):
         super().__init__(timeout=300)
         self.parent_view = parent_view
+        self.guild = parent_view.guild
+
+    @discord.ui.button(label="惊喜抽奖配置", style=discord.ButtonStyle.success, emoji="🎰")
+    async def surprise(self, button, interaction: discord.Interaction):
+        from .surprise_views import SurpriseAdminView
+        await interaction.response.defer()
+        view = SurpriseAdminView(self, interaction.user.id)
+        await interaction.edit_original_response(embeds=[await view.prepare()], view=view)
 
     @discord.ui.button(label="稀有度与类型", style=discord.ButtonStyle.primary, emoji="⭐")
     async def rarity(self, button, interaction: discord.Interaction):
-        view = LotteryRarityConfigView(self.parent_view, interaction.guild)
+        view = LotteryRarityConfigView(self, interaction.guild)
         await interaction.response.edit_message(embed=discord.Embed(title="⚙️ 抽奖身份组批量配置", description="选择身份组、稀有度与类型后应用。", color=0x2B2D31), view=view)
 
     @discord.ui.button(label="限时 UP 池", style=discord.ButtonStyle.primary, emoji="📈")
     async def up_pool(self, button, interaction: discord.Interaction):
-        view = UpPoolView(self.parent_view, interaction.user.id)
+        view = UpPoolView(self, interaction.user.id)
         await interaction.response.edit_message(embed=view.embed(), view=view)
 
     @discord.ui.button(label="图鉴与收集奖励", style=discord.ButtonStyle.success, emoji="📚")
     async def collection(self, button, interaction: discord.Interaction):
-        view = CollectionAdminView(self.parent_view)
+        view = CollectionAdminView(self)
         await interaction.response.edit_message(embed=_collection_admin_embed(interaction.guild, view.selected_id), view=view)
 
     @discord.ui.button(label="返回管理", style=discord.ButtonStyle.secondary, emoji="↩️")
     async def back(self, button, interaction: discord.Interaction):
         await self.parent_view.refresh_content(interaction)
 
+
+    async def refresh_content(self, interaction: discord.Interaction):
+        embed = discord.Embed(title="🎰 奖池与图鉴配置", description="请选择要管理的内容。身份组列表按服务器层级从上到下排列。", color=0x2B2D31)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
 
 ROLE_POOL_META = {
     "lottery": {"key": "lottery_roles", "label": "抽奖身份组", "emoji": "🎰"},
@@ -4892,16 +4926,28 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
             discord.SelectOption(label="入站答题面板", value="welcome_quiz", emoji="📝"),
             discord.SelectOption(label="助力鸣谢消息", value="boost_thanks", emoji="💎"),
             discord.SelectOption(label="论坛统计面板", value="forum_stats", emoji="📊"),
+            discord.SelectOption(label="第三方违规提醒文案", value="third_party_notice", emoji="⚠️", description="编辑右键 App 命令发送的提醒正文"),
         ]
         if not config.MANUAL_REVIEW_ENABLED:
             options = [option for option in options if option.value not in {"ticket_test", "tickets"}]
-        super().__init__(placeholder="选择要刷新或重发的其他面板…", options=options, row=4)
+        super().__init__(placeholder="选择其他面板维护或提醒文案编辑…", options=options, row=4)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         target = self.values[0]
         try:
-            if target == "ticket_test":
+            if target == "third_party_notice":
+                from cogs.shared.third_party_notice import load_notice, ThirdPartyNoticeEditView
+
+                content = await asyncio.to_thread(load_notice, interaction.guild_id)
+                await interaction.followup.send(
+                    content=content,
+                    view=ThirdPartyNoticeEditView(interaction.guild_id, interaction.user.id, content),
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+            elif target == "ticket_test":
                 cog = self.bot.get_cog("Tickets")
                 if not cog:
                     raise RuntimeError("工单模块未加载")
@@ -5213,6 +5259,7 @@ def build_community_manage_embed(guild: discord.Guild | None):
             "集中管理小蛋报到、蛋壳、身份组与随机事件。\n"
             "预答题、投稿、小蛋问答及各类面板刷新入口已统一接入这里。\n"
             "误发面板可通过【撤销面板】下拉菜单停止维护并删除。\n"
+            "【第三方违规提醒文案】可在下拉菜单中预览和修改。\n"
             + ("需要创建测试工单，或维护工单、许愿池、投诉、入站答题、助力鸣谢及论坛统计时，请使用下拉菜单。\n"
                if config.MANUAL_REVIEW_ENABLED else
                "需要维护许愿池、投诉、入站答题、助力鸣谢及论坛统计时，请使用下拉菜单。\n") +
@@ -5491,10 +5538,17 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
         }
     elif exclusive_type == "collection_reward":
         target_ids = set(get_collection_reward_role_ids(data))
+    elif exclusive_type == "surprise":
+        from .surprise_storage import get_account
+        account = await asyncio.to_thread(get_account, user.id, guild.id)
+        target_ids = set(account["owned"])
     # 如果没有指定类型，则清理所有装饰（供换装面板的清空入口使用）
     else:
         target_ids = set(data.get("claimable_roles", []) + data.get("lottery_roles", []) + data.get("redeem_roles", []))
         target_ids.update(get_collection_reward_role_ids(data))
+        from .surprise_storage import get_account
+        account = await asyncio.to_thread(get_account, user.id, guild.id)
+        target_ids.update(account["owned"])
 
     to_remove = []
     for role in user.roles:

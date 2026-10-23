@@ -34,6 +34,8 @@ class RolesCog(commands.Cog):
     async def on_ready(self):
         try:
             await asyncio.to_thread(initialize_role_state_storage)
+            from .surprise_storage import recover_all_rewards
+            await asyncio.to_thread(recover_all_rewards)
             report = await asyncio.to_thread(initialize_monthly_coupons)
             if not report.get("already_done"):
                 print(f"[月卡二星券] 历史补发完成：{report}")
