@@ -410,7 +410,7 @@ class SurpriseAdminView(OwnerView):
         self.edit_role.disabled = self.remove_role.disabled = self.selected_id is None
         self.toggle.label = "暂停惊喜抽奖" if self.cfg["enabled"] else "开放惊喜抽奖"
         _, error = playable_pool(self.guild, self.cfg)
-        lines = [f"{symbol[0]} {role.mention} · 权重 {entry['weight']:g}" for role, entry, symbol in page_entries]
+        lines = [f"{role.mention} · 权重 {entry['weight']:g}" for role, entry, _ in page_entries]
         embed = discord.Embed(title="🎰 惊喜抽奖管理", color=0xF4B942, description=(
             f"状态：**{'已开放' if self.cfg['enabled'] else '已暂停'}**\n"
             f"单抽 **{self.cfg['cost']:g}** 蛋壳 · 三图标一致概率 **{self.cfg['chance']:g}%**\n"
