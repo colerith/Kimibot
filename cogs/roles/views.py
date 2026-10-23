@@ -4172,12 +4172,17 @@ class RolePoolAddSelect(discord.ui.Select):
         data = load_role_data()
         target_key = ROLE_POOL_META[panel.pool_type]["key"]
         all_keys = [meta["key"] for meta in ROLE_POOL_META.values()] + ["redeem_roles"]
+        from .surprise_storage import reserved_role_ids
+        surprise_ids = reserved_role_ids() if panel.pool_type == "lottery" else set()
         added, skipped = [], []
         target = data.setdefault(target_key, [])
         for role_id in selected_ids:
             role = panel.server_roles.get(role_id)
             if not role:
                 skipped.append(f"{role_id}（已失效）")
+                continue
+            if role_id in surprise_ids:
+                skipped.append(f"{role.name}（已在惊喜奖池）")
                 continue
             current_key = next((key for key in all_keys if role_id in data.get(key, [])), None)
             if current_key:
@@ -4190,7 +4195,10 @@ class RolePoolAddSelect(discord.ui.Select):
             target.append(role_id)
             added.append(role.name)
         if added:
-            save_role_data(data)
+            try:
+                save_role_data(data)
+            except ValueError as error:
+                return await interaction.response.send_message(f"❌ {error}，请刷新列表。", ephemeral=True)
         panel.rebuild()
         await interaction.response.edit_message(embed=panel.build_embed(), view=panel)
         await interaction.followup.send(
@@ -4346,6 +4354,9 @@ class RolePoolManagerView(discord.ui.View):
         self.add_item(RolePoolCategorySelect(self))
         data = load_role_data()
         configured = {rid for key in ("lottery_roles", "claimable_roles", "notification_roles", "redeem_roles") for rid in data.get(key, [])}
+        if self.pool_type == "lottery":
+            from .surprise_storage import reserved_role_ids
+            configured.update(reserved_role_ids())
         available = sorted(
             (r for r in self.server_roles.values() if r.id != self.guild.id and not r.managed and r.id not in configured
              and (not self.add_query or self.add_query.casefold() in r.name.casefold() or self.add_query == str(r.id))),

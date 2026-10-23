@@ -120,7 +120,7 @@ class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
 class SurpriseViewTests(StorageFixture, unittest.IsolatedAsyncioTestCase):
     def make_guild(self):
         guild = SimpleNamespace(id=9, roles=[])
-        for rid, symbol in [(1, "🍒"), (2, "🍋")]:
+        for rid, symbol in [(i, "🍒" if i == 1 else "🍋") for i in range(1, 33)]:
             guild.roles.append(discord.Role(guild=guild, state=SimpleNamespace(), data={
                 "id": str(rid), "name": f"role {rid}", "position": rid, "permissions": "0",
                 "colors": {"primary_color": 0, "secondary_color": None, "tertiary_color": None},
@@ -139,6 +139,40 @@ class SurpriseViewTests(StorageFixture, unittest.IsolatedAsyncioTestCase):
         view = ui.SurpriseLotteryView(7, guild)
         await view.prepare()
         self.assertFalse(view.spin.disabled)
+
+    async def test_available_pagination_order_and_pool_exclusion(self):
+        guild = self.make_guild()
+        roles.save_role_data({"lottery_roles": [2, 3]})
+        panel = ui.SurpriseAdminView(SimpleNamespace(guild=guild), 7)
+        await panel.prepare()
+        picker = next(c for c in panel.children if isinstance(c, ui.SurpriseAdminRolePicker))
+        self.assertEqual([int(o.value) for o in picker.options], [rid for rid in range(32, 6, -1) if rid != guild.id])
+        self.assertFalse(panel.add_next.disabled)
+        interaction = SimpleNamespace(response=SimpleNamespace(defer=AsyncMock()), edit_original_response=AsyncMock())
+        await panel.add_next.callback(interaction)
+        picker = next(c for c in panel.children if isinstance(c, ui.SurpriseAdminRolePicker))
+        self.assertEqual([int(o.value) for o in picker.options], [6, 5, 4])
+        self.assertEqual(panel.page, 0)
+        self.assertTrue(panel.add_next.disabled)
+        await panel.add_previous.callback(interaction)
+        self.assertEqual(panel.add_page, 0)
+
+    async def test_both_storage_paths_reject_overlapping_roles(self):
+        roles.save_role_data({"lottery_roles": [2]})
+        with self.assertRaises(ValueError):
+            store.update_config(9, role_id=2, entry={"weight": 1, "symbol": "🍋"})
+        with self.assertRaises(ValueError):
+            roles.save_role_data({"lottery_roles": [1, 2]})
+        from cogs.roles.views import RolePoolManagerView
+        panel = RolePoolManagerView(SimpleNamespace(guild=self.make_guild()))
+        available = [r.id for r in panel.available_page_roles]
+        panel.add_page = 1
+        panel.rebuild()
+        available += [r.id for r in panel.available_page_roles]
+        self.assertNotIn(1, available)
+        store.update_config(9, role_id=1, remove=True)
+        roles.save_role_data({"lottery_roles": [1, 2]})
+        self.assertIn(1, roles.load_role_data()["lottery_roles"])
 
     async def test_conflicting_icons_block_draw_and_catalog_reports_owned(self):
         guild = self.make_guild()

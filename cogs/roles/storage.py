@@ -336,6 +336,10 @@ def save_role_data(data):
     global _role_data_cache, _role_data_cache_mtime_ns
     normalized = _normalize_role_data(data)
     with _role_data_lock:
+        from .surprise_storage import reserved_role_ids
+        previous = set(load_role_data().get("lottery_roles", [])) if os.path.exists(ROLES_DATA_FILE) else set()
+        if (set(normalized.get("lottery_roles", [])) - previous) & reserved_role_ids():
+            raise ValueError("身份组已在惊喜抽奖奖池，请先从惊喜奖池移除。")
         os.makedirs(os.path.dirname(ROLES_DATA_FILE), exist_ok=True)
         temp_file = f"{ROLES_DATA_FILE}.{os.getpid()}.tmp"
         with open(temp_file, "w", encoding="utf-8") as file:

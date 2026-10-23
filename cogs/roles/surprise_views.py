@@ -33,6 +33,9 @@ def pool_entries(guild, cfg):
 
 def playable_pool(guild, cfg):
     entries = [row for row in pool_entries(guild, cfg) if row[1]["weight"] > 0]
+    ordinary = set(roles.load_role_data().get("lottery_roles", []))
+    if any(role.id in ordinary for role, _, _ in entries):
+        return [], "存在普通奖池与惊喜奖池重复的身份组，请先从其中一边移除。"
     symbols = set()
     for role, _, symbol in entries:
         if role.managed or role.id == guild.id or role.permissions.administrator:
@@ -309,8 +312,10 @@ class SurpriseRoleModal(discord.ui.Modal):
 
 
 class SurpriseAdminRolePicker(discord.ui.Select):
-    def __init__(self):
-        super().__init__(placeholder="添加 / 配置身份组（可搜索）", select_type=discord.ComponentType.role_select, row=0)
+    def __init__(self, panel, available):
+        super().__init__(placeholder=f"待添加身份组（第 {panel.add_page + 1}/{panel.add_pages} 页）",
+            options=[discord.SelectOption(label=r.name[:100], value=str(r.id),
+                description=f"服务器层级 {r.position} · ID {r.id}") for r in available], row=0)
 
     async def callback(self, interaction):
         panel = self.view
@@ -340,6 +345,7 @@ class SurpriseAdminView(OwnerView):
         self.parent, self.guild = parent, parent.guild
         self.page, self.pages, self.selected_id = 0, 1, None
         self.cfg = None
+        self.add_page, self.add_pages, self.add_query = 0, 1, ""
 
     async def prepare(self):
         self.cfg = await asyncio.to_thread(store.get_config, self.guild.id)
@@ -349,7 +355,18 @@ class SurpriseAdminView(OwnerView):
         for item in list(self.children):
             if isinstance(item, discord.ui.Select):
                 self.remove_item(item)
-        self.add_item(SurpriseAdminRolePicker())
+        ordinary = set((await asyncio.to_thread(roles.load_role_data)).get("lottery_roles", []))
+        available = sorted((r for r in self.guild.roles
+            if r.id != self.guild.id and not r.managed and not r.permissions.administrator
+            and r.id not in ordinary and str(r.id) not in self.cfg["roles"]
+            and (not self.add_query or self.add_query.casefold() in r.name.casefold() or self.add_query == str(r.id))),
+            key=lambda r: (r.position, r.id), reverse=True)
+        self.add_pages = max(1, math.ceil(len(available) / 25))
+        self.add_page = max(0, min(self.add_page, self.add_pages - 1))
+        self.add_previous.disabled = self.add_page == 0
+        self.add_next.disabled = self.add_page == self.add_pages - 1
+        if available:
+            self.add_item(SurpriseAdminRolePicker(self, available[self.add_page * 25:(self.add_page + 1) * 25]))
         page_entries = entries[self.page * 25:(self.page + 1) * 25]
         if page_entries:
             self.add_item(SurpriseConfiguredPicker(self, page_entries))
@@ -369,7 +386,8 @@ class SurpriseAdminView(OwnerView):
             embed.add_field(name="当前选择", value=f"<@&{self.selected_id}>", inline=False)
         if error:
             embed.add_field(name="配置提示", value=error, inline=False)
-        embed.set_footer(text=f"服务器层级从上到下 · 第 {self.page + 1}/{self.pages} 页 · 保存后保留当前面板")
+        embed.set_footer(text=f"服务器层级从上到下 · 待添加 {self.add_page + 1}/{self.add_pages} 页 · 已配置 {self.page + 1}/{self.pages} 页")
+        embed.add_field(name="待添加列表", value=f"共 {len(available)} 项；已排除普通奖池和当前惊喜奖池身份组。搜索：{discord.utils.escape_markdown(self.add_query) or '全部'}", inline=False)
         return embed
 
     async def refresh(self, interaction):
@@ -404,13 +422,13 @@ class SurpriseAdminView(OwnerView):
         await asyncio.to_thread(store.update_config, interaction.guild_id, settings={"enabled": not cfg["enabled"]})
         await self.refresh(interaction)
 
-    @discord.ui.button(label="上一页", emoji="⬅️", row=3)
+    @discord.ui.button(label="已配置上一页", emoji="⬅️", row=3)
     async def previous(self, button, interaction):
         await interaction.response.defer()
         self.page -= 1
         await self.refresh(interaction)
 
-    @discord.ui.button(label="下一页", emoji="➡️", row=3)
+    @discord.ui.button(label="已配置下一页", emoji="➡️", row=3)
     async def next_page(self, button, interaction):
         await interaction.response.defer()
         self.page += 1
@@ -419,3 +437,41 @@ class SurpriseAdminView(OwnerView):
     @discord.ui.button(label="返回奖池与图鉴配置", emoji="↩️", row=3)
     async def back(self, button, interaction):
         await self.parent.refresh_content(interaction)
+
+
+    @discord.ui.button(label="待添加上一页", emoji="⬅️", row=4)
+    async def add_previous(self, button, interaction):
+        await interaction.response.defer()
+        self.add_page -= 1
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="待添加下一页", emoji="➡️", row=4)
+    async def add_next(self, button, interaction):
+        await interaction.response.defer()
+        self.add_page += 1
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="搜索名称 / ID", emoji="🔎", row=4)
+    async def search(self, button, interaction):
+        await interaction.response.send_modal(SurpriseSearchModal(self))
+
+    @discord.ui.button(label="刷新列表", emoji="🔄", row=4)
+    async def refresh_lists(self, button, interaction):
+        await interaction.response.defer()
+        await self.refresh(interaction)
+
+
+class SurpriseSearchModal(discord.ui.Modal):
+    def __init__(self, panel):
+        super().__init__(title="搜索待添加身份组")
+        self.panel = panel
+        self.query = discord.ui.InputText(label="名称关键词或 ID（留空显示全部）", value=panel.add_query, required=False, max_length=100)
+        self.add_item(self.query)
+
+    async def callback(self, interaction):
+        if interaction.user.id != self.panel.owner_id:
+            return await interaction.response.send_message("仅原管理员可操作。", ephemeral=True)
+        await interaction.response.defer()
+        self.panel.add_query = self.query.value.strip()
+        self.panel.add_page = 0
+        await self.panel.refresh(interaction)

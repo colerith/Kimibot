@@ -1,6 +1,7 @@
 """Surprise slot machine: atomic debit/result/shards and recoverable wardrobe delivery."""
 import math
 import random
+import os
 
 from cogs.points import storage as points
 from . import storage as roles
@@ -33,9 +34,20 @@ def get_config(guild_id):
         })
 
 
+def reserved_role_ids():
+    """All configured surprise roles, including paused ones; ordinary pools are global."""
+    if not os.path.exists(points.POINTS_DB_FILE):
+        return set()
+    with points._points_connection() as con:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='surprise_state'").fetchone():
+            return set()
+        rows = con.execute("SELECT data FROM surprise_state WHERE namespace='surprise_config'")
+        return {int(rid) for row in rows for rid in points._json_load(row["data"], {}).get("roles", {})}
+
+
 def update_config(guild_id, *, settings=None, role_id=None, entry=None, remove=False):
     """Merge one edit under the points lock so concurrent admin panels cannot overwrite it."""
-    with points._POINTS_DATA_LOCK:
+    with roles._role_data_lock, points._POINTS_DATA_LOCK:
         cfg = get_config(guild_id)
         if settings:
             for name in ("cost", "chance", "duplicate_shards"):
@@ -56,6 +68,8 @@ def update_config(guild_id, *, settings=None, role_id=None, entry=None, remove=F
             if remove:
                 cfg["roles"].pop(key, None)
             elif entry is not None:
+                if int(role_id) in roles.load_role_data().get("lottery_roles", []):
+                    raise ValueError("该身份组已在普通抽奖奖池，请先从普通奖池移除。")
                 weight = float(entry.get("weight", 1))
                 if not math.isfinite(weight) or weight < 0 or weight > 1000000:
                     raise ValueError("身份组权重应在 0–1000000 之间；0 为暂停。")
@@ -113,7 +127,7 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
     The collection mirror may fail independently; account recovery redelivers it idempotently.
     """
     _ensure_storage()
-    with roles._ownership_lock, points._POINTS_DATA_LOCK:
+    with roles._ownership_lock, roles._role_data_lock, points._POINTS_DATA_LOCK:
         cfg = get_config(guild_id)
         receipt_key = f"{guild_id}:{user_id}:{operation_id}"
         owned = set(roles.get_user_collection(user_id)) | set(roles.get_user_redeem_ownership(user_id)) | set(member_role_ids)
@@ -129,6 +143,8 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
                     return {"success": False, "reason": "惊喜抽奖尚未开放。"}
                 pool = {int(rid): entry["weight"] for rid, entry in cfg["roles"].items()
                         if int(rid) in valid_role_ids and entry["weight"] > 0}
+                if set(pool) & set(roles.load_role_data().get("lottery_roles", [])):
+                    return {"success": False, "reason": "普通与惊喜奖池存在重复身份组，请管理员调整；本次未扣费。"}
                 if not pool or (len(pool) < 2 and cfg["chance"] < 100):
                     return {"success": False, "reason": "有效奖池不足，请联系管理员配置。"}
                 record, key = points._db_get_user(con, user_id, guild_id)
