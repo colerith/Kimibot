@@ -43,15 +43,21 @@ class StorageFixture:
 
 
 class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
-    def test_probability_follows_ordinary_and_ignores_legacy_value(self):
+    def test_native_role_icon_overrides_legacy_placeholder(self):
+        role = SimpleNamespace(icon=SimpleNamespace(url="https://example.com/tofu.png", key="icons/tofu"), unicode_emoji=None)
+        symbol = ui.symbol_for(role, {"symbol": "🍣"})
+        self.assertEqual(symbol[1], "https://example.com/tofu.png")
+        self.assertEqual(symbol[2], "icon:tofu")
+
+    def test_probability_caps_ordinary_and_ignores_legacy_value(self):
         self.chance_mock.side_effect = ordinary_role_chance
         with points._points_connection() as con:
             store._put(con, "surprise_config", "9", {"enabled": True, "cost": 1,
                        "chance": 99, "duplicate_shards": 1, "roles": {}})
         for weights, expected in [({"role": 2, "shells": 38, "empty": 60}, 2),
-                                  ({"role": 1, "shells": 0, "empty": 0}, 100),
+                                  ({"role": 1, "shells": 0, "empty": 0}, 3),
                                   ({"role": 0, "shells": 32, "empty": 45}, 100 / 78),
-                                  ({"role": 0, "shells": 0, "empty": 0}, 23)]:
+                                  ({"role": 0, "shells": 0, "empty": 0}, 3)]:
             with patch.object(roles, "get_lottery_config", return_value={"outcome_weights": weights}):
                 self.assertAlmostEqual(store.get_config(9)["chance"], expected)
         with self.assertRaises(ValueError):

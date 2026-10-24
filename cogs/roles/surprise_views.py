@@ -22,6 +22,9 @@ async def equip_latest_surprise(user, guild, result):
 
 
 def symbol_for(role, entry):
+    # Native role artwork takes precedence over old Unicode placeholders.
+    if role.icon:
+        return ("🖼️", str(role.icon.url), f"icon:{role.icon.key.rsplit('/', 1)[-1]}")
     override = entry.get("symbol", "")
     if override:
         emoji = discord.PartialEmoji.from_str(override)
@@ -113,7 +116,7 @@ class SurpriseLotteryView(OwnerView):
         refund_chance, refund_limits = await asyncio.to_thread(store.refund_rules)
         embed = discord.Embed(title="🎰 奇米蛋 · 惊喜抽奖", color=0xF4B942, description=(
             "## ❔ ┃ ❔ ┃ ❔\n本大王把惊喜藏进转轮里惹！三个图标排排站，一样就把新衣服带回家～\n\n"
-            f"每次 **{format_shells(unit_cost)}** 蛋壳 · 基础三图标一致概率 **{cfg['chance']:.2f}%**（跟随普通抽奖）\n"
+            f"每次 **{format_shells(unit_cost)}** 蛋壳 · 基础三图标一致概率 **{cfg['chance']:.2f}%**（取普通概率与 3% 中较低值）\n"
             f"重复转换 **{cfg['duplicate_shards']}** 碎片 · 当前碎片 **{account['shards']}**\n"
             f"蛋壳余额 **{format_shells(balance)}**\n\n"
             f"四连 **{format_shells(unit_cost * 4)}** · 十连 **{format_shells(unit_cost * 10)}** 蛋壳\n"
@@ -243,6 +246,8 @@ class SurpriseLotteryView(OwnerView):
             role = self.guild.get_role(rid)
             symbol = result["symbols"][index] if result.get("symbols") else (
                 symbol_for(role, cfg["roles"].get(str(rid), {})) if role else ("❔", None, None))
+            if role and role.icon:
+                symbol = symbol_for(role, {})
             rows.append((role, symbol))
         slots = "图标见下方三个位置" if any(symbol[1] for _, symbol in rows) else " ┃ ".join(symbol[0] for _, symbol in rows)
         winner = result["winner"]
@@ -303,7 +308,7 @@ class SurpriseCatalogView(OwnerView):
         self.page = max(0, min(self.page, pages - 1))
         self.prev.disabled, self.next.disabled = self.page == 0, self.page == pages - 1
         embed = discord.Embed(title="📚 惊喜抽奖奖池", description=f"我的碎片：**{account['shards']}** · 累计 **{account['draws']}** 抽\n"
-            f"基础中奖率 **{cfg['chance']:.2f}%**（跟随普通抽奖） · 最多再 **{store.PITY_LIMIT - account.get('miss_streak', 0)} 抽**必出！\n碎片暂只累计和查询。", color=0xBB8FCE)
+            f"基础中奖率 **{cfg['chance']:.2f}%**（取普通概率与 3% 中较低值） · 最多再 **{store.PITY_LIMIT - account.get('miss_streak', 0)} 抽**必出！\n碎片暂只累计和查询。", color=0xBB8FCE)
         for role, entry, symbol in entries[self.page * 10:(self.page + 1) * 10]:
             chance = 100 if account.get("miss_streak", 0) >= store.PITY_LIMIT - 1 else cfg["chance"]
             probability = chance * entry["weight"] / total_weight if total_weight else 0
@@ -358,7 +363,7 @@ class SurpriseSettingsModal(discord.ui.Modal):
         except ValueError as error:
             return await interaction.followup.send(f"❌ {error}", ephemeral=True)
         await self.panel.refresh(interaction)
-        await interaction.followup.send("✅ 费用与碎片已保存。中奖概率跟随普通抽奖。", ephemeral=True)
+        await interaction.followup.send("✅ 费用与碎片已保存。基础中奖率最高 3%，80 抽保底不变。", ephemeral=True)
 
 
 class OptionalEmojiInput(discord.ui.InputText):
@@ -399,7 +404,7 @@ class SurpriseRoleModal(discord.ui.Modal):
         self.panel, self.role = panel, role
         entry = panel.cfg["roles"].get(str(role.id), {})
         self.weight = discord.ui.InputText(label="中奖分配权重（0 暂停；默认 1）", value=str(entry.get("weight", 1)))
-        self.symbol = OptionalEmojiInput(label="显示 Emoji（选填，留空使用原图标）", value=entry.get("symbol", ""), required=False, min_length=0, max_length=100)
+        self.symbol = OptionalEmojiInput(label="备用 Emoji（原图标不存在时使用）", value=entry.get("symbol", ""), required=False, min_length=0, max_length=100)
         self.add_item(self.weight)
         self.add_item(self.symbol)
 
@@ -500,7 +505,7 @@ class SurpriseAdminView(OwnerView):
         lines = [f"{role.mention} · 权重 {entry['weight']:g}" for role, entry, _ in page_entries]
         embed = discord.Embed(title="🎰 惊喜抽奖管理", color=0xF4B942, description=(
             f"状态：**{'已开放' if self.cfg['enabled'] else '已暂停'}**\n"
-            f"单抽 **{self.cfg['cost']:g}** 蛋壳 · 三图标一致概率 **{self.cfg['chance']:.2f}%**（跟随普通抽奖）\n"
+            f"单抽 **{self.cfg['cost']:g}** 蛋壳 · 三图标一致概率 **{self.cfg['chance']:.2f}%**（取普通概率与 3% 中较低值）\n"
             f"重复转换 **{self.cfg['duplicate_shards']}** 碎片\n\n"
             "固定 80 抽大保底：连续 79 抽未中，第 80 抽必出；任何身份组中奖（含重复）重置计数。\n"
             "非保底抽按基础概率开奖，中奖后按权重分配身份组。\n"

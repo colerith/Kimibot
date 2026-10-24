@@ -7,6 +7,7 @@ from cogs.points import storage as points
 from . import storage as roles
 
 PITY_LIMIT = 80
+BASE_CHANCE_CAP = 3.0
 
 
 def _ensure_storage():
@@ -28,14 +29,14 @@ def _put(con, namespace, key, value):
 
 
 def ordinary_role_chance():
-    """Match the ordinary draw's effective base outcome weights (before pity)."""
+    """Cap surprise base odds at 3%, or use ordinary odds when lower (before pity)."""
     cfg = roles.get_lottery_config()["outcome_weights"]
     weights = [max(0, int(cfg.get(name, 1))) for name in ("role", "shells", "empty")]
     if sum(weights) <= 0:
         weights = [23, 32, 45]
     else:
         weights[0] = max(1, weights[0])
-    return 100 * weights[0] / sum(weights)
+    return min(BASE_CHANCE_CAP, 100 * weights[0] / sum(weights))
 
 
 def get_config(guild_id):
@@ -67,7 +68,7 @@ def update_config(guild_id, *, settings=None, role_id=None, entry=None, remove=F
         cfg = get_config(guild_id)
         if settings:
             if "chance" in settings:
-                raise ValueError("中奖概率跟随普通抽奖，请在普通抽奖中修改结果权重。")
+                raise ValueError("基础中奖率取普通抽奖概率与 3% 中较低值，80 抽保底独立计算。")
             for name in ("cost", "duplicate_shards"):
                 if name not in settings:
                     continue
