@@ -53,6 +53,14 @@ class PromotionCog(commands.Cog):
     async def channel(self, channel_id):
         return self.bot.get_channel(channel_id) or await self.api(self.bot.fetch_channel, channel_id)
 
+    async def destination(self, channel_id):
+        channel = await self.channel(channel_id)
+        if isinstance(channel, discord.Thread) and channel.archived:
+            if channel.locked:
+                raise ValueError('申请记录子区已锁定，请先解除锁定。')
+            await self.api(channel.edit, archived=False, reason='恢复小蛋晋升记录与审批导航')
+        return channel
+
     async def find_sent(self, channel, row):
         """Recover an interrupted send, paging history through the same REST lane."""
         cursor = datetime.fromisoformat(row['created'])
@@ -71,7 +79,7 @@ class PromotionCog(commands.Cog):
             row = await asyncio.to_thread(store.get, row['id'])
             if row['status'] != 'publishing':
                 return
-            channel = await self.channel(row.get('channel_id', store.CHANNEL_ID))
+            channel = await self.destination(row.get('channel_id', store.CHANNEL_ID))
             # On an interrupted send, recover the canonical card before resending.
             if row.get('send_started'):
                 found = await self.find_sent(channel, row)
@@ -198,21 +206,22 @@ class PromotionCog(commands.Cog):
             self.entry_signature = self.panel_signature = None
             if previous['channel_id'] != current['channel_id']:
                 self.backfilled = False
-                # Retire entry/navigation only; application cards stay reviewable in place.
-                for name in ('entry', 'bottom'):
-                    message_id = await asyncio.to_thread(store.panel, name, channel_id=previous['channel_id'])
-                    if not message_id:
-                        continue
-                    try:
-                        channel = await self.channel(previous['channel_id'])
-                        message = channel.get_partial_message(message_id)
-                        if name == 'entry':
-                            await self.api(message.edit, content=f'小蛋晋升入口已迁移至 <#{current["channel_id"]}>。',
-                                           embed=None, view=None, allowed_mentions=discord.AllowedMentions.none())
-                        else:
-                            await self.api(message.delete)
-                    except discord.HTTPException as error:
-                        self.report('清理旧晋升入口', error)
+            for name, key in (('entry', 'channel_id'), ('bottom', 'application_channel_id')):
+                if previous[key] == current[key]:
+                    continue
+                message_id = await asyncio.to_thread(store.panel, name, channel_id=previous[key])
+                if not message_id:
+                    continue
+                try:
+                    channel = await self.channel(previous[key])
+                    message = channel.get_partial_message(message_id)
+                    if name == 'entry':
+                        await self.api(message.edit, content=f'小蛋晋升入口已迁移至 <#{current[key]}>。',
+                                       embed=None, view=None, allowed_mentions=discord.AllowedMentions.none())
+                    else:
+                        await self.api(message.delete)
+                except discord.HTTPException as error:
+                    self.report('清理旧晋升入口', error)
             return current
 
     async def refresh_panels(self):
@@ -236,6 +245,16 @@ class PromotionCog(commands.Cog):
                         allowed_mentions=discord.AllowedMentions.none())
                     await asyncio.to_thread(store.panel, 'entry', message.id, channel_id=channel.id)
                 self.entry_signature = signature
+            # Retire the old navigation from the entry channel when upgrading.
+            if cfg['channel_id'] != cfg['application_channel_id']:
+                legacy_id = await asyncio.to_thread(store.panel, 'bottom', channel_id=channel.id)
+                if legacy_id:
+                    try:
+                        await self.api(channel.get_partial_message(legacy_id).delete)
+                    except discord.NotFound:
+                        pass
+                    await asyncio.to_thread(store.panel, 'bottom', 0, channel_id=channel.id)
+            channel = await self.destination(cfg['application_channel_id'])
             rows = await asyncio.to_thread(store.applications, channel.guild.id)
             pending = [r for r in rows if r['status'] == 'pending' and r.get('message_id')]
             earliest = pending[0] if pending else None
@@ -319,7 +338,7 @@ class PromotionCog(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload):
         cfg = await asyncio.to_thread(store.settings)
-        if payload.channel_id != cfg['channel_id']:
+        if payload.channel_id not in (cfg['channel_id'], cfg['application_channel_id']):
             return
         if payload.message_id == await asyncio.to_thread(store.panel, 'entry', channel_id=payload.channel_id):
             self.entry_signature = None

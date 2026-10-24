@@ -51,11 +51,11 @@ class PromotionFixture:
 class PromotionStorageTests(PromotionFixture, unittest.TestCase):
     def test_configuration_persists_and_historical_channels_stay_fixed(self):
         old = self.create()
-        store.save_settings({'channel_id': 12345, 'log_channel_id': 67890, 'title': '晋升新文案'})
+        store.save_settings({'channel_id': 12345, 'application_channel_id': 12345, 'log_channel_id': 67890, 'title': '晋升新文案'})
         points._POINTS_DB_READY = False
         self.assertEqual(store.settings()['title'], '晋升新文案')
         new = self.create(user=8, request='new-channel')
-        self.assertEqual(store.get(old['id'])['channel_id'], store.CHANNEL_ID)
+        self.assertEqual(store.get(old['id'])['channel_id'], store.APPLICATION_CHANNEL_ID)
         self.assertEqual(new['channel_id'], 12345)
         store.panel('entry', 1)
         store.panel('entry', 2, channel_id=12345)
@@ -234,7 +234,7 @@ class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
         embed = await panel.embed()
         self.assertIn('管理控制台', embed.title)
         self.assertEqual(len(CopyModal(panel).children), 5)
-        self.assertEqual(len(ChannelModal(panel).children), 2)
+        self.assertEqual(len(ChannelModal(panel).children), 3)
         edited = views.entry_embed(12, {'title': '自定义标题', 'requirements': '新的条件说明'})
         self.assertEqual(edited.title, '自定义标题')
         self.assertEqual(edited.fields[1].value, '新的条件说明')
@@ -255,41 +255,71 @@ class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
             return await operation(*args, **kwargs)
         cog.api = api
         store.panel('entry', 11)
-        store.panel('bottom', 12)
+        store.panel('bottom', 12, channel_id=store.APPLICATION_CHANNEL_ID)
         old = self.create()
-        await cog.configure({'channel_id': 456})
+        await cog.configure({'channel_id': 456, 'application_channel_id': 789})
         entry.edit.assert_awaited_once()
         bottom.delete.assert_awaited_once()
         self.assertIn('<#456>', entry.edit.call_args.kwargs['content'])
-        self.assertEqual(store.get(old['id'])['channel_id'], store.CHANNEL_ID)
+        self.assertEqual(store.get(old['id'])['channel_id'], store.APPLICATION_CHANNEL_ID)
         self.assertFalse(cog.backfilled)
 
     async def test_refresh_uses_configured_channel_copy_and_old_pending_link(self):
         old = self.create()
         store.update(old['id'], status='pending', message_id=777)
-        store.save_settings({'channel_id': 456, 'title': '新的晋升标题'})
+        store.save_settings({'channel_id': 456, 'application_channel_id': 789, 'title': '新的晋升标题'})
         cog = PromotionCog.__new__(PromotionCog)
         cog.panel_lock = asyncio.Lock()
         cog.entry_signature = cog.panel_signature = None
-        channel = SimpleNamespace(id=456, guild=SimpleNamespace(id=9), last_message_id=0)
+        entry = SimpleNamespace(id=456, guild=SimpleNamespace(id=9), last_message_id=0)
+        records = SimpleNamespace(id=789, guild=entry.guild, last_message_id=0)
         sent = []
-        async def send(**kwargs):
-            sent.append(kwargs)
-            channel.last_message_id += 1
-            return SimpleNamespace(id=channel.last_message_id)
-        channel.send = send
-        cog.channel = AsyncMock(return_value=channel)
+        async def entry_send(**kwargs):
+            sent.append((456, kwargs))
+            entry.last_message_id = 1
+            return SimpleNamespace(id=1)
+        async def records_send(**kwargs):
+            sent.append((789, kwargs))
+            records.last_message_id = 2
+            return SimpleNamespace(id=2)
+        entry.send, records.send = entry_send, records_send
+        cog.channel = AsyncMock(side_effect=lambda cid: entry if cid == 456 else records)
         async def api(operation, *args, **kwargs):
             return await operation(*args, **kwargs)
         cog.api = api
         await cog.refresh_panels()
-        self.assertEqual(cog.channel.call_args.args[0], 456)
-        self.assertEqual(sent[0]['embed'].title, '新的晋升标题')
+        self.assertEqual(sent[0][0], 456)
+        self.assertEqual(sent[1][0], 789)
+        self.assertEqual(sent[0][1]['embed'].title, '新的晋升标题')
         self.assertEqual(store.panel('entry', channel_id=456), 1)
-        self.assertEqual(store.panel('bottom', channel_id=456), 2)
-        self.assertIn(f'/{store.CHANNEL_ID}/777', sent[1]['view'].children[0].url)
+        self.assertEqual(store.panel('bottom', channel_id=789), 2)
+        self.assertIn(f'/{store.APPLICATION_CHANNEL_ID}/777', sent[1][1]['view'].children[0].url)
         await cog.refresh_panels()
         self.assertEqual(len(sent), 2)
+
+    async def test_public_copy_removes_retired_test_notes_even_when_saved(self):
+        embed = views.entry_embed(0, {'notes': '原有说明\n管理员 / 服主自动享有权益；其申请标记为测试记录，不占名额。'})
+        text = str(embed.to_dict())
+        self.assertNotIn('测试记录不占名额', text)
+        self.assertNotIn('管理员 / 服主自动享有权益', text)
+        self.assertEqual(embed.fields[2].value, '原有说明')
+        self.assertEqual(self.create()['channel_id'], 1563529208943083540)
+
+    async def test_archived_thread_is_reopened_before_sending(self):
+        cog = PromotionCog.__new__(PromotionCog)
+        thread = Mock(spec=discord.Thread)
+        thread.archived, thread.locked = True, False
+        thread.edit = AsyncMock()
+        cog.channel = AsyncMock(return_value=thread)
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        self.assertIs(await cog.destination(store.APPLICATION_CHANNEL_ID), thread)
+        self.assertFalse(thread.edit.call_args.kwargs['archived'])
+        thread.locked = True
+        with self.assertRaises(ValueError):
+            await cog.destination(store.APPLICATION_CHANNEL_ID)
+        thread.edit.assert_awaited_once()
 
     async def test_admin_callbacks_reject_other_users(self):
         panel = PromotionAdminView(SimpleNamespace(), 7, 9)
@@ -373,7 +403,7 @@ class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
         log_channel = SimpleNamespace(send=AsyncMock(return_value=log_message),
                                       fetch_message=AsyncMock(return_value=log_message))
         cog.bot = SimpleNamespace(get_guild=lambda _: guild, get_user=lambda _: member)
-        cog.channel = AsyncMock(side_effect=lambda cid: channel if cid == store.CHANNEL_ID else log_channel)
+        cog.channel = AsyncMock(side_effect=lambda cid: channel if cid == store.APPLICATION_CHANNEL_ID else log_channel)
         async def api(operation, *args, **kwargs):
             return await operation(*args, **kwargs)
         cog.api = api

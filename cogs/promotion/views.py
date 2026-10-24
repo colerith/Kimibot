@@ -23,18 +23,20 @@ DEFAULT_COPY = {
     'requirements': '使用 **日月西 / 象牙塔** 聊天 **超过 100 楼**。\n'
                     '上传 **至少两张截图**：首楼与最后一楼，能看到楼层数及日月西 / 象牙塔的相关痕迹。\n'
                     '具体聊天内容可以打码，并附上 **至少 30 字的使用感想**。',
-    'notes': '申请与截图会公开展示在本频道，请先处理好隐私。由**服主手动审批**，通过或驳回都会私信通知。\n'
-             '每位成员同时只能有一份待审申请，已开通权益无需重复申请。\n'
-             '管理员 / 服主自动享有权益；其申请标记为测试记录，不占名额。',
+    'notes': '申请与截图会展示在申请记录子区，请先处理好隐私。由**服主手动审批**，通过或驳回都会私信通知。\n'
+             '每位成员同时只能有一份待审申请，已开通权益无需重复申请。',
 }
 
 
 def entry_embed(used, settings=None):
     copy = DEFAULT_COPY | {key: value for key, value in (settings or {}).items() if key in DEFAULT_COPY}
+    # Remove the retired public note even when it was saved by an older admin form.
+    copy['notes'] = copy['notes'].replace('管理员 / 服主自动享有权益；其申请标记为测试记录，不占名额。', '').strip()
+    copy['notes'] = copy['notes'].replace('申请与截图会公开展示在本频道', '申请与截图会展示在申请记录子区')
     embed = discord.Embed(title=copy['title'], description=copy['intro'], color=0xEBCB8B)
     for name, key in [('✨ 破壳而出的专属权益', 'benefits'), ('📷 带上你的使用足迹', 'requirements'), ('🌷 申请须知', 'notes')]:
-        embed.add_field(name=name, value=copy[key], inline=False)
-    embed.add_field(name='今日申请名额', value=f'**{used} / {store.DAILY_LIMIT}** · 北京时间每日 0 点刷新；测试记录不占名额。', inline=False)
+        embed.add_field(name=name, value=copy[key] or '请按申请条件提交材料。', inline=False)
+    embed.add_field(name='今日申请名额', value=f'**{used} / {store.DAILY_LIMIT}** · 北京时间每日 0 点刷新。', inline=False)
     embed.set_footer(text=f'{store.today()} 批次 · 本大王在这里等你破壳！')
     return embed
 

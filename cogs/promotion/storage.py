@@ -5,6 +5,7 @@ from cogs.points import storage as points
 
 CHANNEL_ID = 1559382179677470800
 LOG_CHANNEL_ID = 1419652525249794128
+APPLICATION_CHANNEL_ID = 1563529208943083540
 ROLE_ID = 1417722389718110249
 DAILY_LIMIT = 100
 
@@ -156,7 +157,7 @@ def create(user_id, guild_id, request_id, content, files, author_name, now=None,
         settings_row = con.execute('SELECT data FROM promotion_settings WHERE id=1').fetchone()
         settings = points._json_load(settings_row['data'] if settings_row else None, {})
         data = dict(content=content, files=files, author_name=author_name, is_test=bool(is_test),
-                    channel_id=settings.get('channel_id', CHANNEL_ID),
+                    channel_id=settings.get('application_channel_id', APPLICATION_CHANNEL_ID),
                     created=(now or datetime.now(points.TZ_CN)).isoformat(), message_id=None,
                     card_dirty=True, dm_state='pending', log_state='pending')
         cursor = con.execute('INSERT INTO promotion_applications(request_id,guild_id,user_id,batch,status,data) VALUES (?,?,?,?,?,?)',
@@ -228,7 +229,7 @@ def settings():
     initialize()
     with points._points_connection() as con:
         row = con.execute('SELECT data FROM promotion_settings WHERE id=1').fetchone()
-        return dict(channel_id=CHANNEL_ID, log_channel_id=LOG_CHANNEL_ID) | points._json_load(row['data'] if row else None, {})
+        return dict(channel_id=CHANNEL_ID, application_channel_id=APPLICATION_CHANNEL_ID, log_channel_id=LOG_CHANNEL_ID) | points._json_load(row['data'] if row else None, {})
 
 
 @points._locked_points_data
@@ -238,7 +239,7 @@ def save_settings(changes):
         if key in limits:
             if not isinstance(value, str) or not value.strip() or len(value) > limits[key]:
                 raise ValueError(f'文案不能为空且不能超过 {limits[key]} 字。')
-        elif key in ('channel_id', 'log_channel_id'):
+        elif key in ('channel_id', 'application_channel_id', 'log_channel_id'):
             if not isinstance(value, int) or value <= 0:
                 raise ValueError('频道 ID 必须是正整数。')
         else:

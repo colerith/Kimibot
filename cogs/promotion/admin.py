@@ -29,7 +29,7 @@ class PromotionAdminView(ui.View):
         if channel.guild.id != self.guild_id:
             raise ValueError('小蛋晋升配置属于另一个服务器，无法从这里修改。')
         embed = discord.Embed(title='🐣 小蛋晋升 · 管理控制台', color=0xEBCB8B,
-            description=f'申请与入口：<#{self.cfg["channel_id"]}>\n审批记录：<#{self.cfg["log_channel_id"]}>\n'
+            description=f'申请入口：<#{self.cfg["channel_id"]}>\n申请记录与导航：<#{self.cfg["application_channel_id"]}>\n审批记录：<#{self.cfg["log_channel_id"]}>\n'
                         '编辑后保留当前管理台。文案编辑只修改展示文字，权益和审核规则保持原设置。')
         def summary(counts):
             return (f'总计 **{sum(counts.values())}** · 待投递 **{counts["publishing"]}** · 待审 **{counts["pending"]}**\n'
@@ -125,9 +125,11 @@ class ChannelModal(SettingsModal):
     def __init__(self, panel):
         super().__init__(title='小蛋晋升 · 修改发送频道')
         self.panel = panel
-        self.entry = ui.InputText(label='申请与面板频道 ID', value=str(panel.cfg['channel_id']))
+        self.entry = ui.InputText(label='申请入口频道 ID', value=str(panel.cfg['channel_id']))
         self.audit = ui.InputText(label='审批记录频道 ID', value=str(panel.cfg['log_channel_id']))
+        self.records = ui.InputText(label='申请记录与导航频道 / 子区 ID', value=str(panel.cfg['application_channel_id']))
         self.add_item(self.entry)
+        self.add_item(self.records)
         self.add_item(self.audit)
 
     async def callback(self, interaction):
@@ -136,14 +138,21 @@ class ChannelModal(SettingsModal):
         await interaction.response.defer(ephemeral=True)
         try:
             changes = {'channel_id': int(self.entry.value.strip().strip('<#>')),
-                       'log_channel_id': int(self.audit.value.strip().strip('<#>'))}
+                       'log_channel_id': int(self.audit.value.strip().strip('<#>')),
+                       'application_channel_id': int(self.records.value.strip().strip('<#>'))}
             for key, channel_id in changes.items():
                 channel = await self.panel.cog.channel(channel_id)
-                if not isinstance(channel, discord.TextChannel) or channel.guild.id != interaction.guild_id:
-                    raise ValueError('请选择当前服务器的文字频道。')
+                types = (discord.TextChannel, discord.Thread) if key == 'application_channel_id' else (discord.TextChannel,)
+                if not isinstance(channel, types) or channel.guild.id != interaction.guild_id:
+                    raise ValueError('请选择当前服务器的文字频道；申请记录也可选择子区。')
                 perms = channel.permissions_for(interaction.guild.me)
                 needed = ['view_channel', 'send_messages', 'embed_links', 'read_message_history']
-                if key == 'channel_id':
+                if isinstance(channel, discord.Thread):
+                    needed.remove('send_messages')
+                    needed.append('send_messages_in_threads')
+                    if channel.locked:
+                        raise ValueError('申请记录子区已锁定，请先解除锁定。')
+                if key == 'application_channel_id':
                     needed.append('attach_files')
                 if not all(getattr(perms, name) for name in needed):
                     raise ValueError(f'机器人在 <#{channel_id}> 缺少发送消息、嵌入链接、读取历史或上传附件权限。')
