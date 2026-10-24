@@ -22,12 +22,14 @@ class PromotionCog(commands.Cog):
         self.backfilled = False
         self.panel_signature = None
         self.entry_signature = None
-        self.bot.add_view(EntryView())
-        self.bot.add_view(ReviewView())
-        self.worker.start()
+        # main.py loads extensions synchronously, before bot.run starts its loop.
+        # Pycord views and tasks must be created from on_ready instead.
+        self.persistent_views = []
 
     def cog_unload(self):
         self.worker.cancel()
+        for view in self.persistent_views:
+            view.stop()
 
     def report(self, action, error):
         log.warning('小蛋晋升 %s: %r', action, error)
@@ -267,6 +269,9 @@ class PromotionCog(commands.Cog):
             cfg = await asyncio.to_thread(store.settings)
             channel = await self.channel(cfg['channel_id'])
             guild = channel.guild
+            # Publish the entry before member chunking/backfill, which may be slow
+            # or fail independently on a large guild.
+            await self.refresh_panels()
             if not self.backfilled:
                 if not guild.chunked:
                     await guild.chunk(cache=True)
@@ -297,10 +302,17 @@ class PromotionCog(commands.Cog):
     @worker.before_loop
     async def before_worker(self):
         await self.bot.wait_until_ready()
-        await asyncio.to_thread(store.initialize)
 
     @commands.Cog.listener()
     async def on_ready(self):
+        if not self.persistent_views:
+            for view_type in (EntryView, ReviewView):
+                view = view_type()
+                self.bot.add_view(view)
+                self.persistent_views.append(view)
+        if not self.worker.is_running():
+            self.worker.start()
+            print('[Promotion] 晋升模块已就绪，已启动面板自动刷新与权益补发。')
         # Re-scan after reconnect as role changes may have happened while offline.
         self.backfilled = False
 

@@ -17,6 +17,20 @@ from cogs.roles import surprise_storage
 from test_surprise_lottery import StorageFixture
 
 
+class PromotionStartupTests(unittest.TestCase):
+    def test_extension_setup_without_running_event_loop(self):
+        from cogs.promotion import setup
+        with self.assertRaises(RuntimeError):
+            asyncio.get_running_loop()
+        bot = SimpleNamespace(add_cog=Mock(), add_view=Mock())
+        setup(bot)
+        cog = bot.add_cog.call_args.args[0]
+        self.assertIsInstance(cog, PromotionCog)
+        self.assertFalse(cog.worker.is_running())
+        bot.add_view.assert_not_called()
+        cog.cog_unload()
+
+
 class PromotionFixture:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -190,6 +204,30 @@ class PromotionSurpriseTests(StorageFixture, unittest.TestCase):
 
 
 class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_ready_registers_views_and_starts_worker_only_once(self):
+        bot = SimpleNamespace(add_view=Mock())
+        cog = PromotionCog(bot)
+        with patch.object(cog.worker, 'is_running', side_effect=[False, True]), patch.object(cog.worker, 'start') as start:
+            await cog.on_ready()
+            await cog.on_ready()
+        self.assertEqual(bot.add_view.call_count, 2)
+        start.assert_called_once()
+        self.assertTrue(all(view.is_persistent() for view in cog.persistent_views))
+        cog.cog_unload()
+        self.assertTrue(all(view.is_finished() for view in cog.persistent_views))
+
+    async def test_worker_publishes_panel_before_member_backfill(self):
+        guild = SimpleNamespace(id=9, chunked=False, chunk=AsyncMock(side_effect=RuntimeError('chunk timeout')))
+        cog = PromotionCog(SimpleNamespace(add_view=Mock()))
+        cog.channel = AsyncMock(return_value=SimpleNamespace(guild=guild))
+        cog.refresh_panels = AsyncMock()
+        cog.report = Mock()
+        await cog.worker()
+        cog.refresh_panels.assert_awaited_once()
+        cog.report.assert_called_once()
+        self.assertFalse(cog.backfilled)
+        cog.cog_unload()
+
     async def test_admin_dashboard_edit_forms_and_history_links(self):
         cog = SimpleNamespace(channel=AsyncMock(return_value=SimpleNamespace(guild=SimpleNamespace(id=9))))
         panel = PromotionAdminView(cog, 7, 9)
