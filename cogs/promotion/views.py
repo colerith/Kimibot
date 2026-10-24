@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+import re
 from pathlib import Path
 import discord
 from discord import ui
@@ -208,8 +209,9 @@ class ReviewView(ui.View):
     @ui.button(label='驳回申请', emoji='📝', style=discord.ButtonStyle.danger, custom_id='promotion:reject')
     async def reject(self, button, interaction):
         # Message ID is encoded in the embed footer; no database I/O before opening modal.
-        footer = interaction.message.embeds[0].footer.text
-        application_id = int(footer.split('#')[1].split(' ')[0])
+        application_id = message_application_id(interaction.message)
+        if application_id is None:
+            return await interaction.response.send_message('未找到这份申请编号。', ephemeral=True)
         await interaction.response.send_modal(RejectModal(application_id))
 
 
@@ -221,3 +223,66 @@ class BottomView(ui.View):
                 url=f'https://discord.com/channels/{earliest["guild_id"]}/{earliest.get("channel_id", store.CHANNEL_ID)}/{earliest["message_id"]}'))
         else:
             self.add_item(ui.Button(label='当前没有待审批申请', custom_id='promotion:empty', disabled=True))
+
+
+def message_application_id(message):
+    """Read the stable marker from legacy embeds or a Components V2 card."""
+    texts = [embed.footer.text or '' for embed in getattr(message, 'embeds', [])]
+    def collect(component):
+        data = component if isinstance(component, dict) else component.to_dict()
+        if data.get('type') == 10 and data.get('id') == 9001:
+            texts.append(data.get('content', ''))
+        for child in data.get('components', []):
+            collect(child)
+    for component in getattr(message, 'components', []):
+        collect(component)
+    for text in texts:
+        match = re.search(r'(?:^|\n)(?:-# )?小蛋晋升申请 #(\d+) · 北京时间', text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+class ApplicationCard(ui.DesignerView):
+    """One native card containing the submission and a multi-image gallery."""
+    def __init__(self, row=None, media=None):
+        super().__init__(timeout=None)
+        approve = ui.Button(label='通过申请', emoji='✅', style=discord.ButtonStyle.success, custom_id='promotion:approve')
+        reject = ui.Button(label='驳回申请', emoji='📝', style=discord.ButtonStyle.danger, custom_id='promotion:reject')
+        approve.callback = self.approve
+        reject.callback = self.reject
+        if row is None:
+            self.add_item(ui.ActionRow(approve, reject))
+            return
+        color = {'approved': 0x9BBE9D, 'rejected': 0xCFA2A2}.get(row['status'], 0xEBCB8B)
+        items = [ui.TextDisplay(f'## 🌱 小蛋成长档案 · #{row["id"]:06d}\n'
+                               f'<@{row["user_id"]}> 的破壳申请 · 谢谢你分享这段使用旅程。'),
+                 ui.TextDisplay(f'### 💌 使用感想\n{row["content"][:1000]}')]
+        if media:
+            items.append(ui.MediaGallery(*[discord.MediaGalleryItem(url, description=f'使用足迹 {i}')
+                                           for i, url in enumerate(media[:6], 1)]))
+        items.append(ui.Separator())
+        details = (f'**申请批次** {row["batch"]}　·　**编号** #{row["id"]:06d}\n'
+                   f'**审批状态** {STATUS[row["status"]]}')
+        if row.get('is_test'):
+            details += '\n🧪 管理员测试记录'
+        if row.get('reviewer_id'):
+            details += f'　·　**审批人** <@{row["reviewer_id"]}>'
+        if row.get('reason'):
+            details += f'\n**驳回理由**\n{row["reason"][:1000]}'
+        items.extend([ui.TextDisplay(details), ui.TextDisplay(f'-# 小蛋晋升申请 #{row["id"]} · 北京时间 · 点击图片可查看原图', id=9001)])
+        self.add_item(ui.Container(*items, color=color))
+        if row['status'] == 'pending':
+            self.add_item(ui.ActionRow(approve, reject))
+
+    async def interaction_check(self, interaction):
+        if not owner_allowed(interaction):
+            await interaction.response.send_message('这份成长档案由服主亲自审批。', ephemeral=True)
+            return False
+        return True
+
+    async def approve(self, interaction):
+        await ReviewView().approve.callback(interaction)
+
+    async def reject(self, interaction):
+        await ReviewView().reject.callback(interaction)

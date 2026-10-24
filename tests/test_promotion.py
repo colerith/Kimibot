@@ -204,6 +204,46 @@ class PromotionSurpriseTests(StorageFixture, unittest.TestCase):
 
 
 class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_application_card_groups_images_and_keeps_review_actions(self):
+        row = self.create()
+        row.update(status='pending', content='感想\n-# 小蛋晋升申请 #999 · 北京时间')
+        card = views.ApplicationCard(row, ['attachment://first.png', 'attachment://last.png'])
+        components = card.to_components()
+        self.assertEqual(components[0]['type'], 17)
+        galleries = [c for c in components[0]['components'] if c['type'] == 12]
+        self.assertEqual(len(galleries), 1)
+        self.assertEqual(len(galleries[0]['items']), 2)
+        self.assertTrue(card.is_components_v2())
+        self.assertTrue(card.is_persistent())
+        self.assertEqual([b['custom_id'] for b in components[1]['components']], ['promotion:approve', 'promotion:reject'])
+        message = SimpleNamespace(embeds=[], components=components)
+        self.assertEqual(views.message_application_id(message), row['id'])
+        row.update(status='rejected', reason='请补充首楼截图。')
+        rejected = views.ApplicationCard(row, ['attachment://first.png']).to_components()
+        self.assertEqual(len(rejected), 1)
+        self.assertIn('请补充首楼截图', str(rejected))
+
+    async def test_legacy_card_upgrades_in_place_with_original_attachments(self):
+        row = self.create()
+        row = store.update(row['id'], status='pending', message_id=123, card_dirty=False)
+        message = SimpleNamespace(embeds=[views.application_embed(row)],
+            attachments=[SimpleNamespace(filename='first.png'), SimpleNamespace(filename='last.png')], edit=AsyncMock())
+        cog = PromotionCog.__new__(PromotionCog)
+        cog.bot = SimpleNamespace(get_guild=lambda _: SimpleNamespace())
+        cog.channel = AsyncMock(return_value=SimpleNamespace(fetch_message=AsyncMock(return_value=message)))
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        self.assertEqual(views.message_application_id(message), row['id'])
+        await cog.process(row)
+        kwargs = message.edit.call_args.kwargs
+        self.assertEqual(kwargs['embeds'], [])
+        self.assertIsNone(kwargs['content'])
+        self.assertIn('attachment://last.png', str(kwargs['view'].to_components()))
+        self.assertEqual(store.get(row['id'])['layout_version'], 2)
+        await cog.process(store.get(row['id']))
+        message.edit.assert_awaited_once()
+
     async def test_ready_registers_views_and_starts_worker_only_once(self):
         bot = SimpleNamespace(add_view=Mock())
         cog = PromotionCog(bot)

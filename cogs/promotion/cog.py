@@ -6,7 +6,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands, tasks
 from . import storage as store
-from .views import EntryView, ReviewView, BottomView, entry_embed, application_embed, result_embed, jump_view
+from .views import EntryView, ReviewView, BottomView, entry_embed, application_embed, result_embed, jump_view, ApplicationCard, message_application_id
 
 log = logging.getLogger(__name__)
 
@@ -64,11 +64,10 @@ class PromotionCog(commands.Cog):
     async def find_sent(self, channel, row):
         """Recover an interrupted send, paging history through the same REST lane."""
         cursor = datetime.fromisoformat(row['created'])
-        footer = f'小蛋晋升申请 #{row["id"]} · 北京时间 · 截图见附件'
         while True:
             messages = await self.api(channel.history(limit=100, after=cursor, oldest_first=True).flatten)
             for message in messages:
-                if message.author.id == self.bot.user.id and message.embeds and message.embeds[0].footer.text == footer:
+                if message.author.id == self.bot.user.id and message_application_id(message) == row['id']:
                     return message
             if len(messages) < 100:
                 return None
@@ -89,13 +88,12 @@ class PromotionCog(commands.Cog):
             await asyncio.to_thread(store.update, row['id'], send_started=True)
             display = dict(row, status='pending')
             files = [discord.File(path, filename=Path(path).name) for path in row['files']]
-            embeds = [application_embed(display)]
-            for index, path in enumerate(row['files'], 1):
-                embeds.append(discord.Embed(title=f'使用足迹 · {index}', color=0xEBCB8B).set_image(url=f'attachment://{Path(path).name}'))
+            media = [f'attachment://{Path(path).name}' for path in row['files']]
             try:
-                msg = await self.api(channel.send, embeds=embeds, files=files, view=ReviewView(),
+                msg = await self.api(channel.send, files=files, view=ApplicationCard(display, media),
                     allowed_mentions=discord.AllowedMentions.none(), nonce=f'promotion-{row["id"]}', enforce_nonce=True)
-                await asyncio.to_thread(store.update, row['id'], status='pending', message_id=msg.id, card_dirty=False)
+                await asyncio.to_thread(store.update, row['id'], status='pending', message_id=msg.id,
+                                        card_dirty=False, layout_version=2)
             finally:
                 for file in files:
                     file.close()
@@ -132,19 +130,19 @@ class PromotionCog(commands.Cog):
                 await self.api(member.add_roles, role, reason=f'服主批准小蛋晋升 #{row["id"]}')
             row = await asyncio.to_thread(store.complete, row['id'])
         card_error = None
-        if row.get('card_dirty') and row.get('message_id'):
+        if (row.get('card_dirty') or row.get('layout_version') != 2) and row.get('message_id'):
             try:
                 channel = await self.channel(row.get('channel_id', store.CHANNEL_ID))
                 message = await self.api(channel.fetch_message, row['message_id'])
-                await self.api(message.edit, embeds=[application_embed(row)] + message.embeds[1:],
-                    view=ReviewView() if row['status'] == 'pending' else None,
-                    allowed_mentions=discord.AllowedMentions.none())
+                media = [f'attachment://{attachment.filename}' for attachment in getattr(message, 'attachments', [])]
+                await self.api(message.edit, content=None, embeds=[], view=ApplicationCard(row, media),
+                               allowed_mentions=discord.AllowedMentions.none())
             except discord.NotFound:
                 self.report('申请卡片被删除', ValueError(row['id']))
             except Exception as error:
                 card_error = error
             if card_error is None:
-                await asyncio.to_thread(store.update, row['id'], card_dirty=False)
+                await asyncio.to_thread(store.update, row['id'], card_dirty=False, layout_version=2)
         if row['status'] not in ('approved', 'rejected'):
             return
         log_error = None
@@ -307,7 +305,7 @@ class PromotionCog(commands.Cog):
                     try:
                         if row['status'] == 'publishing':
                             await self.publish(row)
-                        elif (row['status'] == 'granting' or row.get('card_dirty') or
+                        elif (row['status'] == 'granting' or row.get('card_dirty') or row.get('layout_version') != 2 or
                               (row['status'] in ('approved', 'rejected') and
                                (row.get('log_state') != 'sent' or row.get('dm_state') == 'pending' or
                                 row.get('dm_state') != row.get('logged_dm_state')))):
@@ -325,7 +323,7 @@ class PromotionCog(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         if not self.persistent_views:
-            for view_type in (EntryView, ReviewView):
+            for view_type in (EntryView, ApplicationCard):
                 view = view_type()
                 self.bot.add_view(view)
                 self.persistent_views.append(view)
