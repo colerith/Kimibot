@@ -4942,6 +4942,7 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
             discord.SelectOption(label="入站答题面板", value="welcome_quiz", emoji="📝"),
             discord.SelectOption(label="助力鸣谢消息", value="boost_thanks", emoji="💎"),
             discord.SelectOption(label="论坛统计面板", value="forum_stats", emoji="📊"),
+            discord.SelectOption(label="定期邀请面板", value="weekly_invite", emoji="🌱", description="发送、撤销、文案与停止创建区间"),
             discord.SelectOption(label="小蛋晋升面板", value="promotion", emoji="🐣", description="编辑文案、审批统计、刷新面板与频道设置"),
             discord.SelectOption(label="第三方违规提醒文案", value="third_party_notice", emoji="⚠️", description="编辑右键 App 命令发送的提醒正文"),
         ]
@@ -4953,7 +4954,17 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
         await interaction.response.defer(ephemeral=True)
         target = self.values[0]
         try:
-            if target == "promotion":
+            if target == "weekly_invite":
+                if not interaction.user.guild_permissions.administrator and interaction.user.id != interaction.guild.owner_id:
+                    return await interaction.followup.send("仅管理员 / 服主可管理邀请面板。", ephemeral=True)
+                cog = self.bot.get_cog("WeeklyInviteCog")
+                if not cog:
+                    raise RuntimeError("定期邀请模块未加载")
+                from cogs.weekly_invite.views import InviteAdminView
+                view = InviteAdminView(cog, interaction.user.id, interaction.guild_id, self.view)
+                await interaction.edit_original_response(embed=await view.embed(), view=view)
+                return
+            elif target == "promotion":
                 cog = self.bot.get_cog("PromotionCog")
                 if not cog:
                     raise RuntimeError("晋升模块未加载")
