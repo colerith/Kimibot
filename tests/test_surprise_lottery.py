@@ -37,21 +37,23 @@ class StorageFixture:
 
 
 class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
-    def test_twentieth_spin_guarantees_role_and_replay_does_not_advance(self):
+    def test_eightieth_spin_guarantees_role_and_replay_does_not_advance(self):
+        points.modify_user_points(7, 60, 9)
+        self.enterContext(patch.object(store, "miss_refund", return_value=0))
         store.update_config(9, role_id=2, entry={"weight": 1, "symbol": "🍋"})
         store.update_config(9, settings={"chance": 0})
-        for i in range(19):
+        for i in range(79):
             result = store.settle_spin(7, 9, str(i), {1, 2})
             self.assertIsNone(result["winner"])
             self.assertEqual(result["miss_streak"], i + 1)
         points._POINTS_DB_READY = False
-        self.assertEqual(store.get_account(7, 9)["miss_streak"], 19)
-        result = store.settle_spin(7, 9, "20th", {1, 2})
+        self.assertEqual(store.get_account(7, 9)["miss_streak"], 79)
+        result = store.settle_spin(7, 9, "80th", {1, 2})
         self.assertTrue(result["pity_triggered"])
         self.assertEqual(len(set(result["reels"])), 1)
-        self.assertEqual(result["pity_remaining"], 20)
-        self.assertEqual(store.settle_spin(7, 9, "20th", {1, 2}), result)
-        self.assertEqual(store.get_account(7, 9)["draws"], 20)
+        self.assertEqual(result["pity_remaining"], 80)
+        self.assertEqual(store.settle_spin(7, 9, "80th", {1, 2}), result)
+        self.assertEqual(store.get_account(7, 9)["draws"], 80)
         self.assertFalse(store.settle_spin(7, 9, "no-money", {1, 2})["success"])
         self.assertEqual(store.get_account(7, 9)["miss_streak"], 0)
 
@@ -65,6 +67,29 @@ class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
         self.assertFalse(result["pity_triggered"])
         self.assertEqual(result["miss_streak"], 0)
         self.assertEqual(result["shards_gained"], 1)
+
+    def test_batch_pity_refunds_and_idempotency(self):
+        store.update_config(9, role_id=2, entry={"weight": 1, "symbol": "🍋"})
+        store.update_config(9, settings={"chance": 0})
+        with points._points_connection() as con:
+            store._put(con, "surprise_accounts", "9:7", {"owned": [], "shards": 0, "draws": 77, "miss_streak": 77})
+        with patch.object(store, "miss_refund", return_value=0.5):
+            batch = store.settle_spin(7, 9, "batch", {1, 2}, draw_count=4)
+        self.assertEqual([r["miss_streak"] for r in batch["results"]], [78, 79, 0, 1])
+        self.assertTrue(batch["results"][2]["pity_triggered"])
+        self.assertEqual(batch["refund"], 1.5)
+        self.assertEqual(batch["balance"], 17.5)
+        self.assertEqual(store.settle_spin(7, 9, "batch", {1, 2}, draw_count=4), batch)
+        self.assertEqual(store.get_account(7, 9)["draws"], 81)
+        self.assertEqual(points.get_user_points(7, 9), 17.5)
+
+    def test_ten_draw_duplicates_and_full_cost_check(self):
+        batch = store.settle_spin(7, 9, "ten", {1}, draw_count=10)
+        self.assertEqual(batch["shards"], 9)
+        self.assertEqual(batch["balance"], 10)
+        store.update_config(9, settings={"cost": 3})
+        self.assertFalse(store.settle_spin(7, 9, "poor", {1}, draw_count=4)["success"])
+        self.assertEqual(store.get_account(7, 9)["draws"], 10)
 
     def test_batch_weights_preserve_symbols_and_reject_conflicts_atomically(self):
         store.set_role_weights(9, [1, 2], 5)
@@ -204,6 +229,26 @@ class SurpriseViewTests(StorageFixture, unittest.IsolatedAsyncioTestCase):
         guild.get_role = lambda rid: next((r for r in guild.roles if r.id == rid), None)
         return guild
 
+    async def test_ten_results_paginate_two_draws_without_settling(self):
+        guild = self.make_guild()
+        batch = store.settle_spin(7, 9, "pages", {1}, draw_count=10)
+        view = ui.SurpriseLotteryView(7, guild)
+        view.current_result, view.result_cfg = batch, store.get_config(9)
+        embeds = view.result_embeds(batch, view.result_cfg)
+        self.assertEqual(len(embeds), 9)
+        self.assertIn("**10**", embeds[0].description)
+        self.assertIn("第 1 抽", embeds[1].title)
+        self.assertIn("第 2 抽", embeds[5].title)
+        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()))
+        for _ in range(4):
+            await view.result_next.callback(interaction)
+        embeds = interaction.response.edit_message.await_args.kwargs["embeds"]
+        self.assertIn("第 9 抽", embeds[1].title)
+        self.assertIn("第 10 抽", embeds[5].title)
+        self.assertTrue(view.result_next.disabled)
+        self.assertEqual(store.get_account(7, 9)["draws"], 10)
+        self.assertEqual(points.get_user_points(7, 9), 10)
+
     async def test_mode_buttons_and_admin_rows(self):
         guild = self.make_guild()
         mode = ui.LotteryModeView(7)
@@ -272,7 +317,9 @@ class SurpriseViewTests(StorageFixture, unittest.IsolatedAsyncioTestCase):
         with patch("cogs.roles.surprise_views.asyncio.sleep", new=AsyncMock()):
             await view.spin.callback(interaction)
         self.assertFalse(view.busy)
-        self.assertFalse(any(c.disabled for c in view.children))
+        self.assertFalse(view.spin.disabled)
+        self.assertTrue(view.result_prev.disabled)
+        self.assertTrue(view.result_next.disabled)
         self.assertIs(interaction.edit_original_response.await_args.kwargs["view"], view)
         embeds = interaction.edit_original_response.await_args.kwargs["embeds"]
         self.assertEqual(len(embeds), 4)

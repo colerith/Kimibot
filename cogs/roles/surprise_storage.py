@@ -6,7 +6,7 @@ import os
 from cogs.points import storage as points
 from . import storage as roles
 
-PITY_LIMIT = 20
+PITY_LIMIT = 80
 
 
 def _ensure_storage():
@@ -143,11 +143,30 @@ def roll_reels(pool, chance, rng=None):
     return reels
 
 
-def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids=(), *, rng=None, expected_config=None, symbols=None):
+def refund_rules():
+    cfg = roles.get_lottery_config()
+    weights = cfg["outcome_weights"]
+    shell = max(0, weights.get("shells", 0))
+    empty = max(0, weights.get("empty", 0))
+    return shell / (shell + empty) if shell + empty else 0, cfg["shell_reward"]
+
+
+def miss_refund(rng, chance, limits):
+    if rng.random() >= chance:
+        return 0.0
+    low, high = int(round(limits["min"] * 10)), int(round(limits["max"] * 10))
+    steps = list(range(low, max(low, high) + 1))
+    return rng.choices(steps, weights=[1 / ((n - low + 1) ** 1.35) for n in steps], k=1)[0] / 10
+
+
+def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids=(), *, rng=None, expected_config=None, symbols=None, draw_count=1):
     """Persist money, shards, owned IDs and a replay receipt in one SQLite transaction.
 
     The collection mirror may fail independently; account recovery redelivers it idempotently.
     """
+    if draw_count not in (1, 4, 10):
+        raise ValueError("仅支持单抽、四连或十连。")
+    rng = rng or random.SystemRandom()
     _ensure_storage()
     with roles._ownership_lock, roles._role_data_lock, points._POINTS_DATA_LOCK:
         cfg = get_config(guild_id)
@@ -171,33 +190,49 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
                     return {"success": False, "reason": "有效奖池不足，请联系管理员配置。"}
                 record, key = points._db_get_user(con, user_id, guild_id)
                 balance = points._round_shells(record.get("shells", 0))
-                if balance < cfg["cost"]:
-                    return {"success": False, "reason": f"蛋壳不足：需要 {cfg['cost']:g}，当前 {balance:g}。"}
+                total_cost = round(cfg["cost"] * draw_count, 1)
+                if balance < total_cost:
+                    return {"success": False, "reason": f"蛋壳不足：需要 {total_cost:g}，当前 {balance:g}。"}
                 account = _get(con, "surprise_accounts", key, {"owned": [], "shards": 0, "draws": 0})
-                misses_before = max(0, int(account.get("miss_streak", 0)))
-                pity_triggered = misses_before >= PITY_LIMIT - 1
-                reels = roll_reels(pool, 100 if pity_triggered else cfg["chance"], rng)
-                winner = reels[0] if len(set(reels)) == 1 else None
-                account["miss_streak"] = 0 if winner else misses_before + 1
-                duplicate = bool(winner and winner in owned | set(account["owned"]))
-                shards = cfg["duplicate_shards"] if duplicate else 0
-                if winner:
-                    account["owned"] = sorted(set(account["owned"]) | {winner})
-                account["shards"] += shards
-                account["draws"] += 1
-                balance = points._round_shells(balance - cfg["cost"])
-                record["shells"] = record["points"] = balance
+                refund_chance, refund_limits = refund_rules()
+                results = []
+                for _ in range(draw_count):
+                    misses_before = max(0, int(account.get("miss_streak", 0)))
+                    pity_triggered = misses_before >= PITY_LIMIT - 1
+                    reels = roll_reels(pool, 100 if pity_triggered else cfg["chance"], rng)
+                    winner = reels[0] if len(set(reels)) == 1 else None
+                    account["miss_streak"] = 0 if winner else misses_before + 1
+                    duplicate = bool(winner and winner in owned | set(account["owned"]))
+                    shards = cfg["duplicate_shards"] if duplicate else 0
+                    refund = miss_refund(rng, refund_chance, refund_limits) if not winner else 0.0
+                    if winner:
+                        account["owned"] = sorted(set(account["owned"]) | {winner})
+                    account["shards"] += shards
+                    account["draws"] += 1
+                    balance = points._round_shells(balance - cfg["cost"] + refund)
+                    row = {"success": True, "reels": reels, "winner": winner, "duplicate": duplicate,
+                           "shards_gained": shards, "shards": account["shards"], "cost": cfg["cost"],
+                           "refund": refund, "balance": balance, "chance": cfg["chance"],
+                           "pity_triggered": pity_triggered, "miss_streak": account["miss_streak"],
+                           "pity_remaining": PITY_LIMIT - account["miss_streak"]}
+                    if symbols:
+                        row["symbols"] = [symbols[rid] for rid in reels]
+                    results.append(row)
+                total_refund = round(sum(r["refund"] for r in results), 1)
+                record["shells"] = record["points"] = points._round_shells(balance - total_refund)
                 points._db_append_transaction(con, record, user_id=user_id, guild_id=guild_id,
-                    amount=-cfg["cost"], source="surprise_lottery", reason=f"reels={reels}",
+                    amount=-total_cost, source="surprise_lottery", reason=f"draw_count={draw_count}",
                     idempotency_key=f"surprise:{receipt_key}")
+                record["shells"] = record["points"] = balance
+                if total_refund:
+                    points._db_append_transaction(con, record, user_id=user_id, guild_id=guild_id,
+                        amount=total_refund, source="surprise_lottery_refund", reason=f"draw_count={draw_count}",
+                        idempotency_key=f"surprise-refund:{receipt_key}")
                 points._db_put_user(con, key, record)
-                result = {"success": True, "reels": reels, "winner": winner, "duplicate": duplicate,
-                          "shards_gained": shards, "shards": account["shards"], "cost": cfg["cost"],
-                          "balance": balance, "chance": cfg["chance"],
-                          "pity_triggered": pity_triggered, "miss_streak": account["miss_streak"],
-                          "pity_remaining": PITY_LIMIT - account["miss_streak"]}
-                if symbols:
-                    result["symbols"] = [symbols[rid] for rid in reels]
+                result = results[0] if draw_count == 1 else {
+                    "success": True, "results": results, "cost": total_cost, "refund": total_refund,
+                    "balance": balance, "shards": account["shards"], "draw_count": draw_count,
+                    "pity_remaining": PITY_LIMIT - account["miss_streak"]}
                 account["last_result"] = result
                 _put(con, "surprise_accounts", key, account)
                 _put(con, "surprise_receipts", receipt_key, result)
