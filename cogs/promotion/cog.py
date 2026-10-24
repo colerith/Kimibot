@@ -69,7 +69,7 @@ class PromotionCog(commands.Cog):
             row = await asyncio.to_thread(store.get, row['id'])
             if row['status'] != 'publishing':
                 return
-            channel = await self.channel(store.CHANNEL_ID)
+            channel = await self.channel(row.get('channel_id', store.CHANNEL_ID))
             # On an interrupted send, recover the canonical card before resending.
             if row.get('send_started'):
                 found = await self.find_sent(channel, row)
@@ -124,7 +124,7 @@ class PromotionCog(commands.Cog):
         card_error = None
         if row.get('card_dirty') and row.get('message_id'):
             try:
-                channel = await self.channel(store.CHANNEL_ID)
+                channel = await self.channel(row.get('channel_id', store.CHANNEL_ID))
                 message = await self.api(channel.fetch_message, row['message_id'])
                 await self.api(message.edit, embeds=[application_embed(row)] + message.embeds[1:],
                     view=ReviewView() if row['status'] == 'pending' else None,
@@ -140,17 +140,19 @@ class PromotionCog(commands.Cog):
         log_error = None
         if row.get('log_state') != 'sent':
             try:
-                channel = await self.channel(store.LOG_CHANNEL_ID)
+                cfg = await asyncio.to_thread(store.settings)
+                log_channel_id = row.get('log_channel_id', store.LOG_CHANNEL_ID if row.get('log_send_started') else cfg['log_channel_id'])
+                channel = await self.channel(log_channel_id)
                 message = await self.find_sent(channel, row) if row.get('log_send_started') else None
                 if message is None:
-                    await asyncio.to_thread(store.update, row['id'], log_send_started=True)
+                    await asyncio.to_thread(store.update, row['id'], log_send_started=True, log_channel_id=log_channel_id)
                     embed = application_embed(row)
                     embed.add_field(name='审批时间', value=row.get('reviewed', '—'), inline=False)
                     if row['status'] == 'approved' and not row.get('is_test'):
                         embed.add_field(name='权益发放', value='破壳而出身份组已确认；永久权益已开通，首次赠礼仅到账一次。', inline=False)
                     message = await self.api(channel.send, embed=embed, view=jump_view(row),
                         allowed_mentions=discord.AllowedMentions.none(), nonce=f'promotion-log-{row["id"]}', enforce_nonce=True)
-                row = await asyncio.to_thread(store.update, row['id'], log_state='sent', log_message_id=message.id)
+                row = await asyncio.to_thread(store.update, row['id'], log_state='sent', log_message_id=message.id, log_channel_id=log_channel_id)
             except Exception as error:
                 log_error = error
         if row.get('dm_state') == 'pending':
@@ -173,7 +175,7 @@ class PromotionCog(commands.Cog):
 
         current = await asyncio.to_thread(store.get, row['id'])
         if current.get('log_message_id') and current.get('dm_state') != current.get('logged_dm_state'):
-            channel = await self.channel(store.LOG_CHANNEL_ID)
+            channel = await self.channel(current.get('log_channel_id', store.LOG_CHANNEL_ID))
             message = await self.api(channel.fetch_message, current['log_message_id'])
             embed = application_embed(current)
             embed.add_field(name='审批时间', value=current.get('reviewed', '—'), inline=False)
@@ -187,13 +189,38 @@ class PromotionCog(commands.Cog):
         if card_error:
             raise card_error
 
+    async def configure(self, changes):
+        async with self.panel_lock:
+            previous = await asyncio.to_thread(store.settings)
+            current = await asyncio.to_thread(store.save_settings, changes)
+            self.entry_signature = self.panel_signature = None
+            if previous['channel_id'] != current['channel_id']:
+                self.backfilled = False
+                # Retire entry/navigation only; application cards stay reviewable in place.
+                for name in ('entry', 'bottom'):
+                    message_id = await asyncio.to_thread(store.panel, name, channel_id=previous['channel_id'])
+                    if not message_id:
+                        continue
+                    try:
+                        channel = await self.channel(previous['channel_id'])
+                        message = channel.get_partial_message(message_id)
+                        if name == 'entry':
+                            await self.api(message.edit, content=f'小蛋晋升入口已迁移至 <#{current["channel_id"]}>。',
+                                           embed=None, view=None, allowed_mentions=discord.AllowedMentions.none())
+                        else:
+                            await self.api(message.delete)
+                    except discord.HTTPException as error:
+                        self.report('清理旧晋升入口', error)
+            return current
+
     async def refresh_panels(self):
         async with self.panel_lock:
-            channel = await self.channel(store.CHANNEL_ID)
+            cfg = await asyncio.to_thread(store.settings)
+            channel = await self.channel(cfg['channel_id'])
             used = await asyncio.to_thread(store.quota, channel.guild.id)
-            signature = (store.today(), used)
+            signature = (store.today(), used, tuple(sorted(cfg.items())))
             if self.entry_signature != signature:
-                message_id = await asyncio.to_thread(store.panel, 'entry')
+                message_id = await asyncio.to_thread(store.panel, 'entry', channel_id=channel.id)
                 message = None
                 if message_id:
                     try:
@@ -201,17 +228,17 @@ class PromotionCog(commands.Cog):
                     except discord.NotFound:
                         pass
                 if message:
-                    await self.api(message.edit, embed=entry_embed(used), view=EntryView())
+                    await self.api(message.edit, content=None, embed=entry_embed(used, cfg), view=EntryView())
                 else:
-                    message = await self.api(channel.send, embed=entry_embed(used), view=EntryView(),
+                    message = await self.api(channel.send, embed=entry_embed(used, cfg), view=EntryView(),
                         allowed_mentions=discord.AllowedMentions.none())
-                    await asyncio.to_thread(store.panel, 'entry', message.id)
+                    await asyncio.to_thread(store.panel, 'entry', message.id, channel_id=channel.id)
                 self.entry_signature = signature
             rows = await asyncio.to_thread(store.applications, channel.guild.id)
             pending = [r for r in rows if r['status'] == 'pending' and r.get('message_id')]
             earliest = pending[0] if pending else None
             bottom_sig = (signature, tuple(r['id'] for r in pending))
-            old_id = await asyncio.to_thread(store.panel, 'bottom')
+            old_id = await asyncio.to_thread(store.panel, 'bottom', channel_id=channel.id)
             if old_id == channel.last_message_id and bottom_sig == self.panel_signature:
                 return
             embed = discord.Embed(title='🕊️ 小蛋晋升 · 审批导航', color=0xB8C9C1,
@@ -226,7 +253,7 @@ class PromotionCog(commands.Cog):
                 except discord.NotFound:
                     pass
             msg = await self.api(channel.send, embed=embed, view=BottomView(earliest))
-            await asyncio.to_thread(store.panel, 'bottom', msg.id)
+            await asyncio.to_thread(store.panel, 'bottom', msg.id, channel_id=channel.id)
             self.panel_signature = bottom_sig
             if old_id:
                 try:
@@ -237,7 +264,8 @@ class PromotionCog(commands.Cog):
     @tasks.loop(seconds=30)
     async def worker(self):
         try:
-            channel = await self.channel(store.CHANNEL_ID)
+            cfg = await asyncio.to_thread(store.settings)
+            channel = await self.channel(cfg['channel_id'])
             guild = channel.guild
             if not self.backfilled:
                 if not guild.chunked:
@@ -278,11 +306,12 @@ class PromotionCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload):
-        if payload.channel_id != store.CHANNEL_ID:
+        cfg = await asyncio.to_thread(store.settings)
+        if payload.channel_id != cfg['channel_id']:
             return
-        if payload.message_id == await asyncio.to_thread(store.panel, 'entry'):
+        if payload.message_id == await asyncio.to_thread(store.panel, 'entry', channel_id=payload.channel_id):
             self.entry_signature = None
-        if payload.message_id == await asyncio.to_thread(store.panel, 'bottom'):
+        if payload.message_id == await asyncio.to_thread(store.panel, 'bottom', channel_id=payload.channel_id):
             self.panel_signature = None
 
     @commands.Cog.listener()

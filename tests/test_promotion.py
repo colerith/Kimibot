@@ -12,6 +12,7 @@ from cogs.points import storage as points
 from cogs.promotion import storage as store
 from cogs.promotion import views
 from cogs.promotion.cog import PromotionCog
+from cogs.promotion.admin import PromotionAdminView, CopyModal, ChannelModal
 from cogs.roles import surprise_storage
 from test_surprise_lottery import StorageFixture
 
@@ -34,6 +35,34 @@ class PromotionFixture:
 
 
 class PromotionStorageTests(PromotionFixture, unittest.TestCase):
+    def test_configuration_persists_and_historical_channels_stay_fixed(self):
+        old = self.create()
+        store.save_settings({'channel_id': 12345, 'log_channel_id': 67890, 'title': '晋升新文案'})
+        points._POINTS_DB_READY = False
+        self.assertEqual(store.settings()['title'], '晋升新文案')
+        new = self.create(user=8, request='new-channel')
+        self.assertEqual(store.get(old['id'])['channel_id'], store.CHANNEL_ID)
+        self.assertEqual(new['channel_id'], 12345)
+        store.panel('entry', 1)
+        store.panel('entry', 2, channel_id=12345)
+        self.assertEqual(store.panel('entry'), 1)
+        self.assertEqual(store.panel('entry', channel_id=12345), 2)
+        with self.assertRaises(ValueError):
+            store.save_settings({'title': 'x' * 257})
+        self.assertEqual(store.settings()['title'], '晋升新文案')
+
+    def test_statistics_separate_tests_from_formal_records(self):
+        row = self.create()
+        store.update(row['id'], status='pending')
+        store.decide(row['id'], 1, False, '材料不完整')
+        trial = store.create(8, 9, 'trial', '测试感想' * 10, ['a', 'b'], '管理员', is_test=True)
+        store.update(trial['id'], status='approved', dm_state='blocked')
+        stats = store.statistics(9)
+        self.assertEqual(stats['total']['rejected'], 1)
+        self.assertEqual(stats['tests']['approved'], 1)
+        self.assertEqual(stats['used'], 1)
+        self.assertEqual(stats['dm_failed'], 1)
+
     def test_staff_detection_uses_owner_or_administrator_permission(self):
         member = SimpleNamespace(id=1, bot=False, guild=SimpleNamespace(owner_id=1),
                                  roles=[], guild_permissions=SimpleNamespace(administrator=False))
@@ -161,6 +190,76 @@ class PromotionSurpriseTests(StorageFixture, unittest.TestCase):
 
 
 class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_admin_dashboard_edit_forms_and_history_links(self):
+        cog = SimpleNamespace(channel=AsyncMock(return_value=SimpleNamespace(guild=SimpleNamespace(id=9))))
+        panel = PromotionAdminView(cog, 7, 9)
+        embed = await panel.embed()
+        self.assertIn('管理控制台', embed.title)
+        self.assertEqual(len(CopyModal(panel).children), 5)
+        self.assertEqual(len(ChannelModal(panel).children), 2)
+        edited = views.entry_embed(12, {'title': '自定义标题', 'requirements': '新的条件说明'})
+        self.assertEqual(edited.title, '自定义标题')
+        self.assertEqual(edited.fields[1].value, '新的条件说明')
+        row = self.create()
+        row.update(message_id=987, channel_id=456)
+        self.assertTrue(views.jump_view(row).children[0].url.endswith('/456/987'))
+        self.assertTrue(views.BottomView(row).children[0].url.endswith('/456/987'))
+
+    async def test_configure_retires_only_old_entry_and_navigation(self):
+        cog = PromotionCog.__new__(PromotionCog)
+        cog.panel_lock = asyncio.Lock()
+        cog.backfilled = True
+        entry = SimpleNamespace(edit=AsyncMock())
+        bottom = SimpleNamespace(delete=AsyncMock())
+        channel = SimpleNamespace(get_partial_message=lambda mid: entry if mid == 11 else bottom)
+        cog.channel = AsyncMock(return_value=channel)
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        store.panel('entry', 11)
+        store.panel('bottom', 12)
+        old = self.create()
+        await cog.configure({'channel_id': 456})
+        entry.edit.assert_awaited_once()
+        bottom.delete.assert_awaited_once()
+        self.assertIn('<#456>', entry.edit.call_args.kwargs['content'])
+        self.assertEqual(store.get(old['id'])['channel_id'], store.CHANNEL_ID)
+        self.assertFalse(cog.backfilled)
+
+    async def test_refresh_uses_configured_channel_copy_and_old_pending_link(self):
+        old = self.create()
+        store.update(old['id'], status='pending', message_id=777)
+        store.save_settings({'channel_id': 456, 'title': '新的晋升标题'})
+        cog = PromotionCog.__new__(PromotionCog)
+        cog.panel_lock = asyncio.Lock()
+        cog.entry_signature = cog.panel_signature = None
+        channel = SimpleNamespace(id=456, guild=SimpleNamespace(id=9), last_message_id=0)
+        sent = []
+        async def send(**kwargs):
+            sent.append(kwargs)
+            channel.last_message_id += 1
+            return SimpleNamespace(id=channel.last_message_id)
+        channel.send = send
+        cog.channel = AsyncMock(return_value=channel)
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        await cog.refresh_panels()
+        self.assertEqual(cog.channel.call_args.args[0], 456)
+        self.assertEqual(sent[0]['embed'].title, '新的晋升标题')
+        self.assertEqual(store.panel('entry', channel_id=456), 1)
+        self.assertEqual(store.panel('bottom', channel_id=456), 2)
+        self.assertIn(f'/{store.CHANNEL_ID}/777', sent[1]['view'].children[0].url)
+        await cog.refresh_panels()
+        self.assertEqual(len(sent), 2)
+
+    async def test_admin_callbacks_reject_other_users(self):
+        panel = PromotionAdminView(SimpleNamespace(), 7, 9)
+        interaction = SimpleNamespace(guild_id=9, user=SimpleNamespace(id=8),
+                                      response=SimpleNamespace(send_message=AsyncMock()))
+        self.assertFalse(await panel.interaction_check(interaction))
+        interaction.response.send_message.assert_awaited_once()
+
     async def test_test_approval_does_not_assign_role_or_award_shells(self):
         row = store.create(7, 9, 'test-only', '测试感想' * 10, ['a', 'b'], '管理员', is_test=True)
         store.update(row['id'], status='pending')

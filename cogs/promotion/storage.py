@@ -40,6 +40,7 @@ def initialize():
             status TEXT NOT NULL, data TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS promotion_queue ON promotion_applications(guild_id,status,id);
         CREATE TABLE IF NOT EXISTS promotion_panels (name TEXT PRIMARY KEY, message_id TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS promotion_settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
         ''')
 
 
@@ -152,7 +153,10 @@ def create(user_id, guild_id, request_id, content, files, author_name, now=None,
         count = _quota(con, guild_id, day)
         if not is_test and count >= DAILY_LIMIT:
             raise ValueError('今天的 100 个申请名额已满，北京时间明天 0 点刷新。')
+        settings_row = con.execute('SELECT data FROM promotion_settings WHERE id=1').fetchone()
+        settings = points._json_load(settings_row['data'] if settings_row else None, {})
         data = dict(content=content, files=files, author_name=author_name, is_test=bool(is_test),
+                    channel_id=settings.get('channel_id', CHANNEL_ID),
                     created=(now or datetime.now(points.TZ_CN)).isoformat(), message_id=None,
                     card_dirty=True, dm_state='pending', log_state='pending')
         cursor = con.execute('INSERT INTO promotion_applications(request_id,guild_id,user_id,batch,status,data) VALUES (?,?,?,?,?,?)',
@@ -209,10 +213,53 @@ def complete(application_id):
         return row
 
 
-def panel(name, message_id=None):
+def panel(name, message_id=None, *, channel_id=None):
+    if channel_id is not None and int(channel_id) != CHANNEL_ID:
+        name = f'{channel_id}:{name}'
     initialize()
     with points._points_connection() as con:
         if message_id is not None:
             con.execute('INSERT OR REPLACE INTO promotion_panels VALUES (?,?)', (name, str(message_id)))
         row = con.execute('SELECT message_id FROM promotion_panels WHERE name=?', (name,)).fetchone()
         return int(row[0]) if row else None
+
+
+def settings():
+    initialize()
+    with points._points_connection() as con:
+        row = con.execute('SELECT data FROM promotion_settings WHERE id=1').fetchone()
+        return dict(channel_id=CHANNEL_ID, log_channel_id=LOG_CHANNEL_ID) | points._json_load(row['data'] if row else None, {})
+
+
+@points._locked_points_data
+def save_settings(changes):
+    limits = {'title': 256, 'intro': 1500, 'benefits': 1024, 'requirements': 1024, 'notes': 1024}
+    for key, value in changes.items():
+        if key in limits:
+            if not isinstance(value, str) or not value.strip() or len(value) > limits[key]:
+                raise ValueError(f'文案不能为空且不能超过 {limits[key]} 字。')
+        elif key in ('channel_id', 'log_channel_id'):
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError('频道 ID 必须是正整数。')
+        else:
+            raise ValueError('不支持的设置项。')
+    initialize()
+    with points._points_connection() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row = con.execute('SELECT data FROM promotion_settings WHERE id=1').fetchone()
+        cfg = points._json_load(row['data'] if row else None, {})
+        cfg.update(changes)
+        con.execute('INSERT OR REPLACE INTO promotion_settings VALUES (1,?)', (points._json_dump(cfg),))
+    return settings()
+
+
+def statistics(guild_id):
+    rows = applications(guild_id)
+    def counts(group):
+        return {status: sum(row['status'] == status for row in group)
+                for status in ('publishing', 'pending', 'granting', 'approved', 'rejected')}
+    formal = [row for row in rows if not row.get('is_test')]
+    tests = [row for row in rows if row.get('is_test')]
+    return {'total': counts(formal), 'today': counts([r for r in formal if r['batch'] == today()]),
+            'tests': counts(tests), 'used': sum(r['batch'] == today() for r in formal),
+            'dm_failed': sum(r.get('dm_state') in ('blocked', 'unknown', 'sending') for r in rows)}

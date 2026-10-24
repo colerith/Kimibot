@@ -4942,7 +4942,7 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
             discord.SelectOption(label="入站答题面板", value="welcome_quiz", emoji="📝"),
             discord.SelectOption(label="助力鸣谢消息", value="boost_thanks", emoji="💎"),
             discord.SelectOption(label="论坛统计面板", value="forum_stats", emoji="📊"),
-            discord.SelectOption(label="小蛋晋升面板", value="promotion", emoji="🐣", description="刷新晋升入口与置底审批导航"),
+            discord.SelectOption(label="小蛋晋升面板", value="promotion", emoji="🐣", description="编辑文案、审批统计、刷新面板与频道设置"),
             discord.SelectOption(label="第三方违规提醒文案", value="third_party_notice", emoji="⚠️", description="编辑右键 App 命令发送的提醒正文"),
         ]
         if not config.MANUAL_REVIEW_ENABLED:
@@ -4957,9 +4957,12 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
                 cog = self.bot.get_cog("PromotionCog")
                 if not cog:
                     raise RuntimeError("晋升模块未加载")
-                cog.entry_signature = None
-                await cog.refresh_panels()
-                await interaction.followup.send("✅ 小蛋晋升面板与审批导航已刷新。", ephemeral=True)
+                from cogs.promotion.admin import PromotionAdminView
+                if not interaction.user.guild_permissions.administrator and interaction.user.id != interaction.guild.owner_id:
+                    await interaction.followup.send("仅管理员 / 服主可管理小蛋晋升设置。", ephemeral=True)
+                    return
+                view = PromotionAdminView(cog, interaction.user.id, interaction.guild_id, self.view)
+                await interaction.edit_original_response(embed=await view.embed(), view=view)
                 return
             elif target == "third_party_notice":
                 from cogs.shared.third_party_notice import load_notice, ThirdPartyNoticeEditView

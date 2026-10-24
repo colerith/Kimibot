@@ -15,20 +15,26 @@ STATUS = {'publishing': '正在投递', 'pending': '等待服主审批', 'granti
           'approved': '已通过', 'rejected': '已驳回'}
 
 
-def entry_embed(used):
-    embed = discord.Embed(title='🐣 小蛋晋升面板｜谢谢你陪我们长大', color=0xEBCB8B,
-        description='每一段认真使用的旅程，本大王都有好好珍惜惹！\n'
-        f'为了感谢你的支持，我们准备了 <@&{store.ROLE_ID}> 身份组和一份长久的破壳礼。')
-    embed.add_field(name='✨ 破壳而出的专属权益', value=BENEFITS, inline=False)
-    embed.add_field(name='📷 带上你的使用足迹', value=(
-        '使用 **日月西 / 象牙塔** 聊天 **超过 100 楼**。\n'
-        '上传 **至少两张截图**：首楼与最后一楼，能看到楼层数及日月西 / 象牙塔的相关痕迹。\n'
-        '具体聊天内容可以打码，并附上 **至少 30 字的使用感想**。'), inline=False)
-    embed.add_field(name='🌷 申请须知', value=(
-        '申请与截图会公开展示在本频道，请先处理好隐私。由**服主手动审批**，通过或驳回都会私信通知。\n'
-        f'今日已接收 **{used} / {store.DAILY_LIMIT}** 份；北京时间每日 0 点刷新名额。\n'
-        '每位成员同时只能有一份待审申请，已开通权益无需重复申请。\n'
-        '管理员 / 服主自动享有权益；其申请标记为测试记录，不占名额。'), inline=False)
+DEFAULT_COPY = {
+    'title': '🐣 小蛋晋升面板｜谢谢你陪我们长大',
+    'intro': '每一段认真使用的旅程，本大王都有好好珍惜惹！\n'
+             f'为了感谢你的支持，我们准备了 <@&{store.ROLE_ID}> 身份组和一份长久的破壳礼。',
+    'benefits': BENEFITS,
+    'requirements': '使用 **日月西 / 象牙塔** 聊天 **超过 100 楼**。\n'
+                    '上传 **至少两张截图**：首楼与最后一楼，能看到楼层数及日月西 / 象牙塔的相关痕迹。\n'
+                    '具体聊天内容可以打码，并附上 **至少 30 字的使用感想**。',
+    'notes': '申请与截图会公开展示在本频道，请先处理好隐私。由**服主手动审批**，通过或驳回都会私信通知。\n'
+             '每位成员同时只能有一份待审申请，已开通权益无需重复申请。\n'
+             '管理员 / 服主自动享有权益；其申请标记为测试记录，不占名额。',
+}
+
+
+def entry_embed(used, settings=None):
+    copy = DEFAULT_COPY | {key: value for key, value in (settings or {}).items() if key in DEFAULT_COPY}
+    embed = discord.Embed(title=copy['title'], description=copy['intro'], color=0xEBCB8B)
+    for name, key in [('✨ 破壳而出的专属权益', 'benefits'), ('📷 带上你的使用足迹', 'requirements'), ('🌷 申请须知', 'notes')]:
+        embed.add_field(name=name, value=copy[key], inline=False)
+    embed.add_field(name='今日申请名额', value=f'**{used} / {store.DAILY_LIMIT}** · 北京时间每日 0 点刷新；测试记录不占名额。', inline=False)
     embed.set_footer(text=f'{store.today()} 批次 · 本大王在这里等你破壳！')
     return embed
 
@@ -72,7 +78,7 @@ def jump_view(row):
     view = ui.View()
     if row.get('message_id'):
         view.add_item(ui.Button(label='查看申请档案', style=discord.ButtonStyle.link,
-            url=f'https://discord.com/channels/{row["guild_id"]}/{store.CHANNEL_ID}/{row["message_id"]}'))
+            url=f'https://discord.com/channels/{row["guild_id"]}/{row.get("channel_id", store.CHANNEL_ID)}/{row["message_id"]}'))
     return view
 
 
@@ -93,7 +99,8 @@ class PromotionModal(ui.DesignerModal):
     async def callback(self, interaction):
         await interaction.response.defer(ephemeral=True)
         cog = interaction.client.get_cog('PromotionCog')
-        if not cog or interaction.channel_id != store.CHANNEL_ID:
+        cfg = await asyncio.to_thread(store.settings)
+        if not cog or interaction.channel_id != cfg['channel_id']:
             return await interaction.followup.send('请从小蛋晋升频道的面板重新申请。', ephemeral=True)
         is_test = store.is_staff(interaction.user)
         if is_test:
@@ -156,8 +163,6 @@ class EntryView(ui.View):
 
     @ui.button(label='提交晋升申请', emoji='🌱', style=discord.ButtonStyle.success, custom_id='promotion:apply')
     async def apply(self, button, interaction):
-        if interaction.channel_id != store.CHANNEL_ID:
-            return await interaction.response.send_message(f'请到 <#{store.CHANNEL_ID}> 申请。', ephemeral=True)
         await interaction.response.send_modal(PromotionModal())
 
 
@@ -211,6 +216,6 @@ class BottomView(ui.View):
         super().__init__(timeout=None)
         if earliest:
             self.add_item(ui.Button(label=f'最早待审 · #{earliest["id"]:06d}', emoji='📍', style=discord.ButtonStyle.link,
-                url=f'https://discord.com/channels/{earliest["guild_id"]}/{store.CHANNEL_ID}/{earliest["message_id"]}'))
+                url=f'https://discord.com/channels/{earliest["guild_id"]}/{earliest.get("channel_id", store.CHANNEL_ID)}/{earliest["message_id"]}'))
         else:
             self.add_item(ui.Button(label='当前没有待审批申请', custom_id='promotion:empty', disabled=True))
