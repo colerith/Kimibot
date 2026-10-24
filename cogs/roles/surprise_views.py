@@ -11,6 +11,16 @@ from . import surprise_storage as store
 from . import storage as roles
 
 
+async def equip_latest_surprise(user, guild, result):
+    from .views import equip_decoration
+    for row in reversed(result.get("results", [result])):
+        if row.get("winner") and not row.get("duplicate"):
+            role = guild.get_role(row["winner"])
+            if role:
+                await equip_decoration(user, guild, role, "surprise", "惊喜抽奖：穿戴最新奖励")
+                return
+
+
 def symbol_for(role, entry):
     override = entry.get("symbol", "")
     if override:
@@ -138,6 +148,7 @@ class SurpriseLotteryView(OwnerView):
             await interaction.edit_original_response(embeds=[discord.Embed(title="🎰 本大王的惊喜转轮转起来惹……", description="## ❔ ┃ ❔ ┃ ❔\n咕噜咕噜～看看这次是哪件小衣服来找你！", color=0xF4B942)], view=self)
             cfg = await asyncio.to_thread(store.get_config, self.guild.id)
             entries, error = playable_pool(self.guild, cfg)
+            equip_error = False
             if error:
                 result = {"success": False, "reason": error}
             else:
@@ -148,6 +159,11 @@ class SurpriseLotteryView(OwnerView):
                         str(interaction.id), {row[0].id for row in entries},
                         {r.id for r in interaction.user.roles}, expected_config=cfg,
                         symbols={role.id: symbol for role, _, symbol in entries}, draw_count=draw_count)
+                    if result["success"]:
+                        try:
+                            await equip_latest_surprise(interaction.user, self.guild, result)
+                        except discord.HTTPException:
+                            equip_error = True
             if not result["success"]:
                 embeds = [discord.Embed(title="暂时无法抽奖", description=result["reason"], color=0xED4245)]
             else:
@@ -155,13 +171,8 @@ class SurpriseLotteryView(OwnerView):
                 await asyncio.sleep(0.6)
                 self.current_result, self.result_cfg, self.result_page = result, cfg, 0
                 embeds = self.result_embeds(result, cfg)
-                winners = [self.guild.get_role(r["winner"]) for r in result.get("results", [result]) if r["winner"] and not r["duplicate"]]
-                winners = [r for r in winners if r]
-                if winners:
-                    try:
-                        await interaction.user.add_roles(*winners, reason="惊喜抽奖中奖")
-                    except discord.HTTPException:
-                        embeds[0].add_field(name="穿戴提示", value="奖励已保存；自动穿戴失败，可稍后在小蛋换装中穿戴。", inline=False)
+                if equip_error:
+                    embeds[0].add_field(name="穿戴提示", value="奖励已保存；自动穿戴失败，可稍后在小蛋换装中穿戴。", inline=False)
                 if result.get("delivery_pending"):
                     embeds[0].add_field(name="衣柜同步", value="奖励已记录，重新打开惊喜抽奖即可恢复到衣柜。", inline=False)
             for child in self.children:

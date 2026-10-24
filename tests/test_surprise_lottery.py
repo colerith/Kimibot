@@ -334,6 +334,7 @@ class SurpriseViewTests(StorageFixture, unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=7, roles=[], add_roles=AsyncMock()),
             response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
             edit_original_response=AsyncMock())
+        guild.fetch_member = AsyncMock(return_value=interaction.user)
         with patch("cogs.roles.surprise_views.asyncio.sleep", new=AsyncMock()):
             await view.spin.callback(interaction)
         self.assertFalse(view.busy)

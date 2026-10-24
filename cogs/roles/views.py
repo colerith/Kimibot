@@ -901,13 +901,7 @@ class LegendaryTicketUseView(discord.ui.View):
             try:
                 kind = get_lottery_role_kind(role.id, data)
                 exclusive_type = "lottery_color" if kind == LOTTERY_KIND_COLOR else "lottery_icon"
-                await remove_all_decorations(
-                    interaction.user,
-                    self.guild,
-                    keep_role_id=role.id,
-                    exclusive_type=exclusive_type,
-                )
-                await interaction.user.add_roles(role, reason="三星保底补偿券抽取")
+                await equip_decoration(interaction.user, self.guild, role, exclusive_type, "三星保底补偿券抽取")
             except Exception as error:
                 equip_error = f"\n⚠️ 自动穿戴失败，但已加入永久衣柜：{type(error).__name__}"
 
@@ -1281,13 +1275,7 @@ class RoleLotteryView(discord.ui.View):
             equipped_kind = get_lottery_role_kind(equipped_role.id, data)
             exclusive_type = "lottery_color" if equipped_kind == LOTTERY_KIND_COLOR else "lottery_icon"
             try:
-                await remove_all_decorations(
-                    user,
-                    interaction.guild,
-                    keep_role_id=equipped_role.id,
-                    exclusive_type=exclusive_type,
-                )
-                await user.add_roles(equipped_role, reason="蛋壳抽奖获取")
+                await equip_decoration(user, interaction.guild, equipped_role, exclusive_type, "蛋壳抽奖获取")
             except Exception as e:
                 equip_error = str(e)
 
@@ -1545,13 +1533,8 @@ class RoleClaimSelect(discord.ui.Select):
         if target_role not in interaction.user.roles:
             try:
                 # 只移除同类型的其他身份组
-                removed = await remove_all_decorations(
-                    interaction.user,
-                    interaction.guild,
-                    keep_role_id=target_role.id,
-                    exclusive_type=exclusive_type
-                )
-                await interaction.user.add_roles(target_role, reason="面板自助领取/更换")
+                removed = await equip_decoration(interaction.user, interaction.guild, target_role,
+                                                 exclusive_type, "面板自助领取/更换")
 
                 msg = f"✅ **穿戴成功！**\n✨ 你现在拥有了 **{target_role.mention}**。"
                 if removed:
@@ -5549,7 +5532,21 @@ async def deploy_role_panel(channel, guild, user_avatar_url):
         save_role_data(data)
         return "sent"
 
-async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=None):
+_DECORATION_LOCKS = {}
+
+
+async def equip_decoration(user, guild, role, exclusive_type, reason):
+    """Serialize both lottery modes and wardrobe changes using fresh Discord roles."""
+    lock = _DECORATION_LOCKS.setdefault((guild.id, user.id), asyncio.Lock())
+    async with lock:
+        member = await guild.fetch_member(user.id)
+        removed = await remove_all_decorations(member, guild, keep_role_id=role.id,
+                                               exclusive_type=exclusive_type, strict=True)
+        await member.add_roles(role, reason=reason)
+        return removed
+
+
+async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=None, strict=False):
     """
     移除用户身上指定类型的互斥身份组。
     - keep_role_id: 如果提供了这个ID，则在移除时保留这个身份组（适用于换装时保留新装饰）
@@ -5570,17 +5567,18 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
             rid for rid in data.get("lottery_roles", [])
             if get_lottery_role_kind(rid, data) == LOTTERY_KIND_COLOR
         }
-    elif exclusive_type == "lottery_icon":
+    elif exclusive_type in ("lottery_icon", "surprise"):
         target_ids = {
             rid for rid in data.get("lottery_roles", [])
             if get_lottery_role_kind(rid, data) == LOTTERY_KIND_ICON
         }
+        from .surprise_storage import get_account, get_config
+        account = await asyncio.to_thread(get_account, user.id, guild.id)
+        config = await asyncio.to_thread(get_config, guild.id)
+        target_ids.update(account["owned"])
+        target_ids.update(int(rid) for rid in config["roles"])
     elif exclusive_type == "collection_reward":
         target_ids = set(get_collection_reward_role_ids(data))
-    elif exclusive_type == "surprise":
-        from .surprise_storage import get_account
-        account = await asyncio.to_thread(get_account, user.id, guild.id)
-        target_ids = set(account["owned"])
     # 如果没有指定类型，则清理所有装饰（供换装面板的清空入口使用）
     else:
         target_ids = set(data.get("claimable_roles", []) + data.get("lottery_roles", []) + data.get("redeem_roles", []))
@@ -5604,6 +5602,8 @@ async def remove_all_decorations(user, guild, keep_role_id=None, exclusive_type=
             await user.remove_roles(*to_remove, reason=f"KimiBot Role Sync: Type '{exclusive_type}'")
             removed_roles.extend(to_remove)
         except Exception as e:
+            if strict:
+                raise
             print(f"Error removing roles for {user.name}: {e}") # 忽略权限错误
 
     return removed_roles
