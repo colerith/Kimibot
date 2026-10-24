@@ -471,7 +471,15 @@ class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
         row = store.decide(row['id'], 1, True)
         cog = PromotionCog.__new__(PromotionCog)
         role = SimpleNamespace(id=store.ROLE_ID)
-        member = SimpleNamespace(roles=[], add_roles=AsyncMock(), send=AsyncMock())
+        from config import IDS
+        newbie = SimpleNamespace(id=IDS['VERIFICATION_ROLE_ID'])
+        calls = []
+        async def grant(*args, **kwargs):
+            calls.append('grant')
+        async def remove(*args, **kwargs):
+            calls.append('remove')
+        member = SimpleNamespace(roles=[newbie], add_roles=AsyncMock(side_effect=grant),
+                                 remove_roles=AsyncMock(side_effect=remove), send=AsyncMock())
         guild = SimpleNamespace(get_member=lambda _: member, get_role=lambda _: role)
         card = SimpleNamespace(embeds=[views.application_embed(row)], attachments=[SimpleNamespace(filename='first.png'), SimpleNamespace(filename='last.png')], edit=AsyncMock())
         log_message = SimpleNamespace(id=456, edit=AsyncMock())
@@ -490,6 +498,8 @@ class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(points.get_user_points(7, 9), 130)
         await cog.process(completed)
         member.add_roles.assert_awaited_once()
+        member.remove_roles.assert_awaited_once()
+        self.assertEqual(calls, ['grant', 'remove'])
         member.send.assert_awaited_once()
         log_channel.send.assert_awaited_once()
 

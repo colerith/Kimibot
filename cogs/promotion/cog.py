@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import discord
 from discord.ext import commands, tasks
+from config import IDS
 from . import storage as store
 from .views import EntryView, ReviewView, BottomView, entry_embed, application_embed, result_embed, jump_view, ApplicationCard, message_application_id
 
@@ -196,6 +197,12 @@ class PromotionCog(commands.Cog):
                 raise ValueError('破壳而出身份组不存在，等待管理员修复。')
             if role not in member.roles:
                 await self.api(member.add_roles, role, reason=f'服主批准小蛋晋升 #{row["id"]}')
+            newbie_id = int(IDS.get('VERIFICATION_ROLE_ID', 0) or 0)
+            newbie = next((r for r in member.roles if r.id == newbie_id and r.id != role.id), None)
+            if newbie:
+                # Only remove the entry role after the promotion grant succeeds.
+                # Keep granting status on failure so the worker retries safely.
+                await self.api(member.remove_roles, newbie, reason=f'小蛋晋升完成，移除新兵蛋子 #{row["id"]}')
             row = await asyncio.to_thread(store.complete, row['id'])
         card_error = None
         if (row.get('card_dirty') or row.get('layout_version') != 3) and row.get('message_id'):
