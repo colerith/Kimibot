@@ -27,13 +27,27 @@ def _put(con, namespace, key, value):
         ON CONFLICT(namespace, item_key) DO UPDATE SET data=excluded.data""", (namespace, str(key), points._json_dump(value)))
 
 
+def ordinary_role_chance():
+    """Match the ordinary draw's effective base outcome weights (before pity)."""
+    cfg = roles.get_lottery_config()["outcome_weights"]
+    weights = [max(0, int(cfg.get(name, 1))) for name in ("role", "shells", "empty")]
+    if sum(weights) <= 0:
+        weights = [23, 32, 45]
+    else:
+        weights[0] = max(1, weights[0])
+    return 100 * weights[0] / sum(weights)
+
+
 def get_config(guild_id):
     _ensure_storage()
     with points._points_connection() as con:
-        return _get(con, "surprise_config", str(guild_id), {
+        cfg = _get(con, "surprise_config", str(guild_id), {
             "enabled": False, "cost": roles.get_lottery_config().get("cost_single", 1.0),
-            "chance": 10.0, "duplicate_shards": 1, "roles": {},
+            "duplicate_shards": 1, "roles": {},
         })
+    # Ignore legacy independent probabilities, including already saved configs.
+    cfg["chance"] = ordinary_role_chance()
+    return cfg
 
 
 def reserved_role_ids():
@@ -52,14 +66,14 @@ def update_config(guild_id, *, settings=None, role_id=None, entry=None, remove=F
     with roles._role_data_lock, points._POINTS_DATA_LOCK:
         cfg = get_config(guild_id)
         if settings:
-            for name in ("cost", "chance", "duplicate_shards"):
+            if "chance" in settings:
+                raise ValueError("中奖概率跟随普通抽奖，请在普通抽奖中修改结果权重。")
+            for name in ("cost", "duplicate_shards"):
                 if name not in settings:
                     continue
                 value = float(settings[name])
                 if not math.isfinite(value) or value < 0:
                     raise ValueError("费用、概率与碎片必须是非负有限数字。")
-                if name == "chance" and value > 100:
-                    raise ValueError("中奖概率应在 0–100% 之间。")
                 if name == "duplicate_shards" and (value != int(value) or value < 1 or value > 1000000):
                     raise ValueError("重复奖励碎片应为 1–1000000 的整数。")
                 cfg[name] = int(value) if name == "duplicate_shards" else round(value, 1 if name == "cost" else 4)

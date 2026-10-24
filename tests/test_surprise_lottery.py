@@ -13,6 +13,9 @@ from cogs.roles import surprise_storage as store
 from cogs.roles import surprise_views as ui
 
 
+ordinary_role_chance = store.ordinary_role_chance
+
+
 class StorageFixture:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -30,18 +33,35 @@ class StorageFixture:
             p = patch.object(module, name, value)
             p.start()
             self.addCleanup(p.stop)
+        chance_patch = patch.object(store, "ordinary_role_chance", return_value=100)
+        self.chance_mock = chance_patch.start()
+        self.addCleanup(chance_patch.stop)
         roles.save_role_data({})
         points.modify_user_points(7, 20, 9)
-        store.update_config(9, settings={"enabled": True, "cost": 1, "chance": 100, "duplicate_shards": 1})
+        store.update_config(9, settings={"enabled": True, "cost": 1, "duplicate_shards": 1})
         store.update_config(9, role_id=1, entry={"weight": 1, "symbol": "🍒"})
 
 
 class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
+    def test_probability_follows_ordinary_and_ignores_legacy_value(self):
+        self.chance_mock.side_effect = ordinary_role_chance
+        with points._points_connection() as con:
+            store._put(con, "surprise_config", "9", {"enabled": True, "cost": 1,
+                       "chance": 99, "duplicate_shards": 1, "roles": {}})
+        for weights, expected in [({"role": 2, "shells": 38, "empty": 60}, 2),
+                                  ({"role": 1, "shells": 0, "empty": 0}, 100),
+                                  ({"role": 0, "shells": 32, "empty": 45}, 100 / 78),
+                                  ({"role": 0, "shells": 0, "empty": 0}, 23)]:
+            with patch.object(roles, "get_lottery_config", return_value={"outcome_weights": weights}):
+                self.assertAlmostEqual(store.get_config(9)["chance"], expected)
+        with self.assertRaises(ValueError):
+            store.update_config(9, settings={"chance": 50})
+
     def test_eightieth_spin_guarantees_role_and_replay_does_not_advance(self):
         points.modify_user_points(7, 60, 9)
         self.enterContext(patch.object(store, "miss_refund", return_value=0))
         store.update_config(9, role_id=2, entry={"weight": 1, "symbol": "🍋"})
-        store.update_config(9, settings={"chance": 0})
+        self.chance_mock.return_value = 0
         for i in range(79):
             result = store.settle_spin(7, 9, str(i), {1, 2})
             self.assertIsNone(result["winner"])
@@ -59,9 +79,9 @@ class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
 
     def test_early_duplicate_win_resets_surprise_pity(self):
         store.update_config(9, role_id=2, entry={"weight": 1, "symbol": "🍋"})
-        store.update_config(9, settings={"chance": 0})
+        self.chance_mock.return_value = 0
         store.settle_spin(7, 9, "miss", {1, 2})
-        store.update_config(9, settings={"chance": 100})
+        self.chance_mock.return_value = 100
         result = store.settle_spin(7, 9, "early", {1}, member_role_ids=[1])
         self.assertTrue(result["duplicate"])
         self.assertFalse(result["pity_triggered"])
@@ -70,7 +90,7 @@ class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
 
     def test_batch_pity_refunds_and_idempotency(self):
         store.update_config(9, role_id=2, entry={"weight": 1, "symbol": "🍋"})
-        store.update_config(9, settings={"chance": 0})
+        self.chance_mock.return_value = 0
         with points._points_connection() as con:
             store._put(con, "surprise_accounts", "9:7", {"owned": [], "shards": 0, "draws": 77, "miss_streak": 77})
         with patch.object(store, "miss_refund", return_value=0.5):
