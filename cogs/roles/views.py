@@ -1448,19 +1448,18 @@ class RoleClaimSelect(discord.ui.Select):
     """
     具体的身份组选择下拉框 (放在私密面板中)
     """
-    def __init__(self, guild_roles, *, page: int = 0, total_pages: int = 1):
+    def __init__(self, guild_roles, *, page: int = 0, total_pages: int = 1, categories=None, worn=None):
         options = []
         for role in guild_roles:
-            emoji = "🎨"
-            if "色" in role.name or "color" in role.name.lower(): emoji = "🌈"
-            elif "男" in role.name or "女" in role.name: emoji = "🚻"
-            elif "通知" in role.name or "Notify" in role.name: emoji = "🔕"
+            icon, category = (categories or {}).get(role.id, ("🎨", "颜色"))
+            equipped = role.id in (worn or set())
+            emoji = "✅" if equipped else icon
 
             options.append(discord.SelectOption(
                 label=role.name,
                 value=str(role.id),
                 emoji=emoji,
-                description=f"ID: {role.id}"
+                description=f"{category} · {'已穿戴，点击卸下' if equipped else '未穿戴，点击换装'}"
             ))
 
         super().__init__(
@@ -1530,7 +1529,8 @@ class RoleClaimSelect(discord.ui.Select):
                 exclusive_type = "surprise"
 
         # 2. 根据类型执行互斥移除并添加
-        if target_role not in interaction.user.roles:
+        member = await interaction.guild.fetch_member(interaction.user.id)
+        if target_role.id not in {role.id for role in member.roles}:
             try:
                 # 只移除同类型的其他身份组
                 removed = await equip_decoration(interaction.user, interaction.guild, target_role,
@@ -1541,15 +1541,17 @@ class RoleClaimSelect(discord.ui.Select):
                     msg += f"\n♻️ 已自动换下同类旧装饰：{', '.join([r.name for r in removed])}"
             except Exception as e:
                 return await self._safe_followup(interaction, f"❌ 权限不足或发生错误: {e}")
+            await self.view.refresh(interaction)
             await self._safe_followup(interaction, msg)
         else:
             # 卸下
             try:
-                await interaction.user.remove_roles(target_role, reason="主动卸下")
+                await member.remove_roles(target_role, reason="主动卸下")
             except Exception as error:
                 return await self._safe_followup(
                     interaction, f"❌ 权限不足或发生错误: {error}"
                 )
+            await self.view.refresh(interaction)
             await self._safe_followup(
                 interaction,
                 f"❎ **卸下成功！** 你已将 {target_role.mention} 收回衣柜。",
@@ -1569,10 +1571,45 @@ class RoleSelectionView(discord.ui.View):
             key=lambda role: (role.position, role.id),
             reverse=True,
         )
+        self.categories = {}
+        self.worn = set()
         self.page_size = 25
         self.total_pages = max(1, math.ceil(len(self.guild_roles) / self.page_size)) if self.guild_roles else 1
         self.page = max(0, min(page, self.total_pages - 1))
         self._build()
+
+    async def prepare(self, guild, member):
+        from .surprise_storage import get_account, get_config
+        data, account, config = await asyncio.gather(
+            asyncio.to_thread(load_role_data),
+            asyncio.to_thread(get_account, member.id, guild.id),
+            asyncio.to_thread(get_config, guild.id))
+        surprise_ids = set(account["owned"]) | {int(rid) for rid in config["roles"]}
+        self.worn = {r.id for r in member.roles}
+        rewards = set(get_collection_reward_role_ids(data))
+        for role in self.guild_roles:
+            if role.id in surprise_ids:
+                category = ("🎰", "惊喜抽奖")
+            elif role.id in data.get("lottery_roles", []):
+                category = ("🎨", "颜色") if get_lottery_role_kind(role.id, data) == LOTTERY_KIND_COLOR else ("🏷️", "图标")
+            elif role.id in data.get("redeem_roles", []):
+                category = ("🥚", "蛋壳兑换")
+            elif role.id in rewards:
+                category = ("🏆", "收集奖励")
+            else:
+                category = ("🎨", "颜色")
+            self.categories[role.id] = category
+        self._build()
+        lines = [f"✅ {self.categories[r.id][0]} **{self.categories[r.id][1]}**：{r.name}"
+                 for r in self.guild_roles if r.id in self.worn]
+        status = "\n".join(lines) or "你目前还没有佩戴任何装饰哦。"
+        return discord.Embed(title="👗 小蛋换装", color=0xFFB6C1,
+            description=f"**当前穿戴状态：**\n{status}\n\n🎨 颜色 · 🏷️ 图标 · 🎰 惊喜抽奖 · ✅ 已穿戴\n请选择装饰进行换装；选择已穿戴的装饰可卸下。")
+
+    async def refresh(self, interaction):
+        member = await interaction.guild.fetch_member(interaction.user.id)
+        embed = await self.prepare(interaction.guild, member)
+        await interaction.edit_original_response(embed=embed, view=self)
 
     def _build(self):
         self.clear_items()
@@ -1583,7 +1620,7 @@ class RoleSelectionView(discord.ui.View):
         start = self.page * self.page_size
         end = start + self.page_size
         page_roles = self.guild_roles[start:end]
-        self.add_item(RoleClaimSelect(page_roles, page=self.page, total_pages=self.total_pages))
+        self.add_item(RoleClaimSelect(page_roles, page=self.page, total_pages=self.total_pages, categories=self.categories, worn=self.worn))
 
         prev_btn = discord.ui.Button(
             label="上一页",
@@ -1624,7 +1661,9 @@ class RoleSelectionView(discord.ui.View):
 
     async def clear_worn_callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        removed = await remove_all_decorations(interaction.user, interaction.guild)
+        member = await interaction.guild.fetch_member(interaction.user.id)
+        removed = await remove_all_decorations(member, interaction.guild)
+        await self.refresh(interaction)
         if removed:
             await interaction.followup.send(
                 f"🧹 已清空佩戴中的 {len(removed)} 个装饰身份组，拥有记录都还在~",
@@ -2802,47 +2841,10 @@ class RoleClaimView(discord.ui.View):
                 content="⚠️ 现在好像还没有任何可用的装饰品呢！",
             )
 
-        # 4. 构建当前状态文本，分别显示
-        user_current_claimable = [r.name for r in interaction.user.roles if r.id in claimable_ids]
-        user_current_redeem = [r.name for r in interaction.user.roles if r.id in redeem_ids]
-        lottery_color_ids = {
-            rid for rid in lottery_ids
-            if get_lottery_role_kind(rid, data) == LOTTERY_KIND_COLOR
-        }
-        lottery_icon_ids = {
-            rid for rid in lottery_ids
-            if get_lottery_role_kind(rid, data) == LOTTERY_KIND_ICON
-        }
-        user_current_lottery_color = [r.name for r in interaction.user.roles if r.id in lottery_color_ids]
-        user_current_lottery_icon = [r.name for r in interaction.user.roles if r.id in lottery_icon_ids]
-        user_current_collection_reward = [r.name for r in interaction.user.roles if r.id in collection_reward_ids]
-
-        status_parts = []
-        if user_current_claimable:
-            status_parts.append(f"🎨 **普通装饰**: {', '.join(user_current_claimable)}")
-        if user_current_redeem:
-            status_parts.append(f"🥚 **蛋壳兑换**: {', '.join(user_current_redeem)}")
-        if user_current_lottery_color:
-            status_parts.append(f"🎰 **稀有颜色**: {', '.join(user_current_lottery_color)}")
-        if user_current_lottery_icon:
-            status_parts.append(f"🏷️ **稀有图标**: {', '.join(user_current_lottery_icon)}")
-        if user_current_collection_reward:
-            status_parts.append(f"🏆 **收集奖励**: {', '.join(user_current_collection_reward)}")
-
-        status_text = "\n".join(status_parts) if status_parts else "你目前还没有佩戴任何装饰哦。"
-
-        # 5. 发送私密选择面板
-        embed = discord.Embed(
-            title="👗 小蛋换装",
-            description=f"**当前穿戴状态:**\n{status_text}\n\n请在下方菜单中选择你喜欢的装饰进行穿戴或更换：",
-            color=0xFFB6C1
-        )
-        # 传入合并后的列表
-        await self._complete_private_response(
-            interaction,
-            embed=embed,
-            view=RoleSelectionView(selectable_roles),
-        )
+        view = RoleSelectionView(selectable_roles)
+        member = await interaction.guild.fetch_member(interaction.user.id)
+        embed = await view.prepare(interaction.guild, member)
+        await self._complete_private_response(interaction, embed=embed, view=view)
 
     @discord.ui.button(label="加速购买", style=discord.ButtonStyle.secondary, emoji="⚡", custom_id="role_main_acceleration", row=1)
     async def acceleration_callback(self, button, interaction: discord.Interaction):
