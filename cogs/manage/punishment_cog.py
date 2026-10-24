@@ -720,17 +720,18 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
         except (discord.Forbidden, discord.HTTPException) as error:
             errors.append(f"禁言失败：{error}")
 
-        newbie_role = guild.get_role(int(NEWBIE_ROLE_ID)) if NEWBIE_ROLE_ID else None
-        if newbie_role and newbie_role in member.roles:
+        from cogs.shared.admission_restore import remember
+        admission_ids = {int(IDS['VERIFICATION_ROLE_ID']), int(IDS['HATCHED_ROLE_ID'])}
+        admission_roles = [role for role in member.roles if role.id in admission_ids]
+        if admission_roles:
             try:
-                await member.remove_roles(newbie_role, reason=reason)
-                action_results.append("已撤掉新兵蛋子身份组")
-            except (discord.Forbidden, discord.HTTPException) as error:
+                remember(member)
+                await member.remove_roles(*admission_roles, reason=reason)
+                action_results.append("已记录并撤下准入身份，重新答题通过后恢复原身份")
+            except Exception as error:
                 errors.append(f"撤身份组失败：{error}")
-        elif newbie_role:
-            action_results.append("未持有新兵蛋子身份组")
         else:
-            errors.append("未配置新兵蛋子身份组")
+            action_results.append("当前未佩戴准入身份，已有恢复记录保留")
 
         strike_count = db.add_strike(target_id)
         punishment_id = db.add_punishment_record(target_id, "third_party_quick", reason)
@@ -806,7 +807,7 @@ class PunishmentCog(commands.Cog, name="处罚系统"):
             target_id=target_id,
             action="third_party_quick",
             reason=reason,
-            action_detail="禁言一天 + 撤掉新兵蛋子身份组 + 警告一次",
+            action_detail="禁言一天 + 暂撤准入身份（答题通过恢复） + 警告一次",
             evidences=cached_attachments,
             notice_url=public_msg.jump_url if public_msg else None,
             punishment_id=punishment_id,

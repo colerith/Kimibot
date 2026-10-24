@@ -159,15 +159,15 @@ class WelcomeCog(commands.Cog):
 
         approved_member = None
         if passed:
-            embed.description += "\n\n🎉 **恭喜通过！**\n✅ 已自动获得【新兵蛋子】身份组，并解锁部分频道。"
-            role = interaction.guild.get_role(IDS["VERIFICATION_ROLE_ID"])
-            if role:
-                try:
-                    member = interaction.guild.get_member(user_id) or await interaction.guild.fetch_member(user_id)
-                    await member.add_roles(role, reason="自助答题通过")
-                    approved_member = member
-                except Exception as e:
-                    print(f"为用户 {user_id} 添加身份组失败: {e}")
+            try:
+                from cogs.shared.admission_restore import restore
+                member = await interaction.guild.fetch_member(user_id)
+                restored_role = await restore(member)
+                embed.description += f"\n\n🎉 **恭喜通过！**\n✅ 已恢复／获得【{restored_role.name}】身份组。"
+                approved_member = member
+            except Exception as e:
+                embed.description += "\n\n答题已通过，但身份恢复失败，请联系管理员或稍后重新答题；原身份记录已保留。"
+                print(f"为用户 {user_id} 恢复身份组失败: {e}")
         else:
             embed.description += f"\n\n❌ **未通过 (需60分)**\n请仔细阅读规则或群公告。\n你可以在 **{RETRY_COOLDOWN // 60}分钟** 后再次尝试。"
 
@@ -200,8 +200,11 @@ class WelcomeCog(commands.Cog):
         # 先完成答题交互，再发送私信，避免私信接口延迟影响结果页面。
         if passed and approved_member:
             try:
+                dm_embed = build_newbie_approved_dm(approved_member, interaction.guild, score)
+                if restored_role.id == int(IDS['HATCHED_ROLE_ID']):
+                    dm_embed = discord.Embed(title="🐣 答题通过，身份已恢复", description="已恢复【破壳而出】身份，欢迎回到社区！", color=0x9BBE9D)
                 await approved_member.send(
-                    embed=build_newbie_approved_dm(approved_member, interaction.guild, score),
+                    embed=dm_embed,
                     view=build_manual_review_link_view() if MANUAL_REVIEW_ENABLED else None,
                 )
             except discord.Forbidden:

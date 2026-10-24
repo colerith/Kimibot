@@ -131,6 +131,8 @@ class ScamBlockerCog(commands.Cog, name="广告拦截"):
             ]
             if removable_roles:
                 try:
+                    from cogs.shared.admission_restore import remember
+                    remember(target_member)
                     await target_member.remove_roles(*removable_roles, reason=reason)
                     result["role_removed"] = True
                 except discord.HTTPException:
