@@ -61,12 +61,14 @@ class PromotionCog(commands.Cog):
             await self.api(channel.edit, archived=False, reason='恢复小蛋晋升记录与审批导航')
         return channel
 
-    async def find_sent(self, channel, row):
+    async def find_sent(self, channel, row, *, classic_only=False):
         """Recover an interrupted send, paging history through the same REST lane."""
         cursor = datetime.fromisoformat(row['created'])
         while True:
             messages = await self.api(channel.history(limit=100, after=cursor, oldest_first=True).flatten)
             for message in messages:
+                if classic_only and (message.id == row.get('message_id') or getattr(getattr(message, 'flags', None), 'is_components_v2', False)):
+                    continue
                 if message.author.id == self.bot.user.id and message_application_id(message) == row['id']:
                     return message
             if len(messages) < 100:
@@ -88,15 +90,81 @@ class PromotionCog(commands.Cog):
             await asyncio.to_thread(store.update, row['id'], send_started=True)
             display = dict(row, status='pending')
             files = [discord.File(path, filename=Path(path).name) for path in row['files']]
-            media = [f'attachment://{Path(path).name}' for path in row['files']]
             try:
-                msg = await self.api(channel.send, files=files, view=ApplicationCard(display, media),
+                msg = await self.api(channel.send, files=files, embed=application_embed(display), view=ReviewView(),
                     allowed_mentions=discord.AllowedMentions.none(), nonce=f'promotion-{row["id"]}', enforce_nonce=True)
                 await asyncio.to_thread(store.update, row['id'], status='pending', message_id=msg.id,
-                                        card_dirty=False, layout_version=2)
+                                        card_dirty=False, layout_version=3)
             finally:
                 for file in files:
                     file.close()
+
+    async def recover_files(self, row, message):
+        attachments = list(getattr(message, 'attachments', []))
+        paths = row.get('files', [])
+        files = []
+        try:
+            if paths:
+                for filename in paths:
+                    path = Path(filename)
+                    if await asyncio.to_thread(path.is_file):
+                        files.append(discord.File(path, filename=path.name))
+                    else:
+                        attachment = next((a for a in attachments if a.filename == path.name), None)
+                        if attachment is None:
+                            raise ValueError(f'申请 #{row["id"]} 缺失原图 {path.name}，请恢复 data/promotion_uploads 后重试。')
+                        files.append(await self.api(attachment.to_file))
+            else:
+                for attachment in attachments:
+                    files.append(await self.api(attachment.to_file))
+            if len(files) < 2:
+                raise ValueError(f'申请 #{row["id"]} 原图不足两张，保留原记录等待恢复。')
+            return files
+        except Exception:
+            for file in files:
+                file.close()
+            raise
+
+    async def update_application_message(self, channel, message, row):
+        # Components V2 cannot be reverted to a classic embed. Replace it only
+        # after recovering every image, then leave a link on the old message.
+        if getattr(getattr(message, 'flags', None), 'is_components_v2', False) or row.get('layout_version') == 2:
+            replacement = await self.find_sent(channel, row, classic_only=True) if row.get('replacement_started') else None
+            if replacement is None:
+                files = await self.recover_files(row, message)
+                try:
+                    await asyncio.to_thread(store.update, row['id'], replacement_started=True)
+                    replacement = await self.api(channel.send, files=files, embed=application_embed(row),
+                        view=ReviewView() if row['status'] == 'pending' else None,
+                        allowed_mentions=discord.AllowedMentions.none(), nonce=f'promotion-v3-{row["id"]}', enforce_nonce=True)
+                finally:
+                    for file in files:
+                        file.close()
+            row = await asyncio.to_thread(store.update, row['id'], message_id=replacement.id,
+                redirect_message_id=message.id, layout_version=3, card_dirty=True)
+        else:
+            attachments = list(getattr(message, 'attachments', []))
+            if len(attachments) < max(2, len(row.get('files', []))):
+                files = await self.recover_files(row, message)
+                try:
+                    await self.api(message.edit, content=None, embeds=[application_embed(row)], files=files, attachments=[],
+                        view=ReviewView() if row['status'] == 'pending' else None, allowed_mentions=discord.AllowedMentions.none())
+                finally:
+                    for file in files:
+                        file.close()
+            else:
+                await self.api(message.edit, content=None, embeds=[application_embed(row)], attachments=attachments,
+                    view=ReviewView() if row['status'] == 'pending' else None, allowed_mentions=discord.AllowedMentions.none())
+        if row.get('redirect_message_id'):
+            old = channel.get_partial_message(row['redirect_message_id'])
+            link = f'https://discord.com/channels/{row["guild_id"]}/{channel.id}/{row["message_id"]}'
+            view = discord.ui.DesignerView(discord.ui.TextDisplay(f'申请 #{row["id"]:06d} 已恢复图片，请查看[完整申请记录]({link})。'), timeout=None)
+            try:
+                await self.api(old.edit, view=view)
+            except discord.NotFound:
+                pass
+            row = await asyncio.to_thread(store.update, row['id'], redirect_message_id=None)
+        return row
 
     async def review(self, interaction, application_id, approved, reason=''):
         if interaction.guild is None or interaction.user.id != interaction.guild.owner_id:
@@ -130,20 +198,21 @@ class PromotionCog(commands.Cog):
                 await self.api(member.add_roles, role, reason=f'服主批准小蛋晋升 #{row["id"]}')
             row = await asyncio.to_thread(store.complete, row['id'])
         card_error = None
-        if (row.get('card_dirty') or row.get('layout_version') != 2) and row.get('message_id'):
+        if (row.get('card_dirty') or row.get('layout_version') != 3) and row.get('message_id'):
             try:
                 channel = await self.channel(row.get('channel_id', store.CHANNEL_ID))
                 message = await self.api(channel.fetch_message, row['message_id'])
-                media = [f'attachment://{attachment.filename}' for attachment in getattr(message, 'attachments', [])]
-                await self.api(message.edit, content=None, embeds=[], view=ApplicationCard(row, media),
-                               allowed_mentions=discord.AllowedMentions.none())
+                row = await self.update_application_message(channel, message, row)
             except discord.NotFound:
-                self.report('申请卡片被删除', ValueError(row['id']))
+                card_error = ValueError(f'申请 #{row["id"]} 消息或附件不存在，尚未完成恢复。')
+                self.report('恢复申请附件', card_error)
             except Exception as error:
                 card_error = error
             if card_error is None:
-                await asyncio.to_thread(store.update, row['id'], card_dirty=False, layout_version=2)
+                await asyncio.to_thread(store.update, row['id'], card_dirty=False, layout_version=3)
         if row['status'] not in ('approved', 'rejected'):
+            if card_error:
+                raise card_error
             return
         log_error = None
         if row.get('log_state') != 'sent':
@@ -305,7 +374,7 @@ class PromotionCog(commands.Cog):
                     try:
                         if row['status'] == 'publishing':
                             await self.publish(row)
-                        elif (row['status'] == 'granting' or row.get('card_dirty') or row.get('layout_version') != 2 or
+                        elif (row['status'] == 'granting' or row.get('card_dirty') or row.get('layout_version') != 3 or
                               (row['status'] in ('approved', 'rejected') and
                                (row.get('log_state') != 'sent' or row.get('dm_state') == 'pending' or
                                 row.get('dm_state') != row.get('logged_dm_state')))):
@@ -323,7 +392,7 @@ class PromotionCog(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         if not self.persistent_views:
-            for view_type in (EntryView, ApplicationCard):
+            for view_type in (EntryView, ReviewView):
                 view = view_type()
                 self.bot.add_view(view)
                 self.persistent_views.append(view)

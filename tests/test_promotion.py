@@ -204,6 +204,41 @@ class PromotionSurpriseTests(StorageFixture, unittest.TestCase):
 
 
 class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_component_card_restores_local_images_as_native_attachments(self):
+        row = self.create()
+        paths = [Path(self.tmp.name) / name for name in ('first.png', 'last.png')]
+        for path in paths:
+            path.write_bytes(b'image-data')
+        row = store.update(row['id'], status='pending', message_id=123, layout_version=2, files=[str(p) for p in paths])
+        cog = PromotionCog.__new__(PromotionCog)
+        message = SimpleNamespace(id=123, attachments=[], flags=SimpleNamespace(is_components_v2=True))
+        old = SimpleNamespace(edit=AsyncMock())
+        channel = SimpleNamespace(id=store.APPLICATION_CHANNEL_ID, send=AsyncMock(return_value=SimpleNamespace(id=456)),
+                                  get_partial_message=Mock(return_value=old))
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        result = await cog.update_application_message(channel, message, row)
+        sent = channel.send.call_args.kwargs
+        self.assertEqual([file.filename for file in sent['files']], ['first.png', 'last.png'])
+        self.assertIn('embed', sent)
+        self.assertFalse(sent['view'].is_components_v2())
+        self.assertEqual(result['message_id'], 456)
+        self.assertIn('/456', str(old.edit.call_args.kwargs['view'].to_components()))
+        self.assertEqual(points.get_user_points(7, 9), 0)
+
+    async def test_missing_originals_do_not_send_empty_replacement(self):
+        row = self.create()
+        row = store.update(row['id'], status='pending', message_id=123, layout_version=2)
+        cog = PromotionCog.__new__(PromotionCog)
+        channel = SimpleNamespace(send=AsyncMock())
+        message = SimpleNamespace(id=123, attachments=[], flags=SimpleNamespace(is_components_v2=True))
+        with self.assertRaises(ValueError):
+            await cog.update_application_message(channel, message, row)
+        channel.send.assert_not_awaited()
+        self.assertEqual(store.get(row['id'])['message_id'], 123)
+        self.assertEqual(store.get(row['id'])['layout_version'], 2)
+
     async def test_application_card_groups_images_and_keeps_review_actions(self):
         row = self.create()
         row.update(status='pending', content='感想\n-# 小蛋晋升申请 #999 · 北京时间')
@@ -237,10 +272,11 @@ class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(views.message_application_id(message), row['id'])
         await cog.process(row)
         kwargs = message.edit.call_args.kwargs
-        self.assertEqual(kwargs['embeds'], [])
+        self.assertEqual(len(kwargs['embeds']), 1)
         self.assertIsNone(kwargs['content'])
-        self.assertIn('attachment://last.png', str(kwargs['view'].to_components()))
-        self.assertEqual(store.get(row['id'])['layout_version'], 2)
+        self.assertEqual(kwargs['attachments'], message.attachments)
+        self.assertFalse(kwargs['view'].is_components_v2())
+        self.assertEqual(store.get(row['id'])['layout_version'], 3)
         await cog.process(store.get(row['id']))
         message.edit.assert_awaited_once()
 
@@ -437,7 +473,7 @@ class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
         role = SimpleNamespace(id=store.ROLE_ID)
         member = SimpleNamespace(roles=[], add_roles=AsyncMock(), send=AsyncMock())
         guild = SimpleNamespace(get_member=lambda _: member, get_role=lambda _: role)
-        card = SimpleNamespace(embeds=[views.application_embed(row)], edit=AsyncMock())
+        card = SimpleNamespace(embeds=[views.application_embed(row)], attachments=[SimpleNamespace(filename='first.png'), SimpleNamespace(filename='last.png')], edit=AsyncMock())
         log_message = SimpleNamespace(id=456, edit=AsyncMock())
         channel = SimpleNamespace(fetch_message=AsyncMock(return_value=card))
         log_channel = SimpleNamespace(send=AsyncMock(return_value=log_message),
