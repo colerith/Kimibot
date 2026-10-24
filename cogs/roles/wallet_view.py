@@ -19,6 +19,7 @@ SOURCE_NAMES = {
     'role_lottery_shell_reward': '抽奖蛋壳奖励', 'role_redeem': '身份组兑换',
     'role_redeem_refund': '兑换退款', 'role_collection_reward': '图鉴奖励',
     'acceleration_card': '加速卡', 'egg_qa_reply': '问答回复', 'egg_qa_self_reply': '问答自答',
+    'promotion_welcome': '破壳赠礼', 'promotion_daily': '破壳每日赠礼',
     'submission_recommendation': '安利投稿', 'submission_repo': 'Repo 投稿',
     'submission_delete_penalty': '删除投稿扣回', 'submission_useful_tier': '投稿有用奖励',
 }

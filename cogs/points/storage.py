@@ -819,6 +819,9 @@ def spend_user_points(
             if previous:
                 return json.loads(previous[0])
         record, key = _db_get_user(connection, user_id, guild_id)
+        if source in ("role_lottery", "role_redeem"):
+            from cogs.promotion.storage import discounted_cost, is_member
+            cost = discounted_cost(cost, is_member(connection, user_id, guild_id))
         balance = _round_shells(record.get("shells", 0))
         if balance < cost:
             return {"success": False, "reason": "insufficient_shells", "cost": cost, "balance": balance}

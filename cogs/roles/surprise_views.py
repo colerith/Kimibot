@@ -6,6 +6,7 @@ import re
 import discord
 
 from cogs.points.storage import format_shells, get_user_points
+from cogs.promotion.storage import quote as promotion_quote
 from . import surprise_storage as store
 from . import storage as roles
 
@@ -75,7 +76,7 @@ class LotteryModeView(OwnerView):
         await interaction.response.defer()
         data, balance = await asyncio.gather(asyncio.to_thread(roles.load_role_data),
             asyncio.to_thread(get_user_points, interaction.user.id, interaction.guild_id))
-        await interaction.edit_original_response(embeds=[build_role_lottery_embed(balance, data)], view=RoleLotteryView())
+        await interaction.edit_original_response(embeds=[await asyncio.to_thread(build_role_lottery_embed, balance, data, interaction.user.id, interaction.guild_id)], view=RoleLotteryView())
 
     @discord.ui.button(label="惊喜抽奖", emoji="🎰", style=discord.ButtonStyle.success)
     async def surprise(self, button, interaction):
@@ -95,16 +96,17 @@ class SurpriseLotteryView(OwnerView):
         cfg, account, balance = await asyncio.gather(asyncio.to_thread(store.get_config, self.guild.id),
             asyncio.to_thread(store.get_account, self.owner_id, self.guild.id),
             asyncio.to_thread(get_user_points, self.owner_id, self.guild.id))
+        unit_cost = await asyncio.to_thread(promotion_quote, self.owner_id, self.guild.id, cfg["cost"])
         _, error = playable_pool(self.guild, cfg)
         for button in (self.spin, self.spin_four, self.spin_ten):
             button.disabled = not cfg["enabled"] or bool(error)
         refund_chance, refund_limits = await asyncio.to_thread(store.refund_rules)
         embed = discord.Embed(title="🎰 奇米蛋 · 惊喜抽奖", color=0xF4B942, description=(
             "## ❔ ┃ ❔ ┃ ❔\n本大王把惊喜藏进转轮里惹！三个图标排排站，一样就把新衣服带回家～\n\n"
-            f"每次 **{format_shells(cfg['cost'])}** 蛋壳 · 基础三图标一致概率 **{cfg['chance']:.2f}%**（跟随普通抽奖）\n"
+            f"每次 **{format_shells(unit_cost)}** 蛋壳 · 基础三图标一致概率 **{cfg['chance']:.2f}%**（跟随普通抽奖）\n"
             f"重复转换 **{cfg['duplicate_shards']}** 碎片 · 当前碎片 **{account['shards']}**\n"
             f"蛋壳余额 **{format_shells(balance)}**\n\n"
-            f"四连 **{format_shells(cfg['cost'] * 4)}** · 十连 **{format_shells(cfg['cost'] * 10)}** 蛋壳\n"
+            f"四连 **{format_shells(unit_cost * 4)}** · 十连 **{format_shells(unit_cost * 10)}** 蛋壳\n"
             f"未中身份组时有 **{refund_chance:.1%}** 概率返还 **{refund_limits['min']:g}–{refund_limits['max']:g}** 蛋壳。\n"
             f"🥚 本大王兜底：最多再 **{store.PITY_LIMIT - account.get('miss_streak', 0)} 抽**必出身份组！\n"
             "每抽都有机会提前中奖；连续 79 抽未中，第 80 抽必出。抽到重复身份组也重置保底。\n"

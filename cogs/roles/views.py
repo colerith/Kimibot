@@ -49,6 +49,7 @@ from .storage import (
     LOTTERY_OUTCOME_SHELLS,
     LOTTERY_OUTCOME_EMPTY,
 )
+from cogs.promotion.storage import quote as promotion_quote
 from cogs.points.storage import (
     format_shells,
     get_user_points,
@@ -739,12 +740,16 @@ def _rules_text() -> str:
     )
 
 
-def build_role_lottery_embed(points: float, role_data: dict) -> discord.Embed:
+def build_role_lottery_embed(points: float, role_data: dict, user_id=None, guild_id=None) -> discord.Embed:
     """Build the user lottery panel with a supplied, current balance."""
     cfg = get_lottery_config(role_data)
     single_cost = max(0.1, float(cfg.get("cost_single", float(getattr(config, "LOTTERY_COST", 1.0)))))
     five_cost = max(single_cost, float(cfg.get("cost_five", float(getattr(config, "LOTTERY_FIVE_COST", 5.0)))))
     ten_cost = max(five_cost, float(cfg.get("cost_ten", float(getattr(config, "LOTTERY_TEN_COST", 10.0)))))
+    if user_id is not None and guild_id is not None:
+        single_cost = promotion_quote(user_id, guild_id, single_cost)
+        five_cost = promotion_quote(user_id, guild_id, five_cost)
+        ten_cost = promotion_quote(user_id, guild_id, ten_cost)
     sign_reward = float(getattr(config, "POINTS_SIGN_REWARD", 1.0))
     post_reward = float(getattr(config, "POINTS_POST_REWARD", 5.0))
     post_daily_cap = float(getattr(config, "POINTS_DAILY_POST_CAP", 15.0))
@@ -1044,6 +1049,8 @@ class RoleLotteryView(discord.ui.View):
         else:
             cost = cost_single * draw_count
 
+        base_cost = cost
+        cost = await asyncio.to_thread(promotion_quote, user.id, guild_id, base_cost)
         current_points, collection_ids, stats_before = await asyncio.gather(
             asyncio.to_thread(get_user_points, user.id, guild_id),
             asyncio.to_thread(get_user_collection, user.id),
@@ -1089,7 +1096,7 @@ class RoleLotteryView(discord.ui.View):
         spend_result = await asyncio.to_thread(
             spend_user_points,
             user.id,
-            cost,
+            base_cost,
             guild_id,
             source="role_lottery",
             reason=f"draw_count={draw_count}",
@@ -1103,6 +1110,7 @@ class RoleLotteryView(discord.ui.View):
                 color=0xF0B232,
             )
 
+        cost = spend_result["cost"]
         outcome_cfg = cfg.get("outcome_weights", {})
         outcome_pool = [LOTTERY_OUTCOME_ROLE, LOTTERY_OUTCOME_SHELLS, LOTTERY_OUTCOME_EMPTY]
         outcome_weights = [
@@ -1658,7 +1666,8 @@ def build_redeem_shop_embed(guild: discord.Guild, user_id: int) -> discord.Embed
         meta = get_redeem_role_config(rid, data)
         if not _redeem_availability(meta)[0]:
             continue
-        lines.append(f"{role.mention} - {_redeem_price_line(meta)}")
+        price = promotion_quote(user_id, guild.id, _effective_redeem_price(meta)[0])
+        lines.append(f"{role.mention} - **{format_shells(price)}** 蛋壳（你的实付价）")
 
     balance = get_user_points(user_id, guild.id)
     monthly = get_monthly_card_status(user_id, guild.id)
@@ -1689,7 +1698,7 @@ def build_redeem_shop_embed(guild: discord.Guild, user_id: int) -> discord.Embed
 
 
 class RedeemRoleSelect(discord.ui.Select):
-    def __init__(self, guild: discord.Guild):
+    def __init__(self, guild: discord.Guild, user_id=None):
         data = load_role_data()
         options = []
         for rid in data.get("redeem_roles", []):
@@ -1701,8 +1710,10 @@ class RedeemRoleSelect(discord.ui.Select):
             if not available:
                 continue
             price, active = _effective_redeem_price(meta)
+            if user_id is not None:
+                price = promotion_quote(user_id, guild.id, price)
             if meta.get("sale_mode") == "limited":
-                desc = f"限时上架 · 原价 {format_shells(price)} 蛋壳"
+                desc = f"限时上架 · 实付价 {format_shells(price)} 蛋壳"
             else:
                 desc = f"{'限时优惠' if active else '当前价格'}: {format_shells(price)} 蛋壳"
             options.append(
@@ -1814,22 +1825,16 @@ class RedeemConfirmButton(discord.ui.Button):
                     f"这个身份组当前不可兑换（{availability_label}），请重新打开商城查看。",
                     ephemeral=True,
                 )
-            price, discount_active = _effective_redeem_price(meta)
-            if balance < price:
-                return await interaction.followup.send(
-                    f"蛋壳不足，兑换 {role.mention} 需要 **{format_shells(price)}** 蛋壳，"
-                    f"你当前只有 **{format_shells(balance)}**。",
-                    ephemeral=True,
-                )
-
-            await asyncio.to_thread(
-                modify_user_points,
-                interaction.user.id,
-                -price,
-                interaction.guild_id,
+            base_price, discount_active = _effective_redeem_price(meta)
+            spent = await asyncio.to_thread(
+                spend_user_points, interaction.user.id, base_price, interaction.guild_id,
                 source="role_redeem",
                 reason=f"role_id={role_id};mode={meta.get('sale_mode', 'permanent')};discount={discount_active}",
             )
+            price = spent["cost"]
+            if not spent["success"]:
+                return await interaction.followup.send(
+                    f"蛋壳不足，需要 **{format_shells(price)}**，当前 **{format_shells(spent['balance'])}**。", ephemeral=True)
             try:
                 await interaction.user.add_roles(role, reason="蛋壳兑换身份组")
             except Exception as exc:
@@ -1871,7 +1876,7 @@ class RedeemShopView(discord.ui.View):
         super().__init__(timeout=300)
         self.user_id = user_id
         self.selected_role_id: int | None = None
-        self.add_item(RedeemRoleSelect(guild))
+        self.add_item(RedeemRoleSelect(guild, user_id))
         self.confirm_button = RedeemConfirmButton(self)
         self.add_item(self.confirm_button)
         self.add_item(MonthlyCardPurchaseButton(guild))
@@ -4937,6 +4942,7 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
             discord.SelectOption(label="入站答题面板", value="welcome_quiz", emoji="📝"),
             discord.SelectOption(label="助力鸣谢消息", value="boost_thanks", emoji="💎"),
             discord.SelectOption(label="论坛统计面板", value="forum_stats", emoji="📊"),
+            discord.SelectOption(label="小蛋晋升面板", value="promotion", emoji="🐣", description="刷新晋升入口与置底审批导航"),
             discord.SelectOption(label="第三方违规提醒文案", value="third_party_notice", emoji="⚠️", description="编辑右键 App 命令发送的提醒正文"),
         ]
         if not config.MANUAL_REVIEW_ENABLED:
@@ -4947,7 +4953,15 @@ class CommunityPanelRefreshSelect(discord.ui.Select):
         await interaction.response.defer(ephemeral=True)
         target = self.values[0]
         try:
-            if target == "third_party_notice":
+            if target == "promotion":
+                cog = self.bot.get_cog("PromotionCog")
+                if not cog:
+                    raise RuntimeError("晋升模块未加载")
+                cog.entry_signature = None
+                await cog.refresh_panels()
+                await interaction.followup.send("✅ 小蛋晋升面板与审批导航已刷新。", ephemeral=True)
+                return
+            elif target == "third_party_notice":
                 from cogs.shared.third_party_notice import load_notice, ThirdPartyNoticeEditView
 
                 content = await asyncio.to_thread(load_notice, interaction.guild_id)

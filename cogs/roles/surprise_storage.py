@@ -204,7 +204,9 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
                     return {"success": False, "reason": "有效奖池不足，请联系管理员配置。"}
                 record, key = points._db_get_user(con, user_id, guild_id)
                 balance = points._round_shells(record.get("shells", 0))
-                total_cost = round(cfg["cost"] * draw_count, 1)
+                from cogs.promotion.storage import discounted_cost, is_member
+                unit_cost = discounted_cost(cfg["cost"], is_member(con, user_id, guild_id))
+                total_cost = round(unit_cost * draw_count, 1)
                 if balance < total_cost:
                     return {"success": False, "reason": f"蛋壳不足：需要 {total_cost:g}，当前 {balance:g}。"}
                 account = _get(con, "surprise_accounts", key, {"owned": [], "shards": 0, "draws": 0})
@@ -223,9 +225,9 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
                         account["owned"] = sorted(set(account["owned"]) | {winner})
                     account["shards"] += shards
                     account["draws"] += 1
-                    balance = points._round_shells(balance - cfg["cost"] + refund)
+                    balance = points._round_shells(balance - unit_cost + refund)
                     row = {"success": True, "reels": reels, "winner": winner, "duplicate": duplicate,
-                           "shards_gained": shards, "shards": account["shards"], "cost": cfg["cost"],
+                           "shards_gained": shards, "shards": account["shards"], "cost": unit_cost,
                            "refund": refund, "balance": balance, "chance": cfg["chance"],
                            "pity_triggered": pity_triggered, "miss_streak": account["miss_streak"],
                            "pity_remaining": PITY_LIMIT - account["miss_streak"]}

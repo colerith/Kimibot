@@ -1,0 +1,280 @@
+import asyncio
+import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+import discord
+from cogs.points import storage as points
+from cogs.promotion import storage as store
+from cogs.promotion import views
+from cogs.promotion.cog import PromotionCog
+from cogs.roles import surprise_storage
+from test_surprise_lottery import StorageFixture
+
+
+class PromotionFixture:
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for name, value in [('POINTS_DB_FILE', str(Path(self.tmp.name) / 'points.sqlite3')),
+                            ('POINTS_DATA_FILE', str(Path(self.tmp.name) / 'points.json')),
+                            ('_POINTS_DB_READY', False)]:
+            p = patch.object(points, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        store.initialize()
+
+    def create(self, user=7, request='one', now=None):
+        return store.create(user, 9, request, '使用感想超过三十字。' * 5,
+                            ['first.png', 'last.png'], '小蛋', now)
+
+
+class PromotionStorageTests(PromotionFixture, unittest.TestCase):
+    def test_staff_detection_uses_owner_or_administrator_permission(self):
+        member = SimpleNamespace(id=1, bot=False, guild=SimpleNamespace(owner_id=1),
+                                 roles=[], guild_permissions=SimpleNamespace(administrator=False))
+        self.assertTrue(store.auto_eligible(member))
+        member.id = 2
+        self.assertFalse(store.auto_eligible(member))
+        member.guild_permissions.administrator = True
+        self.assertTrue(store.auto_eligible(member))
+        member.bot = True
+        self.assertFalse(store.auto_eligible(member))
+
+    def test_test_application_ignores_full_quota_and_existing_benefits(self):
+        store.activate(7, 9)
+        with patch.object(store, '_quota', return_value=100):
+            row = store.create(7, 9, 'staff', '测试感想' * 10, ['a', 'b'], '管理员', is_test=True)
+        self.assertTrue(row['is_test'])
+        self.assertEqual(store.quota(9), 0)
+        with self.assertRaises(ValueError):
+            store.create(7, 9, 'staff-pending', '测试感想' * 10, ['a', 'b'], '管理员', is_test=True)
+        store.update(row['id'], status='pending')
+        store.decide(row['id'], 1, True)
+        store.complete(row['id'])
+        self.assertEqual(points.get_user_points(7, 9), 130)
+        second = store.create(7, 9, 'staff-again', '测试感想' * 10, ['a', 'b'], '管理员', is_test=True)
+        self.assertNotEqual(row['id'], second['id'])
+        self.assertEqual(store.quota(9), 0)
+        self.create(user=8, request='ordinary')
+        self.assertEqual(store.quota(9), 1)
+
+    def test_backfill_and_daily_are_atomic_once_even_after_restart(self):
+        day = datetime(2026, 10, 24, 23, 59, tzinfo=points.TZ_CN)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            granted = list(executor.map(lambda _: store.activate(7, 9, day), range(8)))
+        self.assertEqual(sum(granted), 1)
+        self.assertEqual(points.get_user_points(7, 9), 130)
+        points._POINTS_DB_READY = False
+        store.settle_daily(day + timedelta(minutes=2))
+        self.assertEqual(points.get_user_points(7, 9), 160)
+        store.settle_daily(day + timedelta(minutes=3))
+        self.assertEqual(points.get_user_points(7, 9), 160)
+        store.settle_daily(day + timedelta(days=3))
+        self.assertEqual(points.get_user_points(7, 9), 220)
+        points.save_points_data(points.load_points_data())
+        self.assertFalse(store.activate(7, 9, day + timedelta(days=3)))
+        self.assertEqual(store.quote(7, 9, 10), 8)
+        self.assertEqual(store.quote(7, 10, 10), 10)
+
+    def test_quota_concurrent_and_beijing_midnight(self):
+        before = datetime(2026, 10, 24, 15, 59, tzinfo=timezone.utc)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            def attempt(user):
+                try:
+                    return self.create(user, str(user), before)
+                except ValueError:
+                    return None
+            rows = list(executor.map(attempt, range(105)))
+        self.assertEqual(sum(r is not None for r in rows), 100)
+        self.assertEqual(store.quota(9, before), 100)
+        after = before + timedelta(minutes=1)
+        self.assertEqual(store.quota(9, after), 0)
+        self.assertEqual(self.create(999, 'tomorrow', after)['batch'], '2026-10-25')
+
+    def test_duplicate_submit_review_and_rejection(self):
+        row = self.create()
+        self.assertEqual(self.create()['id'], row['id'])
+        self.assertEqual(store.quota(9), 1)
+        with self.assertRaises(ValueError):
+            self.create(request='different')
+        store.update(row['id'], status='pending', message_id=123)
+        with self.assertRaises(ValueError):
+            store.decide(row['id'], 1, False, '  ')
+        rejected = store.decide(row['id'], 1, False, '请补充首楼及楼层数。')
+        self.assertEqual(rejected['status'], 'rejected')
+        self.assertEqual(rejected['reason'], '请补充首楼及楼层数。')
+        with self.assertRaises(ValueError):
+            store.decide(row['id'], 1, True)
+        self.assertEqual(points.get_user_points(7, 9), 0)
+        second = self.create(request='retry')
+        store.update(second['id'], status='pending')
+        store.decide(second['id'], 1, True)
+        self.assertEqual(points.get_user_points(7, 9), 0)
+        store.complete(second['id'])
+        store.complete(second['id'])
+        self.assertEqual(points.get_user_points(7, 9), 130)
+
+    def test_reward_failure_rolls_back_application_and_credit(self):
+        row = self.create()
+        store.update(row['id'], status='pending')
+        store.decide(row['id'], 1, True)
+        with patch.object(points, '_db_append_transaction', side_effect=RuntimeError('disk full')):
+            with self.assertRaises(RuntimeError):
+                store.complete(row['id'])
+        self.assertEqual(store.get(row['id'])['status'], 'granting')
+        self.assertEqual(points.get_user_points(7, 9), 0)
+        store.complete(row['id'])
+        self.assertEqual(points.get_user_points(7, 9), 130)
+
+    def test_discounts_apply_only_to_role_spends_and_receipt_once(self):
+        store.activate(7, 9)
+        for source in ('role_lottery', 'role_redeem'):
+            result = points.spend_user_points(7, 10, 9, source=source, operation_id=source)
+            self.assertEqual(result['cost'], 8)
+            self.assertEqual(points.spend_user_points(7, 10, 9, source=source, operation_id=source), result)
+        self.assertEqual(points.spend_user_points(7, 10, 9, source='monthly_card_purchase')['cost'], 10)
+        self.assertEqual(points.get_user_points(7, 9), 104)
+        self.assertEqual(store.quote(7, 9, 1), 0.8)
+
+    def test_form_validation_before_reserving_quota(self):
+        for content, files in [('a ' * 29, ['a', 'b']), ('感想' * 30, ['a'])]:
+            with self.assertRaises(ValueError):
+                store.create(7, 9, 'bad', content, files, 'name')
+        self.assertEqual(store.quota(9), 0)
+
+
+class PromotionSurpriseTests(StorageFixture, unittest.TestCase):
+    def test_surprise_ten_draws_cost_eight_and_receipt_replay(self):
+        store.activate(7, 9)
+        before = points.get_user_points(7, 9)
+        result = surprise_storage.settle_spin(7, 9, 'discount-ten', {1}, draw_count=10)
+        self.assertEqual(result['cost'], 8)
+        self.assertTrue(all(r['cost'] == 0.8 for r in result['results']))
+        self.assertEqual(result['balance'], before - 8)
+        self.assertEqual(surprise_storage.settle_spin(7, 9, 'discount-ten', {1}, draw_count=10), result)
+        self.assertEqual(points.get_user_points(7, 9), before - 8)
+
+
+class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_test_approval_does_not_assign_role_or_award_shells(self):
+        row = store.create(7, 9, 'test-only', '测试感想' * 10, ['a', 'b'], '管理员', is_test=True)
+        store.update(row['id'], status='pending')
+        row = store.decide(row['id'], 1, True)
+        cog = PromotionCog.__new__(PromotionCog)
+        guild = SimpleNamespace(get_member=Mock(side_effect=AssertionError('test must not grant role')))
+        cog.bot = SimpleNamespace(get_guild=lambda _: guild)
+        # Stop after completing the decision, before unrelated notification delivery.
+        cog.channel = AsyncMock(side_effect=RuntimeError('notification offline'))
+        cog.bot.get_user = Mock(return_value=SimpleNamespace(send=AsyncMock()))
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        with self.assertRaises(RuntimeError):
+            await cog.process(row)
+        result = store.get(row['id'])
+        self.assertEqual(result['status'], 'approved')
+        self.assertEqual(points.get_user_points(7, 9), 0)
+        self.assertIn('测试记录', views.application_embed(result).description)
+        self.assertIn('测试审批结果', views.result_embed(result).title)
+
+    async def test_form_buttons_and_permissions(self):
+        modal = views.PromotionModal()
+        payload = modal.to_dict()
+        self.assertEqual(modal.uploads.min_values, 2)
+        self.assertEqual(modal.thoughts.min_length, 30)
+        self.assertIn('components', payload)
+        review = views.ReviewView()
+        self.assertEqual([b.label for b in review.children], ['通过申请', '驳回申请'])
+        interaction = SimpleNamespace(user=SimpleNamespace(id=2), guild=SimpleNamespace(owner_id=1),
+                                      response=SimpleNamespace(send_message=AsyncMock()))
+        self.assertFalse(await review.interaction_check(interaction))
+        interaction.user.id = 1
+        self.assertTrue(await review.interaction_check(interaction))
+        self.assertTrue(views.RejectModal(1).reason.required)
+
+    async def test_failed_role_grant_stays_recoverable_without_credit(self):
+        row = self.create()
+        store.update(row['id'], status='pending')
+        row = store.decide(row['id'], 1, True)
+        cog = PromotionCog.__new__(PromotionCog)
+        member = SimpleNamespace(roles=[], add_roles=AsyncMock(side_effect=RuntimeError('network')))
+        guild = SimpleNamespace(get_member=lambda _: member, get_role=lambda _: SimpleNamespace(id=store.ROLE_ID))
+        cog.bot = SimpleNamespace(get_guild=lambda _: guild)
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        with self.assertRaises(RuntimeError):
+            await cog.process(row)
+        self.assertEqual(store.get(row['id'])['status'], 'granting')
+        self.assertEqual(points.get_user_points(7, 9), 0)
+
+    async def test_earliest_navigation_and_cards_fit_limits(self):
+        row = self.create()
+        row.update(status='pending', message_id=123)
+        view = views.BottomView(row)
+        self.assertTrue(view.children[0].url.endswith('/123'))
+        for embed in (views.entry_embed(100), views.application_embed(row)):
+            self.assertLessEqual(len(embed), 6000)
+            self.assertTrue(all(len(f.value) <= 1024 for f in embed.fields))
+
+    async def test_approval_delivers_role_logs_and_dm_once(self):
+        row = self.create()
+        store.update(row['id'], status='pending', message_id=123)
+        row = store.decide(row['id'], 1, True)
+        cog = PromotionCog.__new__(PromotionCog)
+        role = SimpleNamespace(id=store.ROLE_ID)
+        member = SimpleNamespace(roles=[], add_roles=AsyncMock(), send=AsyncMock())
+        guild = SimpleNamespace(get_member=lambda _: member, get_role=lambda _: role)
+        card = SimpleNamespace(embeds=[views.application_embed(row)], edit=AsyncMock())
+        log_message = SimpleNamespace(id=456, edit=AsyncMock())
+        channel = SimpleNamespace(fetch_message=AsyncMock(return_value=card))
+        log_channel = SimpleNamespace(send=AsyncMock(return_value=log_message),
+                                      fetch_message=AsyncMock(return_value=log_message))
+        cog.bot = SimpleNamespace(get_guild=lambda _: guild, get_user=lambda _: member)
+        cog.channel = AsyncMock(side_effect=lambda cid: channel if cid == store.CHANNEL_ID else log_channel)
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        await cog.process(row)
+        completed = store.get(row['id'])
+        self.assertEqual(completed['status'], 'approved')
+        self.assertEqual(completed['dm_state'], 'sent')
+        self.assertEqual(points.get_user_points(7, 9), 130)
+        await cog.process(completed)
+        member.add_roles.assert_awaited_once()
+        member.send.assert_awaited_once()
+        log_channel.send.assert_awaited_once()
+
+    async def test_log_failure_does_not_block_rejection_dm(self):
+        row = self.create()
+        store.update(row['id'], status='pending', card_dirty=False)
+        row = store.decide(row['id'], 1, False, '截图未展示首楼，请补充。')
+        cog = PromotionCog.__new__(PromotionCog)
+        member = SimpleNamespace(send=AsyncMock())
+        cog.bot = SimpleNamespace(get_guild=lambda _: SimpleNamespace(), get_user=lambda _: member)
+        cog.channel = AsyncMock(side_effect=RuntimeError('log unavailable'))
+        async def api(operation, *args, **kwargs):
+            return await operation(*args, **kwargs)
+        cog.api = api
+        with self.assertRaises(RuntimeError):
+            await cog.process(row)
+        member.send.assert_awaited_once()
+        self.assertEqual(store.get(row['id'])['dm_state'], 'sent')
+        self.assertEqual(store.get(row['id'])['log_state'], 'pending')
+        self.assertIn('截图未展示首楼', member.send.call_args.kwargs['embed'].fields[1].value)
+
+    async def test_shared_lane_serializes_requests(self):
+        cog = PromotionCog.__new__(PromotionCog)
+        cog.api_lock = asyncio.Lock()
+        cog.next_request = 0
+        stamps = []
+        async def request():
+            import time
+            stamps.append(time.monotonic())
+        await asyncio.gather(cog.api(request), cog.api(request))
+        self.assertGreaterEqual(stamps[1] - stamps[0], 0.99)
