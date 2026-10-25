@@ -1,7 +1,7 @@
 # cogs/welcome/cog.py
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import asyncio
 import random
 
@@ -72,12 +72,32 @@ class WelcomeCog(commands.Cog):
         # ✨ 修改点：将会话和历史记录作为Cog的实例属性，进行统一管理
         self.sessions = {}
         self.history = {}
+        self.quiz_panel_lock = asyncio.Lock()
+        self.quiz_view_registered = False
 
     @commands.Cog.listener()
     async def on_ready(self):
         # ✨ 修改点：注册持久化视图时，将 Cog 自身实例传入
-        self.bot.add_view(QuizStartView(self))
+        if not self.quiz_view_registered:
+            self.bot.add_view(QuizStartView(self))
+            self.quiz_view_registered = True
+        if not self.quiz_panel_refresh.is_running():
+            self.quiz_panel_refresh.start()
         print("[Welcome & Quiz] Cog loaded and views registered.")
+
+    @tasks.loop(minutes=10)
+    async def quiz_panel_refresh(self):
+        try:
+            await self.deploy_quiz_panel()
+        except Exception as error:
+            print(f"[Welcome] 答题入口刷新失败，将重试: {error!r}")
+
+    @quiz_panel_refresh.before_loop
+    async def before_quiz_panel_refresh(self):
+        await self.bot.wait_until_ready()
+
+    def cog_unload(self):
+        self.quiz_panel_refresh.cancel()
 
     # --- 欢迎新成员与入门指引 ---
     @commands.Cog.listener()
@@ -188,6 +208,10 @@ class WelcomeCog(commands.Cog):
                           f"今日剩余 {3-daily_used} 次；冷却 {RETRY_COOLDOWN // 60} 分钟后可重试。")
             embed.description += f"\n\n❌ **未通过 (需60分，15题答对9题)**\n请仔细阅读规则或群公告。\n{retry_text}"
 
+        from .attempts import quota_text
+        quota_notice = await asyncio.to_thread(quota_text, interaction.guild.id, user_id, test_mode=test_mode)
+        embed.add_field(name="今日答题次数", value=quota_notice, inline=False)
+
         # --- 核心修改部分 ---
         try:
             # 如果是超时，交互对象很旧，只能用 followup 发送新消息
@@ -255,11 +279,15 @@ class WelcomeCog(commands.Cog):
             asyncio.create_task(log_channel.send(embed=log_embed))
 
     async def deploy_quiz_panel(self) -> tuple[bool, str]:
+        async with self.quiz_panel_lock:
+            return await self._sync_quiz_panel()
+
+    async def _sync_quiz_panel(self) -> tuple[bool, str]:
         """供 /社区面板 管理 统一调用。"""
         channel_id = IDS.get("QUIZ_CHANNEL_ID")
         if not channel_id:
             return False, "未在 config.py 中配置 QUIZ_CHANNEL_ID"
-        channel = self.bot.get_channel(channel_id)
+        channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
         if not channel:
             return False, f"找不到配置的频道（ID: {channel_id}）"
         embed = discord.Embed(
@@ -274,11 +302,40 @@ class WelcomeCog(commands.Cog):
                 "• 每人每天最多 3 次，北京时间 00:00 刷新；开考即计次，测试模式除外\n"
                 f"• **答题失败需等待 {RETRY_COOLDOWN // 60} 分钟冷却**\n"
                 "• 账号需注册满30天，且不为可疑账号\n"
-                "• 通过后自动获得 `新兵蛋子` 身份，解锁部分频道\n\n"
+                "• 首次通过发放新兵蛋子；处罚后重答恢复记录中的原身份\n"
+                "• 点击【查看今日次数】查看个人余额；管理员／服主测试不占次数\n\n"
                 "**准备好了吗？点击下方按钮开始！**"
             ),
             color=STYLE["KIMI_YELLOW"]
         )
-        # ✨ 修改点：发送面板时，将 Cog 自身实例传入
-        await channel.send(embed=embed, view=QuizStartView(self))
-        return True, "✅ 入站答题面板已成功发送。"
+        from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
+        key = f"welcome_quiz_panel:{channel_id}"
+        state = await asyncio.to_thread(load_json_namespace, key, legacy_file=None, default={})
+        candidates = []
+        # Preserve the long-lived linked entrance instead of publishing another card.
+        ids = set(state.get("message_ids", [])) | {1499984826931871808}
+        for message_id in ids:
+            try:
+                message = await channel.fetch_message(int(message_id))
+            except discord.NotFound:
+                continue
+            if message.author.id == self.bot.user.id:
+                candidates.append(message)
+        if not state.get("discovered"):
+            async for message in channel.history(limit=200):
+                if (message.author.id == self.bot.user.id and
+                    any(e.title == "📝 新兵蛋子入站答题" for e in message.embeds) and
+                    message.id not in {m.id for m in candidates}):
+                    candidates.append(message)
+        if not candidates:
+            candidates.append(await channel.send(embed=embed, view=QuizStartView(self)))
+        else:
+            for message in candidates:
+                component_ids = {getattr(child, "custom_id", None) for row in message.components for child in row.children}
+                if (not message.embeds or message.embeds[0].to_dict() != embed.to_dict() or
+                    "quiz_entry_quota" not in component_ids):
+                    await message.edit(embed=embed, view=QuizStartView(self))
+                    await asyncio.sleep(1)
+        await asyncio.to_thread(save_json_namespace, key,
+                                {"message_ids": [m.id for m in candidates], "discovered": True})
+        return True, "✅ 入站答题入口已更新，后续会自动同步文案。"

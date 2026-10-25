@@ -59,6 +59,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('测试模式',interaction.edit_original_response.call_args.kwargs['embed'].title)
 
     async def asyncSetUp(self):
+        quota = patch("cogs.welcome.attempts.quota_text", return_value="今日剩余 2/3，测试不占次数")
+        quota.start()
+        self.addCleanup(quota.stop)
         self.question = dict(type='multiple', question='测试', options=dict(A='甲', B='乙', C='丙', D='丁'), answers=['A','C'])
         self.session = dict(questions=[self.question, {'question':'单选','options':dict(A='甲',B='乙'),'answer':'A'}],
             answers={}, drafts={}, lock=asyncio.Lock(), start_time=discord.utils.utcnow())
@@ -66,7 +69,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.view = QuizQuestionView(self.cog, 7, 0)
 
     def interaction(self, values=None):
-        return NS(user=NS(id=7), data={'values': values or []}, response=NS(defer=AsyncMock(),send_message=AsyncMock()),
+        return NS(guild_id=9, guild=NS(id=9), user=NS(id=7), data={'values': values or []}, response=NS(defer=AsyncMock(),send_message=AsyncMock()),
                   followup=NS(send=AsyncMock()),edit_original_response=AsyncMock())
 
     async def test_draft_restore_confirm_and_repeat(self):
@@ -115,7 +118,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         cog._send_public_log = Mock()
         member = NS(send=AsyncMock(), display_name="测试成员", display_avatar=NS(url="https://example.com/avatar.png"))
         interaction = self.interaction()
-        interaction.guild = NS(name="测试社区", fetch_member=AsyncMock(return_value=member))
+        interaction.guild = NS(id=9, name="测试社区", fetch_member=AsyncMock(return_value=member))
         interaction.response.is_done = Mock(return_value=True)
         with patch('cogs.shared.admission_restore.restore', new_callable=AsyncMock,
                    return_value=NS(id=IDS['HATCHED_ROLE_ID'], name='破壳而出')) as restore:

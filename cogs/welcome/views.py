@@ -45,6 +45,15 @@ class QuizStartView(discord.ui.View):
 
         return reasons
 
+    @discord.ui.button(label="查看今日次数", style=discord.ButtonStyle.secondary, emoji="📋", custom_id="quiz_entry_quota")
+    async def quota_callback(self, button, interaction):
+        await interaction.response.defer(ephemeral=True)
+        from .attempts import quota_text
+        test_mode = bool(interaction.guild and (interaction.user.id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator))
+        text = await asyncio.to_thread(quota_text, interaction.guild_id, interaction.user.id, test_mode=test_mode)
+        embed = discord.Embed(title="📝 我的答题入口", description=text + "\n\n每场 15 题，限时 5 分钟，答对 9 题通过。", color=STYLE["KIMI_YELLOW"])
+        await interaction.followup.send(embed=embed, view=QuizStartView(self.cog), ephemeral=True)
+
     @discord.ui.button(label="📝 点击开始答题", style=discord.ButtonStyle.success, custom_id="quiz_entry_start")
     async def start_quiz(self, button: discord.ui.Button, interaction: discord.Interaction):
         try:
@@ -53,6 +62,8 @@ class QuizStartView(discord.ui.View):
             return
         user_id = interaction.user.id
         test_mode = bool(interaction.guild and (user_id == interaction.guild.owner_id or interaction.user.guild_permissions.administrator))
+        from .attempts import quota_text
+        quota_notice = await asyncio.to_thread(quota_text, interaction.guild_id, user_id, test_mode=test_mode)
 
         if not test_mode and has_verification_role(interaction.user):
             return await interaction.followup.send("你已经是新兵蛋子或正式成员啦，不需要再答题咯！", ephemeral=True)
@@ -76,7 +87,7 @@ class QuizStartView(discord.ui.View):
                 view = QuizQuestionView(self.cog, user_id, q_index)
                 embed = view.build_embed(q_index, question, remaining)
                 await interaction.followup.send(
-                    content="⚠️ **检测到你有未完成的答题，已为你恢复进度：**",
+                    content="⚠️ **检测到你有未完成的答题，已为你恢复进度：**\n" + quota_notice,
                     embed=embed, view=view, ephemeral=True
                 )
                 return
@@ -87,10 +98,10 @@ class QuizStartView(discord.ui.View):
         if not test_mode:
             from .attempts import used_today
             if await asyncio.to_thread(used_today, interaction.guild_id, user_id) >= 3:
-                return await interaction.followup.send("今日 3 次答题机会已用完，请等待北京时间次日 00:00 刷新。", ephemeral=True)
+                return await interaction.followup.send(await asyncio.to_thread(quota_text, interaction.guild_id, user_id), ephemeral=True)
         can_start, wait_time = (True, 0) if test_mode else self.cog.check_cooldown(user_id)
         if not can_start:
-            await interaction.followup.send(f"⏳ 答题冷却中！\n请休息一下，再过 **{wait_time // 60}分{wait_time % 60}秒** 才能再次尝试哦。", ephemeral=True)
+            await interaction.followup.send(f"⏳ 答题冷却中！\n请休息一下，再过 **{wait_time // 60}分{wait_time % 60}秒** 才能再次尝试哦。\n" + quota_notice, ephemeral=True)
             return
 
         questions = draw_questions(QUIZ_QUESTIONS)
@@ -99,7 +110,7 @@ class QuizStartView(discord.ui.View):
             from .attempts import reserve, release
             quota_token, daily_used = await asyncio.to_thread(reserve, interaction.guild_id, user_id)
             if quota_token is None:
-                return await interaction.followup.send("今日 3 次答题机会已用完，请等待北京时间次日 00:00 刷新。", ephemeral=True)
+                return await interaction.followup.send(await asyncio.to_thread(quota_text, interaction.guild_id, user_id), ephemeral=True)
             if user_id in self.cog.sessions:
                 await asyncio.to_thread(release, quota_token)
                 return await interaction.followup.send("你已有正在进行的答题，请重新点击入口恢复。", ephemeral=True)
@@ -118,6 +129,8 @@ class QuizStartView(discord.ui.View):
         view = QuizQuestionView(self.cog, user_id, 0)
         embed = view.build_embed(0, questions[0], QUIZ_DURATION)
         try:
+            quota_notice = await asyncio.to_thread(quota_text, interaction.guild_id, user_id, test_mode=test_mode)
+            embed.add_field(name="今日答题次数", value=quota_notice, inline=False)
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         except Exception:
             self.cog.sessions.pop(user_id, None)

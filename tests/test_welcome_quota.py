@@ -34,3 +34,11 @@ class DailyQuotaTests(unittest.TestCase):
         self.assertEqual(attempts.reserve(1,2,midnight)[1],1)
         self.assertEqual(attempts.reserve(1,3,self.day)[1],1)
         self.assertEqual(attempts.reserve(9,2,self.day)[1],1)
+
+    def test_remaining_and_explicit_refresh_time(self):
+        self.assertIn('3/3', attempts.quota_text(1,2,at=self.day))
+        for _ in range(3): attempts.reserve(1,2,self.day)
+        text = attempts.quota_text(1,2,at=self.day)
+        self.assertIn('0/3', text)
+        self.assertIn('2026-10-26 00:00（北京时间）', text)
+        self.assertIn('不占次数', attempts.quota_text(1,2,test_mode=True,at=self.day))
