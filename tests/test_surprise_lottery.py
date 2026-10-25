@@ -43,6 +43,31 @@ class StorageFixture:
 
 
 class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
+    def test_legacy_credit_once_under_concurrent_reads_and_restart(self):
+        with points._points_connection() as con:
+            store._put(con, 'surprise_accounts', '9:7', {'owned': [1], 'shards': 16, 'draws': 30})
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: store.get_account(7, 9, recover=False), range(8)))
+        self.assertEqual(points.get_user_points(7, 9), 36)
+        store.recover_all_rewards()
+        self.assertEqual(points.get_user_points(7, 9), 36)
+        result = store.settle_spin(7, 9, 'after-migration', {1})
+        self.assertTrue(result['duplicate'])
+        self.assertEqual(result['balance'], 36)
+        self.assertEqual(store.get_account(7, 9)['credited_shards'], 17)
+        store.settle_spin(7, 9, 'after-migration', {1})
+        self.assertEqual(points.get_user_points(7, 9), 36)
+
+    def test_backfill_rollback_keeps_retry_safe(self):
+        with points._points_connection() as con:
+            store._put(con, 'surprise_accounts', '9:7', {'owned': [], 'shards': 16, 'draws': 30})
+        with patch.object(store, '_put', side_effect=RuntimeError('interrupted')):
+            with self.assertRaises(RuntimeError):
+                store.get_account(7, 9)
+        self.assertEqual(points.get_user_points(7, 9), 20)
+        store.get_account(7, 9)
+        self.assertEqual(points.get_user_points(7, 9), 36)
+
     def test_native_role_icon_overrides_legacy_placeholder(self):
         role = SimpleNamespace(icon=SimpleNamespace(url="https://example.com/tofu.png", key="icons/tofu"), unicode_emoji=None)
         symbol = ui.symbol_for(role, {"symbol": "🍣"})
@@ -112,8 +137,8 @@ class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
     def test_ten_draw_duplicates_and_full_cost_check(self):
         batch = store.settle_spin(7, 9, "ten", {1}, draw_count=10)
         self.assertEqual(batch["shards"], 9)
-        self.assertEqual(batch["balance"], 10)
-        store.update_config(9, settings={"cost": 3})
+        self.assertEqual(batch["balance"], 19)
+        store.update_config(9, settings={"cost": 5})
         self.assertFalse(store.settle_spin(7, 9, "poor", {1}, draw_count=4)["success"])
         self.assertEqual(store.get_account(7, 9)["draws"], 10)
 
@@ -136,7 +161,7 @@ class SurpriseSettlementTests(StorageFixture, unittest.TestCase):
         self.assertTrue(second["duplicate"])
         self.assertEqual(second["shards"], 1)
         self.assertEqual(store.settle_spin(7, 9, "b", {1}), second)
-        self.assertEqual(points.get_user_points(7, 9), 18)
+        self.assertEqual(points.get_user_points(7, 9), 19)
         account = store.get_account(7, 9)
         self.assertEqual(account["draws"], 2)
         self.assertEqual(account["last_result"], second)
@@ -273,7 +298,7 @@ class SurpriseViewTests(StorageFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("第 10 抽", embeds[5].title)
         self.assertTrue(view.result_next.disabled)
         self.assertEqual(store.get_account(7, 9)["draws"], 10)
-        self.assertEqual(points.get_user_points(7, 9), 10)
+        self.assertEqual(points.get_user_points(7, 9), 19)
 
     async def test_mode_buttons_and_admin_rows(self):
         guild = self.make_guild()

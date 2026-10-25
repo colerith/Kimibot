@@ -96,11 +96,29 @@ def update_config(guild_id, *, settings=None, role_id=None, entry=None, remove=F
         return cfg
 
 
+def _credit_legacy_rewards(con, user_id, guild_id):
+    key = f"{guild_id}:{user_id}"
+    account = _get(con, "surprise_accounts", key, {"owned": [], "shards": 0, "draws": 0})
+    total = int(account.get("shards", 0))
+    credited = int(account.get("credited_shards", 0))
+    delta = max(0, total - credited)
+    if delta:
+        record, wallet_key = points._db_get_user(con, user_id, guild_id)
+        record["shells"] = record["points"] = points._round_shells(record.get("shells", 0) + delta)
+        points._db_append_transaction(con, record, user_id=user_id, guild_id=guild_id,
+            amount=delta, source="surprise_duplicate_backfill", reason="历史惊喜重复奖励补入蛋壳钱包",
+            idempotency_key=f"surprise-backfill:{key}:{total}")
+        points._db_put_user(con, wallet_key, record)
+        account["credited_shards"] = total
+        _put(con, "surprise_accounts", key, account)
+    return account
+
+
 def get_account(user_id, guild_id, *, recover=True):
     _ensure_storage()
     with points._points_connection() as con:
-        result = _get(con, "surprise_accounts", f"{guild_id}:{user_id}",
-                                        {"owned": [], "shards": 0, "draws": 0})
+        con.execute("BEGIN IMMEDIATE")
+        result = _credit_legacy_rewards(con, user_id, guild_id)
     if recover and result["owned"]:
         roles.add_many_to_collection(user_id, result["owned"])
     return result
@@ -131,9 +149,9 @@ def recover_all_rewards():
     with points._points_connection() as con:
         rows = list(con.execute("SELECT item_key, data FROM surprise_state WHERE namespace='surprise_accounts'"))
     for row in rows:
-        record = points._json_load(row["data"], {})
-        if record.get("owned"):
-            roles.add_many_to_collection(int(row["item_key"].split(":")[-1]), record["owned"])
+        guild_id, user_id = map(int, row["item_key"].split(":"))
+        get_account(user_id, guild_id)
+
 
 
 def roll_reels(pool, chance, rng=None):
@@ -189,6 +207,7 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
         owned = set(roles.get_user_collection(user_id)) | set(roles.get_user_redeem_ownership(user_id)) | set(member_role_ids)
         with points._points_connection() as con:
             con.execute("BEGIN IMMEDIATE")
+            _credit_legacy_rewards(con, user_id, guild_id)
             previous = _get(con, "surprise_receipts", receipt_key, None)
             if previous:
                 result = previous
@@ -225,8 +244,9 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
                     if winner:
                         account["owned"] = sorted(set(account["owned"]) | {winner})
                     account["shards"] += shards
+                    account["credited_shards"] = account.get("credited_shards", 0) + shards
                     account["draws"] += 1
-                    balance = points._round_shells(balance - unit_cost + refund)
+                    balance = points._round_shells(balance - unit_cost + refund + shards)
                     row = {"success": True, "reels": reels, "winner": winner, "duplicate": duplicate,
                            "shards_gained": shards, "shards": account["shards"], "cost": unit_cost,
                            "refund": refund, "balance": balance, "chance": cfg["chance"],
@@ -236,19 +256,25 @@ def settle_spin(user_id, guild_id, operation_id, valid_role_ids, member_role_ids
                         row["symbols"] = [symbols[rid] for rid in reels]
                     results.append(row)
                 total_refund = round(sum(r["refund"] for r in results), 1)
-                record["shells"] = record["points"] = points._round_shells(balance - total_refund)
+                total_duplicates = sum(r["shards_gained"] for r in results)
+                record["shells"] = record["points"] = points._round_shells(balance - total_refund - total_duplicates)
                 points._db_append_transaction(con, record, user_id=user_id, guild_id=guild_id,
                     amount=-total_cost, source="surprise_lottery", reason=f"draw_count={draw_count}",
                     idempotency_key=f"surprise:{receipt_key}")
-                record["shells"] = record["points"] = balance
+                record["shells"] = record["points"] = points._round_shells(balance - total_duplicates)
                 if total_refund:
                     points._db_append_transaction(con, record, user_id=user_id, guild_id=guild_id,
                         amount=total_refund, source="surprise_lottery_refund", reason=f"draw_count={draw_count}",
                         idempotency_key=f"surprise-refund:{receipt_key}")
+                record["shells"] = record["points"] = balance
+                if total_duplicates:
+                    points._db_append_transaction(con, record, user_id=user_id, guild_id=guild_id,
+                        amount=total_duplicates, source="surprise_duplicate_reward", reason=f"draw_count={draw_count}",
+                        idempotency_key=f"surprise-duplicate:{receipt_key}")
                 points._db_put_user(con, key, record)
                 result = results[0] if draw_count == 1 else {
                     "success": True, "results": results, "cost": total_cost, "refund": total_refund,
-                    "balance": balance, "shards": account["shards"], "draw_count": draw_count,
+                    "balance": balance, "shards": account["shards"], "shards_gained": total_duplicates, "draw_count": draw_count,
                     "pity_remaining": PITY_LIMIT - account["miss_streak"]}
                 account["last_result"] = result
                 _put(con, "surprise_accounts", key, account)

@@ -109,6 +109,7 @@ class SurpriseLotteryView(OwnerView):
         cfg, account, balance = await asyncio.gather(asyncio.to_thread(store.get_config, self.guild.id),
             asyncio.to_thread(store.get_account, self.owner_id, self.guild.id),
             asyncio.to_thread(get_user_points, self.owner_id, self.guild.id))
+        balance = await asyncio.to_thread(get_user_points, self.owner_id, self.guild.id)
         unit_cost = await asyncio.to_thread(promotion_quote, self.owner_id, self.guild.id, cfg["cost"])
         _, error = playable_pool(self.guild, cfg)
         for button in (self.spin, self.spin_four, self.spin_ten):
@@ -117,13 +118,13 @@ class SurpriseLotteryView(OwnerView):
         embed = discord.Embed(title="🎰 奇米蛋 · 惊喜抽奖", color=0xF4B942, description=(
             "## ❔ ┃ ❔ ┃ ❔\n本大王把惊喜藏进转轮里惹！三个图标排排站，一样就把新衣服带回家～\n\n"
             f"每次 **{format_shells(unit_cost)}** 蛋壳 · 基础三图标一致概率 **{cfg['chance']:.2f}%**（取普通概率与 3% 中较低值）\n"
-            f"重复转换 **{cfg['duplicate_shards']}** 蛋壳 · 当前蛋壳 **{account['shards']}**\n"
+            f"重复转换 **{cfg['duplicate_shards']}** 蛋壳 · 累计重复奖励 **{account['shards']}** 蛋壳\n"
             f"蛋壳余额 **{format_shells(balance)}**\n\n"
             f"四连 **{format_shells(unit_cost * 4)}** · 十连 **{format_shells(unit_cost * 10)}** 蛋壳\n"
             f"未中身份组时有 **{refund_chance:.1%}** 概率返还 **{refund_limits['min']:g}–{refund_limits['max']:g}** 蛋壳。\n"
             f"🥚 本大王兜底：最多再 **{store.PITY_LIMIT - account.get('miss_streak', 0)} 抽**必出身份组！\n"
             "每抽都有机会提前中奖；连续 79 抽未中，第 80 抽必出。抽到重复身份组也重置保底。\n"
-            "惊喜保底独立计算，不影响普通抽奖。蛋壳暂只累计和查询。"))
+            "惊喜保底独立计算，不影响普通抽奖。重复奖励直接计入蛋壳钱包。"))
         if not cfg["enabled"] or error:
             embed.add_field(name="当前状态", value="暂未开放" if not cfg["enabled"] else error, inline=False)
         return embed
@@ -213,7 +214,7 @@ class SurpriseLotteryView(OwnerView):
                 label = f"返还 {format_shells(row.get('refund', 0))} 蛋壳" if row.get("refund") else "未中奖"
             summary.append(f"**{index:02d}** {label}" + (" · 保底" if row.get("pity_triggered") else ""))
         header = discord.Embed(title=f"🎰 奇米蛋 · {len(rows)} 连惊喜战报", description="\n".join(summary), color=0xF4B942)
-        header.add_field(name="本次结算", value=f"消耗 {format_shells(result['cost'])} · 返还 {format_shells(result.get('refund', 0))} 蛋壳\n余额 {format_shells(result['balance'])} · 蛋壳 {result['shards']} · 最多再 {result['pity_remaining']} 抽必出", inline=False)
+        header.add_field(name="本次结算", value=f"消耗 {format_shells(result['cost'])} · 返还 {format_shells(result.get('refund', 0))} 蛋壳\n余额 {format_shells(result['balance'])} · 本次重复奖励 {result.get('shards_gained', 0)} 蛋壳 · 最多再 {result['pity_remaining']} 抽必出", inline=False)
         header.set_footer(text=f"第 {self.result_page + 1}/{math.ceil(len(rows) / 2)} 页 · 每页两抽 · 翻页不消耗蛋壳")
         embeds = [header]
         start = self.result_page * 2
@@ -257,7 +258,7 @@ class SurpriseLotteryView(OwnerView):
             status += f"\n🥚 本大王捡回 **{format_shells(result['refund'])}** 蛋壳给你啦～"
         embed = discord.Embed(title="🎰 奇米蛋的惊喜揭晓啦！", description=f"## {slots}\n{status}\n\n"
             f"本次消耗 **{format_shells(result['cost'])}** 蛋壳 · 结算余额 **{format_shells(result['balance'])}**\n"
-            f"结算蛋壳余额 **{result['shards']}**", color=0xF4B942 if winner else 0x95A5A6)
+            f"本抽重复奖励 **{result['shards_gained']}** 蛋壳", color=0xF4B942 if winner else 0x95A5A6)
         if "pity_remaining" in result:
             embed.add_field(name="🥚 本大王的 80 抽约定", value=(
                 ("这抽触发大保底，三个图标乖乖排好队啦！\n" if result.get("pity_triggered") else "")
@@ -270,7 +271,7 @@ class SurpriseLotteryView(OwnerView):
             embeds.append(reel)
         return embeds
 
-    @discord.ui.button(label="奖池列表 / 我的蛋壳", emoji="📚")
+    @discord.ui.button(label="奖池列表 / 重复奖励", emoji="📚")
     async def catalog(self, button, interaction):
         await interaction.response.defer()
         view = SurpriseCatalogView(self.owner_id, self.guild)
@@ -307,8 +308,8 @@ class SurpriseCatalogView(OwnerView):
         pages = max(1, math.ceil(len(entries) / 10))
         self.page = max(0, min(self.page, pages - 1))
         self.prev.disabled, self.next.disabled = self.page == 0, self.page == pages - 1
-        embed = discord.Embed(title="📚 惊喜抽奖奖池", description=f"我的蛋壳：**{account['shards']}** · 累计 **{account['draws']}** 抽\n"
-            f"基础中奖率 **{cfg['chance']:.2f}%**（取普通概率与 3% 中较低值） · 最多再 **{store.PITY_LIMIT - account.get('miss_streak', 0)} 抽**必出！\n蛋壳暂只累计和查询。", color=0xBB8FCE)
+        embed = discord.Embed(title="📚 惊喜抽奖奖池", description=f"累计重复奖励：**{account['shards']}** 蛋壳 · 累计 **{account['draws']}** 抽\n"
+            f"基础中奖率 **{cfg['chance']:.2f}%**（取普通概率与 3% 中较低值） · 最多再 **{store.PITY_LIMIT - account.get('miss_streak', 0)} 抽**必出！\n重复奖励直接计入蛋壳钱包。", color=0xBB8FCE)
         for role, entry, symbol in entries[self.page * 10:(self.page + 1) * 10]:
             chance = 100 if account.get("miss_streak", 0) >= store.PITY_LIMIT - 1 else cfg["chance"]
             probability = chance * entry["weight"] / total_weight if total_weight else 0
