@@ -74,9 +74,9 @@ def update_config(guild_id, *, settings=None, role_id=None, entry=None, remove=F
                     continue
                 value = float(settings[name])
                 if not math.isfinite(value) or value < 0:
-                    raise ValueError("费用、概率与碎片必须是非负有限数字。")
+                    raise ValueError("费用、概率与蛋壳必须是非负有限数字。")
                 if name == "duplicate_shards" and (value != int(value) or value < 1 or value > 1000000):
-                    raise ValueError("重复奖励碎片应为 1–1000000 的整数。")
+                    raise ValueError("重复奖励蛋壳应为 1–1000000 的整数。")
                 cfg[name] = int(value) if name == "duplicate_shards" else round(value, 1 if name == "cost" else 4)
             if "enabled" in settings:
                 cfg["enabled"] = bool(settings["enabled"])
