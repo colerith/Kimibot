@@ -934,7 +934,9 @@ def settle_kimi_daily_event(user_id: int, guild_id: int, action: str, day: str) 
         if previous:
             return json.loads(previous[0])
         # Integer tenths avoid floating-point drift; rewards and penalties are equally likely.
-        requested = random.choice((-1, 1)) * random.randint(1, 100) / 10
+        direction = random.choice((-1, 1))
+        max_tenths = 50 if action == "fortune" and direction < 0 else 100
+        requested = direction * random.randint(1, max_tenths) / 10
         requested, festival_bonus, festival_multiplier = apply_festival_bonus(guild_id, requested)
         record, key = _db_get_user(connection, user_id, guild_id)
         before = _round_shells(record.get("shells", 0))

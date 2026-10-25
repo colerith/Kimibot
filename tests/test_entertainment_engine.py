@@ -90,7 +90,7 @@ class GameTests(unittest.TestCase):
     def test_penalty_clamps_and_cannot_retry_after_topup(self):
         game = Entertainment(self.path, 'discord')
         points.modify_user_points(2, 0.3, 1)
-        with patch.object(points.random, 'choice', return_value=-1), patch.object(points.random, 'randint', return_value=100):
+        with patch.object(points.random, 'choice', return_value=-1), patch.object(points.random, 'randint', return_value=50):
             first = game.handle(1, 2, '今日运势', 1, self.now)
         self.assertIn('实际：-0.3', first)
         self.assertIn('余额不足', first)
@@ -106,6 +106,19 @@ class GameTests(unittest.TestCase):
         with patch.object(points.random, 'choice', return_value=1), patch.object(points.random, 'randint', return_value=1):
             result = points.settle_kimi_daily_event(2, 1, 'fortune', '2026-09-11')
         self.assertEqual(result, {'requested': 0.1, 'actual': 0.1, 'balance': 0.1})
+
+    def test_fortune_penalty_cap_and_other_ranges(self):
+        points.modify_user_points(2, 100, 1)
+        for day, action, direction, expected in [
+            ('2026-09-11', 'fortune', -1, -5),
+            ('2026-09-12', 'fortune', 1, 10),
+            ('2026-09-13', 'status', -1, -10),
+        ]:
+            with patch.object(points.random, 'choice', return_value=direction), \
+                 patch.object(points.random, 'randint', side_effect=lambda low, high: high):
+                result = points.settle_kimi_daily_event(2, 1, action, day)
+            self.assertEqual(result['requested'], expected)
+            self.assertEqual(result['actual'], expected)
 
     def test_daily_event_rollback_and_game_failure_retry(self):
         game = Entertainment(self.path, 'discord')
