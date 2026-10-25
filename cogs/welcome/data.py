@@ -1,4 +1,5 @@
-# cogs/welcome/data.py
+# 酒馆准入题库：114 道单选、36 道多选。来源与解析见各题。
+# Wiki 作者：贝露凛倾；修订说明见 docs/quiz-wiki-update.md。
 
 QUIZ_QUESTIONS = [
     {
@@ -36,14 +37,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 4,
-        "question": "角色卡片通常支持导入的图片格式是？",
+        "question": "以下哪组文件可作为常见的角色卡导入格式？",
         "options": {
-            "A": "仅支持 .png",
-            "B": "仅支持 .webp",
-            "C": "仅支持 .json 纯文本",
-            "D": "PNG (含元数据) 和 JSON 均支持"
+            "A": "任意 JPG 截图",
+            "B": "带角色数据的 PNG 或角色卡 JSON",
+            "C": "任意改名为 PNG 的图片",
+            "D": "只有纯文本 TXT"
         },
-        "answer": "D"
+        "answer": "B",
+        "explanation": "图片须保留角色数据；格式名称本身不能保证可导入。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 5,
@@ -80,14 +86,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 8,
-        "question": "如果AI开始无限重复同一句话或陷入死循环，你应该优先调高哪个参数？",
+        "question": "模型反复重复同一句话时，哪种排查方式更合理？",
         "options": {
-            "A": "Repetition Penalty (重复惩罚)",
-            "B": "Context Limit (上下文限制)",
-            "C": "Temperature (温度)",
-            "D": "Max Response Length (最大回复长度)"
+            "A": "把所有惩罚参数直接拉满",
+            "B": "删掉全部聊天记录",
+            "C": "先检查提示词与重复上下文，再按模型支持范围调整参数",
+            "D": "更换头像即可解决"
         },
-        "answer": "A"
+        "answer": "C",
+        "explanation": "避免把某一个采样参数当作适用于所有模型的修复方法。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 9,
@@ -102,36 +113,52 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 10,
-        "question": "在世界书中，为了确保像“状态栏”或“背包系统”这种需要常驻显示的内容不被遗忘，通常设置策略是？",
+        "question": "世界书内容没有进入请求，应优先检查什么？",
         "options": {
-            "A": "设置极低的触发概率",
-            "B": "放在世界书里设为系统d并选择深度",
-            "C": "把它写在第一条消息里",
-            "D": "每隔几句手动发送一遍"
+            "A": "角色头像大小",
+            "B": "浏览器壁纸",
+            "C": "API 密钥长度",
+            "D": "世界书关联、条目启用、触发条件与预算"
         },
-        "answer": "B"
+        "answer": "D",
+        "explanation": "条目的插入位置不等于触发条件，也不保证模型遵循。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/worldinfo/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 11,
-        "question": "如果想要AI扮演你自己（用户）进行说话，或者帮AI写下一段剧情，应该使用什么功能？",
+        "question": "Impersonate（代写用户发言）主要用于什么？",
         "options": {
-            "A": "Impersonate (伪装/扮演)",
-            "B": "Regenerate (重新生成)",
-            "C": "Continue (继续)",
-            "D": "Review (审查)"
+            "A": "生成一段用户角色的发言草稿",
+            "B": "让模型接着最后一条 AI 消息继续写",
+            "C": "切换 API 供应商",
+            "D": "永久修改角色卡作者"
         },
-        "answer": "A"
+        "answer": "A",
+        "explanation": "用户角色与 AI 角色是不同的发言身份。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/personas/",
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 12,
-        "question": "“Jailbreak”（越狱/破限）在酒馆语境下指的是？",
+        "question": "关于提示词中的“破限”说法，哪项更准确？",
         "options": {
-            "A": "破解酒馆软件的收费版",
-            "B": "可以绕过模型安全限制的提示词",
-            "C": "给酒馆安装第三方插件",
-            "D": "把酒馆部署到苹果手机上"
+            "A": "启用后必定取消模型限制",
+            "B": "是一类尝试影响模型回应的提示词，效果并不保证",
+            "C": "会自动增加 API 额度",
+            "D": "等于替换了上游模型权重"
         },
-        "answer": "B"
+        "answer": "B",
+        "explanation": "提示词会影响请求，但不能保证模型输出或改变供应商规则。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 13,
@@ -157,14 +184,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 15,
-        "question": "在API设置中，“Context Limit”（上下文上限）设置得过高（超过模型支持范围）会导致什么？",
+        "question": "请求报错提示超过模型上下文上限时，应怎样处理？",
         "options": {
-            "A": "AI变得更聪明",
-            "B": "API报错无法回复",
-            "C": "生成速度变快",
-            "D": "自动切换到备用模型"
+            "A": "只修改界面上显示的上限数字",
+            "B": "反复发送原请求",
+            "C": "按实际模型限制减少输入并合理预留输出空间",
+            "D": "提高显示的历史消息数量"
         },
-        "answer": "B"
+        "answer": "C",
+        "explanation": "设置值不能扩大模型实际支持的容量。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 16,
@@ -190,14 +222,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 18,
-        "question": "关于“预设”（Preset），以下说法正确的是？",
+        "question": "聊天补全预设通常用于配置什么？",
         "options": {
-            "A": "预设是用来修改酒馆背景颜色的",
-            "B": "预设是一种复杂的提示词工程",
-            "C": "预设就是角色卡",
-            "D": "每个角色卡都自带一个锁定的预设，不能更改"
+            "A": "只保存人物头像",
+            "B": "把模型安装到浏览器",
+            "C": "替代所有角色卡",
+            "D": "提示词条目及相关生成参数"
         },
-        "answer": "B"
+        "answer": "D",
+        "explanation": "预设属于请求配置，角色卡和模型仍有各自作用。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 19,
@@ -256,36 +293,51 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 24,
-        "question": "关于SillyTavern的“分支”（Branching）功能，描述正确的是？",
+        "question": "在聊天记录某一层创建剧情分支，通常意味着什么？",
         "options": {
-            "A": "它可以像树状图一样，从某条消息分叉出不同的剧情走向",
-            "B": "它是指软件的更新分支",
-            "C": "它是用来给文本分段的",
-            "D": "A 和 B 在不同语境下都对，但在聊天功能中指 A"
+            "A": "从该处建立另一份聊天走向，保留原分支",
+            "B": "删除此前所有对话",
+            "C": "自动修改模型版本",
+            "D": "将角色卡上传给所有用户"
         },
-        "answer": "D"
+        "answer": "A",
+        "explanation": "聊天分支用于探索不同后续，不是 Git 分支。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 25,
-        "question": "“Token”在AI对话中通常指的是？",
+        "question": "关于 Token 的说法，哪项正确？",
         "options": {
-            "A": "一种加密货币",
-            "B": "AI处理文本的最小单位",
-            "C": "API的登录密码",
-            "D": "酒馆的皮肤币"
+            "A": "一个 Token 永远等于一个汉字",
+            "B": "它是分词器划分的文本单位，不固定等于字数",
+            "C": "只用于统计图片数量",
+            "D": "与输入和输出长度无关"
         },
-        "answer": "B"
+        "answer": "B",
+        "explanation": "不同文本与分词器的计数可能不同。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/advancedformatting/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 26,
-        "question": "如果你的世界书（Lorebook）条目很多，为了节省Token，应该开启什么功能？",
+        "question": "希望世界书更节省上下文，首先应考虑什么？",
         "options": {
-            "A": "Recursive Scanning (递归扫描)",
-            "B": "Vector Storage (向量存储)",
-            "C": "Text Translation (文本翻译)",
-            "D": "Image Generation (图像生成)"
+            "A": "把每条内容都设为常驻",
+            "B": "重复导入同一本世界书",
+            "C": "精简内容并检查触发条件、扫描范围与预算",
+            "D": "必须安装向量扩展才能使用世界书"
         },
-        "answer": "B"
+        "answer": "C",
+        "explanation": "向量检索并非普通世界书运行的必要条件。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/worldinfo/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 27,
@@ -311,25 +363,35 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 29,
-        "question": "“User Persona”（用户人设）在哪里设置？",
+        "question": "要修改自己参与聊天时的名字、头像与人设，应使用什么？",
         "options": {
-            "A": "每次聊天时直接告诉AI",
-            "B": "在顶部的用户设置面板中",
-            "C": "必须写在每个角色卡的备注里",
-            "D": "在config.yaml文件里修改"
+            "A": "模型采样配置",
+            "B": "角色卡作者元数据",
+            "C": "背景图片设置",
+            "D": "用户角色管理（Persona Management）"
         },
-        "answer": "B"
+        "answer": "D",
+        "explanation": "用户角色管理用于设置用户在聊天中扮演的身份。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/personas/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 30,
-        "question": "SillyTavern的“Data Bank”或“Vector Storage”主要解决了什么问题？",
+        "question": "Data Bank 配合检索增强生成，主要做什么？",
         "options": {
-            "A": "解决了API连接不稳定的问题",
-            "B": "解决了模型不够聪明的问题",
-            "C": "解决了长对话后AI记忆丢失问题",
-            "D": "解决了图片加载慢的问题"
+            "A": "为请求提供相关文档内容",
+            "B": "保证模型永久记住全部历史",
+            "C": "自动训练上游模型",
+            "D": "把 API 变成离线服务"
         },
-        "answer": "C"
+        "answer": "A",
+        "explanation": "检索提供额外上下文，不等于无限记忆。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/data-bank/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 31,
@@ -344,25 +406,35 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 32,
-        "question": "如果想要在聊天中发送图片给AI看，需要？",
+        "question": "想让模型理解图片内容，需要满足什么条件？",
         "options": {
-            "A": "打开【发送内联媒体】选项",
-            "B": "把图片转成Base64代码发过去",
-            "C": "对着屏幕大声描述图片",
-            "D": "SillyTavern不支持发送图片"
+            "A": "只需把文件改成 PNG",
+            "B": "当前模型与连接方式支持图像输入，并正确发送图片",
+            "C": "只需安装一个 UI 主题",
+            "D": "任意文本模型都天然支持"
         },
-        "answer": "A"
+        "answer": "B",
+        "explanation": "图片附件的显示与模型接收图像是两回事。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 33,
-        "question": "“System Prompt”（系统提示词）通常处于什么样的优先级？",
+        "question": "系统提示词设置好后，是否能保证模型完全遵循？",
         "options": {
-            "A": "最低，AI基本不看",
-            "B": "最高或极高，AI会优先遵循",
-            "C": "中等，仅次于用户输入",
-            "D": "无效，新版酒馆已移除"
+            "A": "可以，所有模型都无条件遵循",
+            "B": "只有提高输出长度才可保证",
+            "C": "不能，还受模型能力、接口和其他上下文影响",
+            "D": "只要全用大写就能保证"
         },
-        "answer": "B"
+        "answer": "C",
+        "explanation": "应检查实际发出的提示词，并测试模型表现。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 34,
@@ -388,25 +460,35 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 36,
-        "question": "如果你的酒馆界面突然无法点击，或者布局乱了，最有效的重置方法是？",
+        "question": "更换 UI 主题后界面异常，较合理的第一步是什么？",
         "options": {
-            "A": "重装系统",
-            "B": "刷新网页（F5）",
-            "C": "选择“Reset UI Settings”（重置UI设置）",
-            "D": "更换鼠标"
+            "A": "立即删除整个 data 目录",
+            "B": "重新申请 API 密钥",
+            "C": "清空所有角色卡",
+            "D": "先回退该主题并排查相关美化设置"
         },
-        "answer": "C"
+        "answer": "D",
+        "explanation": "先隔离最近的界面改动，避免无关的数据损失。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 37,
-        "question": "自动解析有什么作用？",
+        "question": "酒馆的推理内容解析功能主要用于什么？",
         "options": {
-            "A": "隐藏thinking思维链",
-            "B": "让AI自动生成图片",
-            "C": "自动识别并执行角色指令",
-            "D": "删除多余的对话内容"
+            "A": "识别接口或格式支持的推理内容并单独呈现",
+            "B": "提高 API 每日额度",
+            "C": "保证模型回答正确",
+            "D": "为所有模型开启隐藏能力"
         },
-        "answer": "A"
+        "answer": "A",
+        "explanation": "推理的返回形式因模型和接口而异，不一定都是同一标签。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 38,
@@ -421,14 +503,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 39,
-        "question": "SillyTavern支持“热修补”或“热更新”，通常通过什么方式更新到最新版？",
+        "question": "通过 Git 安装的酒馆准备更新时，哪种做法更稳妥？",
         "options": {
-            "A": "必须删掉文件夹重新下载",
-            "B": "使用 `git pull` 命令",
-            "C": "等待作者发邮件",
-            "D": "自动更新，无法关闭"
+            "A": "不备份并强制覆盖所有文件",
+            "B": "备份实际数据目录、检查本地修改，再使用对应更新流程",
+            "C": "只替换浏览器缓存",
+            "D": "删除角色卡来加快更新"
         },
-        "answer": "B"
+        "answer": "B",
+        "explanation": "更新方式取决于安装方式，不能把 git pull 当成所有安装的通用步骤。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 40,
@@ -465,14 +552,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 43,
-        "question": "如果API连接测试显示“Valid”但无法生成消息，最可能的原因是？",
+        "question": "连接测试成功但正式请求失败，下一步应怎么做？",
         "options": {
-            "A": "网络断了",
-            "B": "预设参数设置不合理或额度已用尽",
-            "C": "键盘坏了",
-            "D": "屏幕分辨率不支持"
+            "A": "认定所有参数都一定正确",
+            "B": "立即购买第三方密钥",
+            "C": "查看完整错误和日志，核对模型、额度及请求参数",
+            "D": "只更换聊天背景"
         },
-        "answer": "B"
+        "answer": "C",
+        "explanation": "连接测试成功不能证明完整生成请求一定成功。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 44,
@@ -487,14 +579,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 45,
-        "question": "对于Gemini等容易被审查的模型，社区常用的“破限”手段通常涉及？",
+        "question": "预设要求配置特定的推理标签或配套正则时，应如何处理？",
         "options": {
-            "A": "使用“显式内容”开关",
-            "B": "在预设中加入“防截断”相关逻辑",
-            "C": "给模型发红包",
-            "D": "不停地刷新页面"
+            "A": "同时启用所有历史正则",
+            "B": "随意复制别的模型标签",
+            "C": "认为配置后模型一定不会拒答",
+            "D": "按作者说明核对适用模型与配套设置，再测试"
         },
-        "answer": "B"
+        "answer": "D",
+        "explanation": "配套设置主要解决兼容与展示问题，不保证改变模型限制。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 46,
@@ -509,14 +606,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 47,
-        "question": "“Quiet”或“Thinking”模式（思维链）在近期模型中很流行，它的特征是？",
+        "question": "关于模型推理内容，哪项说法更准确？",
         "options": {
-            "A": "AI完全不说话",
-            "B": "AI在 `<think>` 标签内先进行逻辑推演，再输出最终回复",
-            "C": "AI回复的声音很小",
-            "D": "AI回复速度极慢但字数极少"
+            "A": "不同模型和接口可能用不同形式返回，也可能不提供",
+            "B": "所有模型都必定返回 think 标签",
+            "C": "看不到推理就说明没有消耗 Token",
+            "D": "解析推理会改变 API 余额"
         },
-        "answer": "B"
+        "answer": "A",
+        "explanation": "不能以某一种标签代表所有模型的返回形式。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 48,
@@ -531,27 +633,37 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 49,
-        "question": "如果想要备份你的整个酒馆设置和数据，最简单的办法是？",
+        "question": "备份酒馆用户资料时，应优先确认并备份哪里？",
         "options": {
-            "A": "打包data-user文件夹",
-            "B": "截图保存所有设置",
-            "C": "无法备份",
-            "D": "导出为PDF"
+            "A": "浏览器下载目录即可",
+            "B": "当前实例实际使用的数据目录，默认通常是 data",
+            "C": "只保存桌面快捷方式",
+            "D": "只保存程序图标"
         },
-        "answer": "A"
+        "answer": "B",
+        "explanation": "还应记录扩展来源与自定义配置；远程部署的数据在服务器上。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 50,
-        "question": "关于“Steaming”（流式传输），描述正确的是？",
+        "question": "Streaming（流式传输）的基本含义是什么？",
         "options": {
-            "A": "看视频的功能",
-            "B": "AI生成时会逐字生成",
-            "C": "一种蒸汽朋克的主题皮肤",
-            "D": "一种把聊天记录用水印加密的技术"
+            "A": "每次请求都免费",
+            "B": "只能输出一个字符",
+            "C": "生成过程中分块返回内容",
+            "D": "保证一定比非流式生成更多内容"
         },
-        "answer": "B"
+        "answer": "C",
+        "explanation": "分块不是严格逐字，也不代表改变模型权限。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
-        {
+    {
         "id": 51,
         "question": "根据社区《核心宗旨》，本社区的主要定位和接纳对象是？",
         "options": {
@@ -663,14 +775,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 61,
-        "question": "在SillyTavern的高级格式设置中，“Context Template”（上下文模板）的主要作用是？",
+        "question": "高级格式设置中的 Context Template 主要适用于哪类连接？",
         "options": {
-            "A": "调整聊天气泡的颜色",
-            "B": "决定发给模型的Prompt拼接顺序和结构",
-            "C": "自动把中文翻译成英文",
-            "D": "限制生成的最大Token数"
+            "A": "所有连接都必须依靠它",
+            "B": "只用于图片生成",
+            "C": "只用于语音合成",
+            "D": "文本补全；聊天补全主要使用提示词管理器"
         },
-        "answer": "B"
+        "answer": "D",
+        "explanation": "不要把文本补全模板的配置方式直接套到聊天补全。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/advancedformatting/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 62,
@@ -685,14 +802,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 63,
-        "question": "SillyTavern中的“Lorebook Bias”或“Activation Logic”中的逻辑运算符“NOT” (!) 作用是？",
+        "question": "世界书的附加关键词逻辑应如何理解？",
         "options": {
-            "A": "表示该条目非常重要，必须触发",
-            "B": "如果检测到该关键词，则阻止该条目被激活",
-            "C": "删除该关键词",
-            "D": "高亮显示该关键词"
+            "A": "结合主关键词、附加关键词及选定逻辑共同判断",
+            "B": "任何感叹号都会自动禁止条目",
+            "C": "只由条目标题决定",
+            "D": "设置后完全不受启用状态影响"
         },
-        "answer": "B"
+        "answer": "A",
+        "explanation": "不能把简单符号写法当作所有版本统一的触发规则。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/worldinfo/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 64,
@@ -718,14 +840,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 66,
-        "question": "SillyTavern的“Smart Context”（智能上下文）功能旨在？",
+        "question": "想确认某段历史或设定是否实际发给模型，应该怎么做？",
         "options": {
-            "A": "自动帮用户写回复",
-            "B": "在不丢失主要剧情的前提下，动态移除无关紧要的旧内容以节省Token",
-            "C": "提高模型的智商",
-            "D": "自动连接到OpenAI服务器"
+            "A": "只看聊天窗口是否能滚动到它",
+            "B": "查看实际请求或提示词明细",
+            "C": "只看头像是否加载",
+            "D": "只看最后一条回复长度"
         },
-        "answer": "B"
+        "answer": "B",
+        "explanation": "界面可见内容不一定等于请求上下文。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 67,
@@ -740,25 +867,35 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 68,
-        "question": "在群聊模式中，若想要强行指定下一个发言的角色，应该？",
+        "question": "想查看一次回复实际使用了哪些提示词内容，可以优先使用什么？",
         "options": {
-            "A": "大喊那个角色的名字",
-            "B": "在输入框留空并回车",
-            "C": "点击输入框上方的角色头像或使用 /name 指令",
-            "D": "无法指定，完全随机"
+            "A": "删除预设",
+            "B": "修改用户头像",
+            "C": "回复的提示词明细或请求检查工具",
+            "D": "换一个背景"
         },
-        "answer": "C"
+        "answer": "C",
+        "explanation": "检查实际请求比猜测条目是否生效更可靠。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 69,
-        "question": "关于“Token Budget”（Token预算），如果System Prompt占用了太多Token，会导致？",
+        "question": "系统提示词占用了大量上下文预算，会有什么直接影响？",
         "options": {
-            "A": "AI模型大幅度降智",
-            "B": "生成速度变快",
-            "C": "模型变得更富有",
-            "D": "无法加载任何图片"
+            "A": "永久降低模型参数量",
+            "B": "自动增加余额",
+            "C": "保证生成更长回复",
+            "D": "留给其他输入内容和输出的空间可能减少"
         },
-        "answer": "A"
+        "answer": "D",
+        "explanation": "上下文预算有限，不宜用“必定降智”代替具体解释。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 70,
@@ -784,14 +921,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 72,
-        "question": "如果模型不断输出内容直到达到最大长度被截断，且没有逻辑上的结尾，通常是因为？",
+        "question": "回复到达最大输出长度而被截断时，应优先检查什么？",
         "options": {
-            "A": "模型坏了",
-            "B": "Temperature设置得太低",
-            "C": "模型未能正确生成，即便剧情已结束它仍试图续写",
-            "D": "用户没有充值"
+            "A": "停止原因、输出上限与模型限制",
+            "B": "角色卡头像颜色",
+            "C": "Discord 昵称",
+            "D": "浏览器收藏夹数量"
         },
-        "answer": "C"
+        "answer": "A",
+        "explanation": "不能仅凭截断判断模型为何继续生成。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 73,
@@ -817,14 +959,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 76,
-        "question": "如果想要酒馆正确渲染前端，推荐需要安装哪个插件？",
+        "question": "前端角色卡显示不正常时，首先应如何排查？",
         "options": {
-            "A": "Novel AI生图插件",
-            "B": "酒馆助手/前端助手",
-            "C": "提示词模板",
-            "D": "聊天记录管理器"
+            "A": "所有角色卡都必须安装相同扩展",
+            "B": "查看作者依赖说明，核对扩展、版本与相关正则",
+            "C": "关闭全部安全设置即可",
+            "D": "把 PNG 改名为 JPG"
         },
-        "answer": "B"
+        "answer": "B",
+        "explanation": "依赖取决于卡的实现，不存在适用于所有前端卡的唯一插件。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 77,
@@ -861,14 +1008,19 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 80,
-        "question": "在世界书中，如果使用了逻辑运算符 `AND`（如 keywords: A & B），意味着？",
+        "question": "世界书有主关键词和附加关键词时，排查未触发应检查什么？",
         "options": {
-            "A": "只要出现了A或者B就能触发",
-            "B": "必须在扫描范围内同时检测到A和B两个关键词，该条目才会被激活",
-            "C": "触发后会同时插入条目A和条目B",
-            "D": "这是一个错误的语法"
+            "A": "只看文件大小",
+            "B": "把所有关键词删除",
+            "C": "两组关键词、选定逻辑及扫描范围是否满足条件",
+            "D": "只看角色名字长短"
         },
-        "answer": "B"
+        "answer": "C",
+        "explanation": "附加关键词逻辑与扫描范围共同影响触发。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/worldinfo/"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 81,
@@ -894,25 +1046,35 @@ QUIZ_QUESTIONS = [
     },
     {
         "id": 83,
-        "question": "SillyTavern的“Moving UI”（移动端UI）调整主要为了？",
+        "question": "Moving UI 的主要作用是什么？",
         "options": {
-            "A": "为了在手机小屏幕上更方便地操作侧边栏和按钮",
-            "B": "为了让界面在这动",
-            "C": "为了玩体感游戏",
-            "D": "为了节省流量"
+            "A": "修改模型采样温度",
+            "B": "自动翻译角色卡",
+            "C": "为 API 增加调用额度",
+            "D": "调整界面面板的位置布局"
         },
-        "answer": "A"
+        "answer": "D",
+        "explanation": "它是界面布局功能，不只指某一种设备。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 84,
-        "question": "如果通过“Reverse Proxy”（反向代理）连接API，最大的风险通常是？",
+        "question": "使用不受信任的他人反向代理时，应重点考虑什么？",
         "options": {
-            "A": "速度太快",
-            "B": "代理提供方可能会记录你的聊天内容（日志），且可能随时跑路或更改规则",
-            "C": "无法使用中文",
-            "D": "显卡会过热"
+            "A": "请求内容与密钥可能经过对方系统",
+            "B": "必然提升所有模型质量",
+            "C": "必然免费且稳定",
+            "D": "会自动获得官方授权"
         },
-        "answer": "B"
+        "answer": "A",
+        "explanation": "自建且受控的反代与陌生商家服务不应混为一谈。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f1b6f"
+        ],
+        "reviewed_at": "2026-10-25"
     },
     {
         "id": 85,
@@ -998,7 +1160,7 @@ QUIZ_QUESTIONS = [
             "A": "非模型官方提供、以中转聚合形式收费提供调用服务",
             "B": "分享公益免费的API",
             "C": "模型官方提供的付费API(如DeepSeek)",
-            "D": "自行搭建的模型反代",
+            "D": "自行搭建的模型反代"
         },
         "answer": "A"
     },
@@ -1100,5 +1262,977 @@ QUIZ_QUESTIONS = [
             "D": "作者应当感到荣幸"
         },
         "answer": "B"
+    },
+    {
+        "id": 102,
+        "question": "预设、正则和世界书都可能是 JSON，导入时应怎么区分？",
+        "options": {
+            "A": "按文件大小猜测",
+            "B": "依据资源说明与内容，进入对应功能导入",
+            "C": "全部放入角色卡导入框",
+            "D": "统一改成 PNG"
+        },
+        "answer": "B",
+        "explanation": "相同后缀不代表相同资源类型。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 103,
+        "question": "下载的角色图片丢失了角色数据，改后缀能修复吗？",
+        "options": {
+            "A": "改成 PNG 就能恢复",
+            "B": "重命名作者即可",
+            "C": "不能，应重新获取保留元数据的原文件",
+            "D": "修改头像尺寸即可"
+        },
+        "answer": "C",
+        "explanation": "文件改名不会补回已丢失的元数据。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 104,
+        "question": "切换预设后显示异常，发现旧全局正则仍开启，应怎么做？",
+        "options": {
+            "A": "把全部正则再导入一次",
+            "B": "删除全部世界书",
+            "C": "更换服务器昵称",
+            "D": "核对作用范围并关闭不匹配的旧规则"
+        },
+        "answer": "D",
+        "explanation": "全局规则可能影响新的预设或角色。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7",
+            "https://docs.sillytavern.app/extensions/regex/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 105,
+        "question": "只在编辑器里打开一本世界书，能否据此确认它已对当前聊天生效？",
+        "options": {
+            "A": "不能，还要确认关联、启用和触发条件",
+            "B": "可以，编辑就等于启用",
+            "C": "可以，文件名不为空即可",
+            "D": "可以，与任何条件无关"
+        },
+        "answer": "A",
+        "explanation": "编辑对象与实际激活来源不是同一个概念。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861",
+            "https://docs.sillytavern.app/usage/core-concepts/worldinfo/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 106,
+        "question": "想只给当前角色使用某本世界书，应该怎么做？",
+        "options": {
+            "A": "开启所有全局世界书",
+            "B": "关联到该角色并核对条目条件",
+            "C": "只改世界书文件名",
+            "D": "把书名写进浏览器标签"
+        },
+        "answer": "B",
+        "explanation": "全局关联与角色关联的作用范围不同。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7",
+            "https://docs.sillytavern.app/usage/core-concepts/worldinfo/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 107,
+        "question": "正则设置为仅修改显示时，应如何理解？",
+        "options": {
+            "A": "已经修改上游模型权重",
+            "B": "会增加上下文上限",
+            "C": "显示变化不等于发给模型的提示词也变化",
+            "D": "一定删除磁盘里的原始记录"
+        },
+        "answer": "C",
+        "explanation": "显示处理和提示词处理的作用对象不同。",
+        "sources": [
+            "https://docs.sillytavern.app/extensions/regex/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 108,
+        "question": "排查一条正则替换错误时，适合先用什么方式？",
+        "options": {
+            "A": "删除全部聊天记录",
+            "B": "关闭 API 账户",
+            "C": "反复上传同一角色卡",
+            "D": "在正则测试模式中输入样本文本比较结果"
+        },
+        "answer": "D",
+        "explanation": "先用小样本定位匹配与替换问题。",
+        "sources": [
+            "https://docs.sillytavern.app/extensions/regex/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 109,
+        "question": "快速回复集导入后没有看到按钮，应检查什么？",
+        "options": {
+            "A": "是否启用并加入合适的快速回复范围",
+            "B": "世界书标题是否全大写",
+            "C": "角色头像是否透明",
+            "D": "API 密钥是否以固定字母开头"
+        },
+        "answer": "A",
+        "explanation": "仅导入不一定完成启用或关联。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 110,
+        "question": "更换预设后 API 连接也改变了，应该优先核对什么？",
+        "options": {
+            "A": "背景透明度",
+            "B": "预设是否绑定了连接配置",
+            "C": "聊天气泡颜色",
+            "D": "角色图片宽度"
+        },
+        "answer": "B",
+        "explanation": "预设与连接的关联可能导致切换时连接一起改变。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f1b6f"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 111,
+        "question": "主角色世界书与额外关联的世界书在导出角色卡时有什么区别？",
+        "options": {
+            "A": "所有关联内容都必定自动打包",
+            "B": "所有世界书都无法导出",
+            "C": "主世界书可嵌入角色卡，额外关联不应假定自动随卡导出",
+            "D": "只由角色头像大小决定"
+        },
+        "answer": "C",
+        "explanation": "分享前需核对导出内容与依赖。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/worldinfo/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 112,
+        "question": "Persona 的标题和人设描述有什么区别？",
+        "options": {
+            "A": "标题一定比系统提示词优先",
+            "B": "标题是 API 密钥",
+            "C": "描述只影响头像",
+            "D": "标题用于管理展示，描述可参与提示词构建"
+        },
+        "answer": "D",
+        "explanation": "不要把管理用标题误当成模型收到的人设正文。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/personas/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 113,
+        "question": "角色专属 Data Bank 附件是否会随角色卡自动导出？",
+        "options": {
+            "A": "不应假定会，官方文档说明这些附件不随卡导出",
+            "B": "一定会全部导出",
+            "C": "只要头像为 PNG 就会",
+            "D": "与文件数量奇偶有关"
+        },
+        "answer": "A",
+        "explanation": "角色可用附件与角色卡导出数据不同。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/data-bank/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 114,
+        "question": "导入别人分享的预设前，先阅读什么最有帮助？",
+        "options": {
+            "A": "只看下载次数",
+            "B": "适用模型、版本、配套资源与启用说明",
+            "C": "只看作者头像",
+            "D": "只看文件名长短"
+        },
+        "answer": "B",
+        "explanation": "先确认适用环境，减少导入后的兼容问题。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 115,
+        "question": "正则脚本被禁用后，应如何理解？",
+        "options": {
+            "A": "仍会始终处理全部文本",
+            "B": "仅对某一种语言失效",
+            "C": "不会按正常启用流程执行，需先检查开关",
+            "D": "会自动删除所有历史消息"
+        },
+        "answer": "C",
+        "explanation": "排查时先确认规则是否启用及其作用范围。",
+        "sources": [
+            "https://docs.sillytavern.app/extensions/regex/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 116,
+        "type": "multiple",
+        "question": "资源导入前应检查哪些事项？",
+        "options": {
+            "A": "作者要求的配套扩展或正则",
+            "B": "只要后缀是 JSON 就能混用",
+            "C": "资源类型及对应导入入口",
+            "D": "适用版本与模型"
+        },
+        "answers": [
+            "A",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/f73b7"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 117,
+        "type": "multiple",
+        "question": "世界书没有进入请求时，哪些检查有帮助？",
+        "options": {
+            "A": "角色头像颜色",
+            "B": "预算是否足够",
+            "C": "是否关联到当前上下文",
+            "D": "条目是否启用且满足触发条件"
+        },
+        "answers": [
+            "B",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/worldinfo/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 118,
+        "type": "multiple",
+        "question": "以下哪些属于合理的正则排错步骤？",
+        "options": {
+            "A": "区分显示处理和提示词处理",
+            "B": "检查启用状态和作用范围",
+            "C": "把所有全局规则一起打开",
+            "D": "在测试模式里验证样本文本"
+        },
+        "answers": [
+            "A",
+            "B",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://docs.sillytavern.app/extensions/regex/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 119,
+        "type": "multiple",
+        "question": "用户角色管理（Persona）可以涉及哪些设置？",
+        "options": {
+            "A": "更改上游模型权重",
+            "B": "人设描述",
+            "C": "名字与头像",
+            "D": "将人设绑定到聊天"
+        },
+        "answers": [
+            "B",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/personas/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 120,
+        "type": "multiple",
+        "question": "以下关于请求上下文的说法哪些正确？",
+        "options": {
+            "A": "可能包含历史消息",
+            "B": "只包含最后一条输入",
+            "C": "可能包含角色描述和用户人设",
+            "D": "可能包含激活的世界书内容"
+        },
+        "answers": [
+            "A",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/prompts/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 121,
+        "type": "multiple",
+        "question": "关于 Data Bank 的说法哪些正确？",
+        "options": {
+            "A": "保证无限记忆",
+            "B": "附件可有不同可用范围",
+            "C": "角色附件一定随卡导出",
+            "D": "可管理用于检索的文档"
+        },
+        "answers": [
+            "B",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://docs.sillytavern.app/usage/core-concepts/data-bank/"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 122,
+        "type": "multiple",
+        "question": "哪些操作有助于保留可用的角色卡文件？",
+        "options": {
+            "A": "获取作者提供的原文件",
+            "B": "把 JPG 改名成 PNG",
+            "C": "只保存聊天截图",
+            "D": "确认文件保留角色数据"
+        },
+        "answers": [
+            "A",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 123,
+        "type": "multiple",
+        "question": "哪些资源可能采用 JSON 格式，但需要分别导入？",
+        "options": {
+            "A": "正则规则",
+            "B": "任何视频文件",
+            "C": "世界书",
+            "D": "预设"
+        },
+        "answers": [
+            "A",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 124,
+        "type": "multiple",
+        "question": "哪些做法能减少切换预设后的正则冲突？",
+        "options": {
+            "A": "停用不匹配的旧全局正则",
+            "B": "核对作者配套说明",
+            "C": "无条件启用全部历史规则",
+            "D": "检查规则作用范围"
+        },
+        "answers": [
+            "A",
+            "B",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 125,
+        "type": "multiple",
+        "question": "以下哪些信息有助于排查资源导入问题？",
+        "options": {
+            "A": "具体错误提示",
+            "B": "电脑外壳颜色",
+            "C": "资源类型",
+            "D": "实际文件格式"
+        },
+        "answers": [
+            "A",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 126,
+        "type": "multiple",
+        "question": "关于备份，哪些做法合理？",
+        "options": {
+            "A": "把删除原数据当作备份",
+            "B": "保留独立备份副本",
+            "C": "记录自定义配置与扩展来源",
+            "D": "确认实际数据目录"
+        },
+        "answers": [
+            "B",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 127,
+        "type": "multiple",
+        "question": "更新酒馆之前，哪些准备较合理？",
+        "options": {
+            "A": "备份数据",
+            "B": "直接强制覆盖所有文件",
+            "C": "检查本地修改",
+            "D": "检查安装方式"
+        },
+        "answers": [
+            "A",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 128,
+        "type": "multiple",
+        "question": "关于流式返回，哪些说法正确？",
+        "options": {
+            "A": "生成过程中可分块收到内容",
+            "B": "保证不再受输出上限影响",
+            "C": "等于免费调用接口",
+            "D": "每一块不一定恰好一个字"
+        },
+        "answers": [
+            "A",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 129,
+        "type": "multiple",
+        "question": "关于上下文长度，哪些理解正确？",
+        "options": {
+            "A": "拉满就保证永不遗忘",
+            "B": "设置数字不能扩大模型容量",
+            "C": "要考虑模型实际限制",
+            "D": "长设定会占用输入空间"
+        },
+        "answers": [
+            "B",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 130,
+        "type": "multiple",
+        "question": "遇到上下文超限，哪些处理方向合理？",
+        "options": {
+            "A": "核对模型限制",
+            "B": "合理预留输出空间",
+            "C": "精简发送的输入",
+            "D": "只更改角色头像"
+        },
+        "answers": [
+            "A",
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 131,
+        "type": "multiple",
+        "question": "以下哪些不属于预设能保证做到的事？",
+        "options": {
+            "A": "配置提示词条目",
+            "B": "无限增加 API 额度",
+            "C": "改变上游模型权重",
+            "D": "永久取消供应商规则"
+        },
+        "answers": [
+            "B",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 132,
+        "type": "multiple",
+        "question": "关于聊天分支，哪些说法合理？",
+        "options": {
+            "A": "必定删除原聊天",
+            "B": "不等于更换 Git 分支",
+            "C": "可以探索不同的后续走向",
+            "D": "自动升级模型"
+        },
+        "answers": [
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 133,
+        "type": "multiple",
+        "question": "关于角色与用户人设，哪些说法正确？",
+        "options": {
+            "A": "用户人设描述自己扮演的身份",
+            "B": "两者都可能影响请求内容",
+            "C": "AI 角色卡描述对方角色",
+            "D": "两者只能共用同一份头像"
+        },
+        "answers": [
+            "A",
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 134,
+        "type": "multiple",
+        "question": "关于 Persona 绑定，哪些说法正确？",
+        "options": {
+            "A": "可以绑定到角色",
+            "B": "可以绑定到聊天",
+            "C": "绑定就是训练模型",
+            "D": "绑定会自动分享账号密码"
+        },
+        "answers": [
+            "A",
+            "B"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 135,
+        "type": "multiple",
+        "question": "哪些内容可能在提示词中占用空间？",
+        "options": {
+            "A": "角色设定",
+            "B": "历史对话",
+            "C": "未被发送的本地壁纸文件",
+            "D": "世界书正文"
+        },
+        "answers": [
+            "A",
+            "B",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 136,
+        "type": "multiple",
+        "question": "检查实际提示词有助于确认哪些问题？",
+        "options": {
+            "A": "历史消息是否包含在请求中",
+            "B": "设定是否进入请求",
+            "C": "相关条目是否被插入",
+            "D": "模型是否绝对保证遵循全部内容"
+        },
+        "answers": [
+            "A",
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 137,
+        "type": "multiple",
+        "question": "关于提示词效果，哪些理解合理？",
+        "options": {
+            "A": "需检查实际请求并测试",
+            "B": "不同接口可能需要不同配置",
+            "C": "写成系统消息就百分百服从",
+            "D": "模型能力会影响效果"
+        },
+        "answers": [
+            "A",
+            "B",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 138,
+        "type": "multiple",
+        "question": "关于世界书关联，哪些说法正确？",
+        "options": {
+            "A": "可以存在全局来源",
+            "B": "在编辑器打开就一定生效",
+            "C": "关联后无需考虑任何触发条件",
+            "D": "可以存在角色专属来源"
+        },
+        "answers": [
+            "A",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 139,
+        "type": "multiple",
+        "question": "世界书编辑时，哪些做法更合理？",
+        "options": {
+            "A": "假定条目标题一定发送给模型",
+            "B": "检查关键词和触发逻辑",
+            "C": "控制不必要的长内容",
+            "D": "正文写清楚要提供的信息"
+        },
+        "answers": [
+            "B",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 140,
+        "type": "multiple",
+        "question": "世界书内容缺失时，哪些因素值得核对？",
+        "options": {
+            "A": "可用预算",
+            "B": "是否满足触发条件",
+            "C": "昵称是否含表情",
+            "D": "条目是否被禁用"
+        },
+        "answers": [
+            "A",
+            "B",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 141,
+        "type": "multiple",
+        "question": "分享带世界书的角色时，哪些做法合理？",
+        "options": {
+            "A": "只检查头像好不好看",
+            "B": "单独检查额外关联的依赖",
+            "C": "假定所有外部文件都会自动打包",
+            "D": "核对主世界书是否嵌入"
+        },
+        "answers": [
+            "B",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 142,
+        "type": "multiple",
+        "question": "正则可以用于哪些操作？",
+        "options": {
+            "A": "调整文本显示格式",
+            "B": "替换匹配内容",
+            "C": "查找匹配文本",
+            "D": "增加供应商余额"
+        },
+        "answers": [
+            "A",
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 143,
+        "type": "multiple",
+        "question": "调试正则时，哪些信息值得检查？",
+        "options": {
+            "A": "角色生日是否为今天",
+            "B": "启用状态",
+            "C": "匹配表达式",
+            "D": "替换内容"
+        },
+        "answers": [
+            "B",
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 144,
+        "type": "multiple",
+        "question": "关于正则作用范围，哪些理解正确？",
+        "options": {
+            "A": "任意规则都只影响当前一条消息",
+            "B": "角色专属规则限定于对应角色",
+            "C": "全局规则可能影响多个角色",
+            "D": "显示变化一定意味着原始存档被删除"
+        },
+        "answers": [
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 145,
+        "type": "multiple",
+        "question": "正则测试模式可以帮助完成哪些工作？",
+        "options": {
+            "A": "对比替换后的输出",
+            "B": "输入样本文本",
+            "C": "核对匹配是否符合预期",
+            "D": "提高模型的上下文上限"
+        },
+        "answers": [
+            "A",
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 146,
+        "type": "multiple",
+        "question": "关于 Data Bank 文档，哪些说法正确？",
+        "options": {
+            "A": "所有附件都自动随角色卡导出",
+            "B": "等于修改模型训练数据",
+            "C": "可以有全局范围",
+            "D": "可以有聊天范围"
+        },
+        "answers": [
+            "C",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 147,
+        "type": "multiple",
+        "question": "检索增强生成与永久记忆有哪些区别？",
+        "options": {
+            "A": "检索为当前请求提供相关材料",
+            "B": "开启后就不再需要上下文预算",
+            "C": "等于无限保存到模型权重",
+            "D": "并不保证永远记住全部聊天"
+        },
+        "answers": [
+            "A",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 148,
+        "type": "multiple",
+        "question": "遇到前端角色卡显示异常，哪些检查合理？",
+        "options": {
+            "A": "相关扩展版本",
+            "B": "作者要求的依赖",
+            "C": "配套正则是否启用",
+            "D": "先删除整个酒馆数据目录"
+        },
+        "answers": [
+            "A",
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 149,
+        "type": "multiple",
+        "question": "快速回复按钮没有出现，哪些检查合理？",
+        "options": {
+            "A": "是否正确导入回复集",
+            "B": "回复集是否关联到合适范围",
+            "C": "API 密钥是否包含角色名",
+            "D": "是否启用了快速回复"
+        },
+        "answers": [
+            "A",
+            "B",
+            "D"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 150,
+        "type": "multiple",
+        "question": "关于文本补全与聊天补全，哪些说法正确？",
+        "options": {
+            "A": "可以无条件照搬另一种连接的配置",
+            "B": "两者的提示词配置方式可能不同",
+            "C": "聊天补全主要使用提示词管理器",
+            "D": "所有高级格式设置都适用于全部连接"
+        },
+        "answers": [
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
+    },
+    {
+        "id": 151,
+        "type": "multiple",
+        "question": "哪类信息适合写进资源的使用说明？",
+        "options": {
+            "A": "所需扩展或配套文件",
+            "B": "适用模型和版本",
+            "C": "导入和启用步骤",
+            "D": "承诺所有环境都绝不报错"
+        },
+        "answers": [
+            "A",
+            "B",
+            "C"
+        ],
+        "explanation": "需选择全部正确项；答案依据所列教程知识点。",
+        "sources": [
+            "https://wiki.opizontas.org/books/642e9/page/9b861"
+        ],
+        "reviewed_at": "2026-10-25"
     }
 ]

@@ -1,0 +1,109 @@
+[
+  {
+    "id": "draft_multi_001",
+    "type": "multiple",
+    "question": "资源导入前应检查哪些事项？",
+    "options": {
+      "A": "资源类型及对应导入入口",
+      "B": "作者要求的配套扩展或正则",
+      "C": "适用版本与模型",
+      "D": "只要后缀是 JSON 就能混用"
+    },
+    "answers": [
+      "A",
+      "B",
+      "C"
+    ],
+    "source": "https://wiki.opizontas.org/books/642e9/page/f73b7",
+    "enabled": false
+  },
+  {
+    "id": "draft_multi_002",
+    "type": "multiple",
+    "question": "世界书没有进入请求时，哪些检查有帮助？",
+    "options": {
+      "A": "是否关联到当前上下文",
+      "B": "条目是否启用且满足触发条件",
+      "C": "预算是否足够",
+      "D": "角色头像颜色"
+    },
+    "answers": [
+      "A",
+      "B",
+      "C"
+    ],
+    "source": "https://docs.sillytavern.app/usage/core-concepts/worldinfo/",
+    "enabled": false
+  },
+  {
+    "id": "draft_multi_003",
+    "type": "multiple",
+    "question": "以下哪些属于合理的正则排错步骤？",
+    "options": {
+      "A": "检查启用状态和作用范围",
+      "B": "在测试模式里验证样本文本",
+      "C": "区分显示处理和提示词处理",
+      "D": "把所有全局规则一起打开"
+    },
+    "answers": [
+      "A",
+      "B",
+      "C"
+    ],
+    "source": "https://docs.sillytavern.app/extensions/regex/",
+    "enabled": false
+  },
+  {
+    "id": "draft_multi_004",
+    "type": "multiple",
+    "question": "用户角色管理（Persona）可以涉及哪些设置？",
+    "options": {
+      "A": "名字与头像",
+      "B": "人设描述",
+      "C": "将人设绑定到聊天",
+      "D": "更改上游模型权重"
+    },
+    "answers": [
+      "A",
+      "B",
+      "C"
+    ],
+    "source": "https://docs.sillytavern.app/usage/core-concepts/personas/",
+    "enabled": false
+  },
+  {
+    "id": "draft_multi_005",
+    "type": "multiple",
+    "question": "以下关于请求上下文的说法哪些正确？",
+    "options": {
+      "A": "可能包含角色描述和用户人设",
+      "B": "可能包含激活的世界书内容",
+      "C": "可能包含历史消息",
+      "D": "只包含最后一条输入"
+    },
+    "answers": [
+      "A",
+      "B",
+      "C"
+    ],
+    "source": "https://docs.sillytavern.app/usage/prompts/",
+    "enabled": false
+  },
+  {
+    "id": "draft_multi_006",
+    "type": "multiple",
+    "question": "关于 Data Bank 的说法哪些正确？",
+    "options": {
+      "A": "可管理用于检索的文档",
+      "B": "附件可有不同可用范围",
+      "C": "保证无限记忆",
+      "D": "角色附件一定随卡导出"
+    },
+    "answers": [
+      "A",
+      "B"
+    ],
+    "source": "https://docs.sillytavern.app/usage/core-concepts/data-bank/",
+    "enabled": false
+  }
+]

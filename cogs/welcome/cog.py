@@ -11,7 +11,7 @@ from .views import QuizStartView
 
 # --- 配置区 ---
 RETRY_COOLDOWN = 900
-QUIZ_DURATION = 120
+from .quiz_logic import QUIZ_DURATION, is_correct as answer_is_correct, expected_answers
 QUIZ_SETTLEMENT_GRACE = 10
 QUIZ_LOG_CHANNEL_ID = IDS.get("QUIZ_LOG_CHANNEL_ID")
 PUBLIC_RESULT_CHANNEL_ID = 1452485785939869808
@@ -112,12 +112,15 @@ class WelcomeCog(commands.Cog):
         history_time = self.history.get(user_id)
         if not history_time:
             return True, 0
+        from .attempts import day_key
+        if day_key(history_time) != day_key():
+            return True, 0
         elapsed = (discord.utils.utcnow() - history_time).total_seconds()
         if elapsed < RETRY_COOLDOWN:
             return False, int(RETRY_COOLDOWN - elapsed)
         return True, 0
 
-    async def timer_task(self, interaction: discord.Interaction, user_id: int):
+    async def timer_task(self, interaction: discord.Interaction, user_id: int, expected_session=None):
         """答题超时计时器"""
         try:
             # Leave a small settlement window for a selection that Discord has
@@ -126,7 +129,7 @@ class WelcomeCog(commands.Cog):
             if user_id in self.sessions:
                 session = self.sessions[user_id]
                 elapsed = (discord.utils.utcnow() - session["start_time"]).total_seconds()
-                if elapsed >= QUIZ_DURATION:
+                if (expected_session is None or session is expected_session) and elapsed >= QUIZ_DURATION:
                     # 使用 self 调用方法
                     await self.finalize_quiz(interaction, user_id, is_timeout=True)
         except Exception as e:
@@ -138,17 +141,22 @@ class WelcomeCog(commands.Cog):
             return
 
         session = self.sessions.pop(user_id)
-        self.history[user_id] = discord.utils.utcnow()
+        test_mode = bool(session.get("test_mode"))
+        if not test_mode:
+            self.history[user_id] = discord.utils.utcnow()
 
-        score = 0
+        correct_count = 0
         details = []
         for i, q in enumerate(session["questions"]):
             ans = session["answers"].get(i)
-            is_correct = (ans == q["answer"])
-            if is_correct: score += 10
-            details.append(f"Q{i+1}: {'✅' if is_correct else '❌'} (选{ans or '未答'}/对{q['answer']})")
+            is_correct = answer_is_correct(q, ans)
+            if is_correct: correct_count += 1
+            selected_text = "、".join(ans) if isinstance(ans, list) else (ans or "未答")
+            correct_text = "、".join(sorted(expected_answers(q)))
+            details.append(f"Q{i+1}: {'✅' if is_correct else '❌'} (选{selected_text}/对{correct_text})")
 
-        passed = score >= 60
+        passed = correct_count * 100 >= len(session["questions"]) * 60
+        score = round(correct_count * 100 / len(session["questions"]), 1)
         title_prefix = "⏱️ 答题超时" if is_timeout else "📝 答题结束"
 
         embed = discord.Embed(
@@ -158,7 +166,11 @@ class WelcomeCog(commands.Cog):
         )
 
         approved_member = None
-        if passed:
+        if test_mode:
+            embed.title = "🧪 测试模式 · " + title_prefix
+            embed.description += f"\n\n{'✅ 测试通过' if passed else '❌ 测试未通过（需60分）'}\n不变更身份、不发送准入私信、不计入正式记录；可立即重新测试。"
+            embed.add_field(name="逐题核对", value="\n".join(details), inline=False)
+        elif passed:
             try:
                 from cogs.shared.admission_restore import restore
                 member = await interaction.guild.fetch_member(user_id)
@@ -169,7 +181,12 @@ class WelcomeCog(commands.Cog):
                 embed.description += "\n\n答题已通过，但身份恢复失败，请联系管理员或稍后重新答题；原身份记录已保留。"
                 print(f"为用户 {user_id} 恢复身份组失败: {e}")
         else:
-            embed.description += f"\n\n❌ **未通过 (需60分)**\n请仔细阅读规则或群公告。\n你可以在 **{RETRY_COOLDOWN // 60}分钟** 后再次尝试。"
+            from .attempts import used_today
+            daily_used = await asyncio.to_thread(used_today, interaction.guild.id, user_id)
+            retry_text = ("今日 3 次答题机会已用完，请等待北京时间次日 00:00 刷新。"
+                          if daily_used >= 3 else
+                          f"今日剩余 {3-daily_used} 次；冷却 {RETRY_COOLDOWN // 60} 分钟后可重试。")
+            embed.description += f"\n\n❌ **未通过 (需60分，15题答对9题)**\n请仔细阅读规则或群公告。\n{retry_text}"
 
         # --- 核心修改部分 ---
         try:
@@ -213,7 +230,8 @@ class WelcomeCog(commands.Cog):
                 print(f"发送新兵蛋子通过私信失败: user={user_id} error={error!r}")
 
         # 发送日志的逻辑保持不变
-        self._send_public_log(interaction, user_id, score, passed, is_timeout, details)
+        if not test_mode:
+            self._send_public_log(interaction, user_id, score, passed, is_timeout, details)
 
     def _send_public_log(self, interaction, user_id, score, passed, is_timeout, details):
         public_channel = self.bot.get_channel(PUBLIC_RESULT_CHANNEL_ID)
@@ -250,8 +268,10 @@ class WelcomeCog(commands.Cog):
                 "欢迎来到 **🔮LOFI-加载中**！\n"
                 "为了维护社区环境，请在开始答题前仔细阅读规则。\n\n"
                 "**规则说明：**\n"
-                "• 共10道题，涉及SillyTavern基础与社区规则\n"
-                f"• **限时 {QUIZ_DURATION // 60} 分钟**，60分及格\n"
+                "• 共15道题，涉及SillyTavern基础与社区规则\n"
+                f"• **限时 {QUIZ_DURATION // 60} 分钟**，60分及格（答对9题）\n"
+                "• 12 道单选 + 3 道多选；多选需确认，选全才得分\n"
+                "• 每人每天最多 3 次，北京时间 00:00 刷新；开考即计次，测试模式除外\n"
                 f"• **答题失败需等待 {RETRY_COOLDOWN // 60} 分钟冷却**\n"
                 "• 账号需注册满30天，且不为可疑账号\n"
                 "• 通过后自动获得 `新兵蛋子` 身份，解锁部分频道\n\n"
