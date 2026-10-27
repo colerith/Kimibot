@@ -550,7 +550,10 @@ def _read_legacy_points_json() -> dict:
 def _replace_database_snapshot(connection: sqlite3.Connection, data: dict) -> None:
     normalized = _normalize_points_data(data)
     connection.execute("DELETE FROM point_users")
-    connection.execute("DELETE FROM point_sections")
+    # Compatibility snapshots only own these sections. Preserve transactional
+    # extensions (makeup inventory/receipts, lottery receipts, etc.).
+    for namespace in (*_DICT_SECTIONS, *_LIST_SECTIONS):
+        connection.execute("DELETE FROM point_sections WHERE namespace=?", (namespace,))
     connection.executemany(
         "INSERT INTO point_users(user_key, data, has_monthly_card) VALUES (?, ?, ?)",
         (
@@ -571,7 +574,7 @@ def _replace_database_snapshot(connection: sqlite3.Connection, data: dict) -> No
             (namespace, _json_dump(normalized.get(namespace, []))),
         )
     connection.execute(
-        "INSERT INTO point_sections(namespace, item_key, data) VALUES ('config', 'monthly_card', ?)",
+        "INSERT OR REPLACE INTO point_sections(namespace, item_key, data) VALUES ('config', 'monthly_card', ?)",
         (_json_dump(normalized.get("monthly_card_config", DEFAULT_MONTHLY_CARD_CONFIG)),),
     )
     for tx in normalized.get("transactions", []):
