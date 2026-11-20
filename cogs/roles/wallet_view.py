@@ -144,7 +144,7 @@ class WalletView(discord.ui.View):
         await self.render(interaction, step=1)
 
     @discord.ui.button(label='刷新', emoji='🔄', style=discord.ButtonStyle.primary, row=1)
-    async def refresh(self, button, interaction):
+    async def refresh_wallet(self, button, interaction):
         await interaction.response.defer()
         await self.render(interaction)
 

@@ -531,3 +531,30 @@ class PromotionUITests(PromotionFixture, unittest.IsolatedAsyncioTestCase):
             stamps.append(time.monotonic())
         await asyncio.gather(cog.api(request), cog.api(request))
         self.assertGreaterEqual(stamps[1] - stamps[0], 0.99)
+
+    async def test_deleted_card_stops_recovery_but_transient_errors_retry(self):
+        from cogs.promotion.cog import MissingApplicationFiles
+        for error in (discord.NotFound(SimpleNamespace(status=404,reason='Not Found'), 'gone'),
+                      MissingApplicationFiles('originals deleted')):
+            row=self.create(request=str(error))
+            row=store.update(row['id'],status='pending',message_id=123,layout_version=2)
+            cog=PromotionCog.__new__(PromotionCog)
+            cog.bot=SimpleNamespace(get_guild=lambda _: SimpleNamespace())
+            channel=SimpleNamespace(fetch_message=AsyncMock(side_effect=error))
+            cog.channel=AsyncMock(return_value=channel)
+            async def api(operation,*args,**kwargs):
+                return await operation(*args,**kwargs)
+            cog.api=api
+            await cog.process(row)
+            saved=store.get(row['id'])
+            self.assertTrue(saved['card_deleted'])
+            self.assertFalse(saved['card_dirty'])
+            self.assertEqual(saved['status'],'deleted')
+            await cog.process(saved)
+            channel.fetch_message.assert_awaited_once()
+        row=self.create(request="temporary")
+        row=store.update(row['id'],status='pending',message_id=123,layout_version=2)
+        channel.fetch_message=AsyncMock(side_effect=RuntimeError('temporary network failure'))
+        with self.assertRaises(RuntimeError):
+            await cog.process(row)
+        self.assertFalse(store.get(row['id']).get('card_deleted',False))

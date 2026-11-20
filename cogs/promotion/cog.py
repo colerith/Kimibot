@@ -12,6 +12,10 @@ from .views import EntryView, ReviewView, BottomView, entry_embed, application_e
 log = logging.getLogger(__name__)
 
 
+class MissingApplicationFiles(ValueError):
+    """Original images are gone; do not retry card recovery."""
+
+
 class PromotionCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -113,13 +117,13 @@ class PromotionCog(commands.Cog):
                     else:
                         attachment = next((a for a in attachments if a.filename == path.name), None)
                         if attachment is None:
-                            raise ValueError(f'申请 #{row["id"]} 缺失原图 {path.name}，请恢复 data/promotion_uploads 后重试。')
+                            raise MissingApplicationFiles(f'申请 #{row["id"]} 缺失原图 {path.name}。')
                         files.append(await self.api(attachment.to_file))
             else:
                 for attachment in attachments:
                     files.append(await self.api(attachment.to_file))
             if len(files) < 2:
-                raise ValueError(f'申请 #{row["id"]} 原图不足两张，保留原记录等待恢复。')
+                raise MissingApplicationFiles(f'申请 #{row["id"]} 原图不足两张。')
             return files
         except Exception:
             for file in files:
@@ -205,14 +209,15 @@ class PromotionCog(commands.Cog):
                 await self.api(member.remove_roles, newbie, reason=f'小蛋晋升完成，移除新兵蛋子 #{row["id"]}')
             row = await asyncio.to_thread(store.complete, row['id'])
         card_error = None
-        if (row.get('card_dirty') or row.get('layout_version') != 3) and row.get('message_id'):
+        if not row.get('card_deleted') and (row.get('card_dirty') or row.get('layout_version') != 3) and row.get('message_id'):
             try:
                 channel = await self.channel(row.get('channel_id', store.CHANNEL_ID))
                 message = await self.api(channel.fetch_message, row['message_id'])
                 row = await self.update_application_message(channel, message, row)
-            except discord.NotFound:
-                card_error = ValueError(f'申请 #{row["id"]} 消息或附件不存在，尚未完成恢复。')
-                self.report('恢复申请附件', card_error)
+            except (discord.NotFound, MissingApplicationFiles) as error:
+                row = await asyncio.to_thread(store.update, row['id'], card_deleted=True,
+                    card_dirty=False, status='deleted' if row['status'] == 'pending' else row['status'])
+                log.info('小蛋晋升申请 #%s 消息或原图已删除，停止恢复：%s', row['id'], error)
             except Exception as error:
                 card_error = error
             if card_error is None:
@@ -381,7 +386,8 @@ class PromotionCog(commands.Cog):
                     try:
                         if row['status'] == 'publishing':
                             await self.publish(row)
-                        elif (row['status'] == 'granting' or row.get('card_dirty') or row.get('layout_version') != 3 or
+                        elif (row['status'] == 'granting' or
+                              (not row.get('card_deleted') and (row.get('card_dirty') or row.get('layout_version') != 3)) or
                               (row['status'] in ('approved', 'rejected') and
                                (row.get('log_state') != 'sent' or row.get('dm_state') == 'pending' or
                                 row.get('dm_state') != row.get('logged_dm_state')))):

@@ -229,3 +229,16 @@ class MakeupPickerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs('cogs.points.makeup_views',level='ERROR'):
                 await show_missing_dates(interaction)
         self.assertIn('已记录错误',interaction.edit_original_response.call_args.kwargs['content'])
+
+    async def test_views_do_not_override_discord_refresh_hook(self):
+        import inspect
+        import discord
+        from types import SimpleNamespace
+        from cogs.roles.wallet_view import WalletView
+        from cogs.points.makeup_views import MakeupView
+        # Older deployed Pycord calls View.refresh; newer versions renamed it.
+        with patch.object(discord.ui.View,'refresh',lambda self,components: None,create=True):
+            for view in (WalletView(SimpleNamespace(id=7),9),MakeupView(7)):
+                self.assertEqual(view.refresh.__func__,discord.ui.View.refresh)
+                self.assertFalse(inspect.iscoroutinefunction(view.refresh))
+                view.refresh([])

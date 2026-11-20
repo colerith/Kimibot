@@ -14,7 +14,7 @@ class MakeupView(discord.ui.View):
         async def select_kind(interaction):
             self.kind=select.values[0]
             await interaction.response.defer()
-            await self.refresh(interaction)
+            await self.refresh_panel(interaction)
         select.callback=select_kind
         self.add_item(select)
     async def interaction_check(self, interaction):
@@ -32,7 +32,7 @@ class MakeupView(discord.ui.View):
         except ValueError as error:
             missing=str(error)
         return discord.Embed(title='📅 常驻补签卡',description='\n'.join(lines)+f"\n\n{missing}\n\n当前选择：**{makeup.CARDS[self.kind]['name']}**\n钱包余额：{state['balance']:g} 蛋壳\n本月已使用：**{state['used']}/3** 次（所有卡种合计）\n最近补签日期：{history}\n\n从漏签日期列表选择 1 天至当前卡片剩余天数，可多选、不连续、跨月；选择后确认使用，剩余天数永久保留；优先用完已开卡，再使用整卡。\n按北京时间计算，仅限最近三个月且不早于 2026-08-06 上线日及入服日；不能补今天、未来或已签到日期。\n修复记录与连续天数，按当前基础签到标准补发每天奖励；不补随机事件、前十、活跃、月卡或节日加成。\n购买不计使用次数，库存不会按月清空；使用额度每月1日00:00刷新。",color=0xF4B942)
-    async def refresh(self,interaction):
+    async def refresh_panel(self,interaction):
         await interaction.edit_original_response(embed=await self.embed(interaction.guild_id),view=self)
     @discord.ui.button(label='查看漏签日期',style=discord.ButtonStyle.secondary,row=1)
     async def missing(self,button,interaction):
@@ -45,7 +45,7 @@ class MakeupView(discord.ui.View):
             result=await asyncio.to_thread(makeup.purchase,self.owner,interaction.guild_id,self.kind,str(interaction.id))
             message=result['message']
         except ValueError as error: message=str(error)
-        await self.refresh(interaction)
+        await self.refresh_panel(interaction)
         await interaction.followup.send(message,ephemeral=True)
     @discord.ui.button(label='使用所选卡',style=discord.ButtonStyle.primary,row=1)
     async def apply(self,button,interaction):
