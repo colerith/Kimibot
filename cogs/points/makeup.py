@@ -1,6 +1,7 @@
 """Permanent makeup cards with transactional wallet, inventory and monthly usage."""
 from datetime import date, timedelta
 import re
+from calendar import monthrange
 from . import storage as p
 import config
 
@@ -9,6 +10,18 @@ CARDS = {
     'month': {'name': '三天补签卡', 'price': 10, 'days': 3},
     'previous': {'name': '七天补签卡', 'price': 15, 'days': 7},
 }
+
+
+SIGNIN_START = date(2026, 8, 6)
+
+
+def earliest_makeup_date(joined_date=None, today=None):
+    today = today or date.fromisoformat(p._today())
+    month_index = today.year * 12 + today.month - 1 - 3
+    year, month = divmod(month_index, 12)
+    month += 1
+    cutoff = date(year, month, min(today.day, monthrange(year, month)[1]))
+    return max(SIGNIN_START, cutoff, date.fromisoformat(joined_date) if joined_date else SIGNIN_START)
 
 
 def _state(con, key):
@@ -103,6 +116,9 @@ def use(uid,gid,kind,target,operation_id,joined_date=None):
         receipt_key=f'{gid}:{uid}:use:{operation_id}'
         previous=p._db_get_section(con,'makeup_receipts',receipt_key,None)
         if previous: return previous
+        start = earliest_makeup_date(joined_date, today)
+        if min(parsed) < start:
+            raise ValueError(f'只能补最近三个月内、签到上线及入服后的日期；当前最早可补 {start.isoformat()}。')
         record,key=p._db_get_user(con,uid,gid)
         state=_state(con,key)
         month=today.strftime('%Y-%m')
@@ -155,8 +171,8 @@ def missing_dates(uid, gid, joined_date):
     with p._points_connection() as con:
         record,key=p._db_get_user(con,uid,gid)
         signed=_signed_dates(con,uid,gid,record,_state(con,key))
-    start=date.fromisoformat(joined_date)
     end=date.fromisoformat(p._today())
+    start=earliest_makeup_date(joined_date, end)
     return [value for i in range(1,max(0,(end-start).days)+1)
             if (value := (end-timedelta(days=i)).isoformat()) not in signed]
 

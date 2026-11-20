@@ -134,6 +134,29 @@ class MakeupTests(StorageFixture, unittest.TestCase):
         self.assertEqual(result['remaining'],0)
         self.assertEqual(makeup.snapshot(7,9)['inventory']['month'],1)
 
+    def test_launch_and_rolling_window_boundaries(self):
+        self.assertEqual(makeup.missing_dates(7,9,'2020-01-01')[-1],'2026-08-06')
+        self.today_mock.return_value='2026-11-21'
+        dates=makeup.missing_dates(7,9,'2020-01-01')
+        self.assertEqual(dates[0],'2026-11-20')
+        self.assertEqual(dates[-1],'2026-08-21')
+        self.assertEqual(makeup.missing_dates(7,9,'2026-11-01')[-1],'2026-11-01')
+        self.buy('previous')
+        before=makeup.snapshot(7,9)
+        with self.assertRaises(ValueError):
+            makeup.use(7,9,'previous',['2026-08-20'],'expired','2020-01-01')
+        self.assertEqual(makeup.snapshot(7,9),before)
+        makeup.use(7,9,'previous',['2026-08-21'],'boundary','2020-01-01')
+        self.today_mock.return_value='2026-08-10'
+        with self.assertRaises(ValueError):
+            makeup.use(7,9,'previous',['2026-08-05'],'before_launch')
+        self.assertEqual(makeup.missing_dates(7,9,'2026-08-11'),[])
+
+    def test_three_month_calendar_clamping(self):
+        from datetime import date
+        self.assertEqual(makeup.earliest_makeup_date('2020-01-01',date(2027,5,31)),date(2027,2,28))
+        self.assertEqual(makeup.earliest_makeup_date('2020-01-01',date(2028,5,31)),date(2028,2,29))
+
 
 class MakeupPickerTests(unittest.IsolatedAsyncioTestCase):
     async def test_cross_page_selection_preserved_and_completion_disables(self):
@@ -186,3 +209,23 @@ class MakeupPickerTests(unittest.IsolatedAsyncioTestCase):
             embed=await MakeupView(7,'2026-09-01').embed(9)
         self.assertIn('40 天',embed.description)
         self.assertIn('已开卡余量 5 天',embed.description)
+
+    async def test_query_acknowledges_and_edits_private_response(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from cogs.points.makeup_views import show_missing_dates
+        interaction=SimpleNamespace(user=SimpleNamespace(id=7,joined_at=None),guild_id=9,
+            response=SimpleNamespace(defer=AsyncMock()),edit_original_response=AsyncMock())
+        def missing(*args):
+            interaction.response.defer.assert_awaited_once_with(ephemeral=True,invisible=False)
+            return ['2026-10-20']
+        with patch.object(makeup,'missing_dates',side_effect=missing):
+            await show_missing_dates(interaction)
+        self.assertIn('1 天',interaction.edit_original_response.call_args.kwargs['embed'].description)
+        with patch.object(makeup,'missing_dates',side_effect=ValueError('无法获取入服日期')):
+            await show_missing_dates(interaction)
+        self.assertEqual(interaction.edit_original_response.call_args.kwargs['content'],'无法获取入服日期')
+        with patch.object(makeup,'missing_dates',side_effect=RuntimeError('database failed')):
+            with self.assertLogs('cogs.points.makeup_views',level='ERROR'):
+                await show_missing_dates(interaction)
+        self.assertIn('已记录错误',interaction.edit_original_response.call_args.kwargs['content'])

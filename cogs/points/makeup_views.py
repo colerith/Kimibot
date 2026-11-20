@@ -1,11 +1,12 @@
 import asyncio
+import logging
 import discord
 from . import makeup
 
 
 class MakeupView(discord.ui.View):
     def __init__(self, owner, joined_date=None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=900, disable_on_timeout=True)
         self.owner=owner
         self.joined_date=joined_date
         self.kind='week'
@@ -30,7 +31,7 @@ class MakeupView(discord.ui.View):
             missing=f'累计漏签 **{len(dates)} 天**；最近日期：'+('、'.join(dates[:10]) or '无')+'。点击【查看漏签日期】查看全部。'
         except ValueError as error:
             missing=str(error)
-        return discord.Embed(title='📅 常驻补签卡',description='\n'.join(lines)+f"\n\n{missing}\n\n当前选择：**{makeup.CARDS[self.kind]['name']}**\n钱包余额：{state['balance']:g} 蛋壳\n本月已使用：**{state['used']}/3** 次（所有卡种合计）\n最近补签日期：{history}\n\n从漏签日期列表选择 1 天至当前卡片剩余天数，可多选、不连续、跨月；选择后确认使用，剩余天数永久保留；优先用完已开卡，再使用整卡。\n按北京时间计算，不能补今天、未来、入服前或已签到日期。\n修复记录与连续天数，按当前基础签到标准补发每天奖励；不补随机事件、前十、活跃、月卡或节日加成。\n购买不计使用次数，库存不会按月清空；使用额度每月1日00:00刷新。",color=0xF4B942)
+        return discord.Embed(title='📅 常驻补签卡',description='\n'.join(lines)+f"\n\n{missing}\n\n当前选择：**{makeup.CARDS[self.kind]['name']}**\n钱包余额：{state['balance']:g} 蛋壳\n本月已使用：**{state['used']}/3** 次（所有卡种合计）\n最近补签日期：{history}\n\n从漏签日期列表选择 1 天至当前卡片剩余天数，可多选、不连续、跨月；选择后确认使用，剩余天数永久保留；优先用完已开卡，再使用整卡。\n按北京时间计算，仅限最近三个月且不早于 2026-08-06 上线日及入服日；不能补今天、未来或已签到日期。\n修复记录与连续天数，按当前基础签到标准补发每天奖励；不补随机事件、前十、活跃、月卡或节日加成。\n购买不计使用次数，库存不会按月清空；使用额度每月1日00:00刷新。",color=0xF4B942)
     async def refresh(self,interaction):
         await interaction.edit_original_response(embed=await self.embed(interaction.guild_id),view=self)
     @discord.ui.button(label='查看漏签日期',style=discord.ButtonStyle.secondary,row=1)
@@ -69,7 +70,7 @@ class MakeupView(discord.ui.View):
 
 class MakeupDatesView(discord.ui.View):
     def __init__(self,panel,kind,dates,joined_date,parent_message,capacity=None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=900, disable_on_timeout=True)
         self.panel,self.kind=panel,kind
         self.capacity=capacity if capacity is not None else makeup.CARDS[kind]['days']
         self.dates,self.joined_date,self.parent_message=dates,joined_date,parent_message
@@ -84,7 +85,7 @@ class MakeupDatesView(discord.ui.View):
 
     def embed(self):
         chosen='、'.join(sorted(self.selected)) or '尚未选择'
-        return discord.Embed(title=f"📅 使用{makeup.CARDS[self.kind]['name']}",description=f"仅显示入服后、今天之前的漏签日期。\n可跨月、不连续多选，翻页保留选择。\n请选择 **1 至 {self.capacity} 天**，确认后按实际天数扣除余量、计1次使用并补发基础奖励，未用完的天数留到下次。\n\n已选：{chosen}\n第 {self.page+1}/{max(1,(len(self.dates)+24)//25)} 页",color=0xF4B942)
+        return discord.Embed(title=f"📅 使用{makeup.CARDS[self.kind]['name']}",description=f"仅显示最近三个月内、2026-08-06 上线及入服后、今天之前的漏签日期。\n可跨月、不连续多选，翻页保留选择。\n请选择 **1 至 {self.capacity} 天**，确认后按实际天数扣除余量、计1次使用并补发基础奖励，未用完的天数留到下次。\n\n已选：{chosen}\n第 {self.page+1}/{max(1,(len(self.dates)+24)//25)} 页",color=0xF4B942)
 
     def rebuild(self):
         self.clear_items()
@@ -166,19 +167,29 @@ def member_joined_date(member):
 
 
 async def show_missing_dates(interaction):
-    await interaction.response.defer(ephemeral=True)
+    # A visible deferred response creates a new private result, rather than
+    # silently acknowledging the wallet component without showing progress.
+    await interaction.response.defer(ephemeral=True, invisible=False)
     try:
-        dates=await asyncio.to_thread(makeup.missing_dates,interaction.user.id,interaction.guild_id,member_joined_date(interaction.user))
+        dates=await asyncio.wait_for(
+            asyncio.to_thread(makeup.missing_dates,interaction.user.id,interaction.guild_id,member_joined_date(interaction.user)),
+            timeout=20,
+        )
+        view=MissingDatesView(interaction.user.id,dates)
+        await interaction.edit_original_response(content=None,embed=view.embed(),view=view)
     except ValueError as error:
-        await interaction.followup.send(str(error),ephemeral=True)
-        return
-    view=MissingDatesView(interaction.user.id,dates)
-    await interaction.followup.send(embed=view.embed(),view=view,ephemeral=True)
+        await interaction.edit_original_response(content=str(error),embed=None,view=None)
+    except TimeoutError:
+        logging.getLogger(__name__).warning('Missing-date query timed out: guild=%s user=%s',interaction.guild_id,interaction.user.id)
+        await interaction.edit_original_response(content='漏签查询暂时繁忙，请稍后重新打开蛋壳余额再试。',embed=None,view=None)
+    except Exception:
+        logging.getLogger(__name__).exception('Missing-date query failed: guild=%s user=%s',interaction.guild_id,interaction.user.id)
+        await interaction.edit_original_response(content='漏签查询失败，已记录错误，请稍后重新打开蛋壳余额再试。',embed=None,view=None)
 
 
 class MissingDatesView(discord.ui.View):
     def __init__(self,owner,dates):
-        super().__init__(timeout=300)
+        super().__init__(timeout=900, disable_on_timeout=True)
         self.owner,self.dates,self.page=owner,dates,0
         self.update_buttons()
 
@@ -194,7 +205,7 @@ class MissingDatesView(discord.ui.View):
 
     def embed(self):
         dates='、'.join(self.dates[self.page*25:(self.page+1)*25]) or '暂无漏签'
-        return discord.Embed(title='📅 漏签日期',description=f'入服日起至昨天（北京时间），累计漏签 **{len(self.dates)} 天**。\n不含今天、已签到及已补签日期。\n\n{dates}\n\n第 {self.page+1}/{max(1,(len(self.dates)+24)//25)} 页',color=0xF4B942)
+        return discord.Embed(title='📅 漏签日期',description=f'最近三个月内，且不早于 2026-08-06 上线日及入服日，截止昨天（北京时间），可补漏签累计 **{len(self.dates)} 天**。\n不含今天、已签到及已补签日期。\n\n{dates}\n\n第 {self.page+1}/{max(1,(len(self.dates)+24)//25)} 页',color=0xF4B942)
 
     @discord.ui.button(label='上一页')
     async def previous(self,button,interaction):

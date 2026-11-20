@@ -97,7 +97,7 @@ class WalletFilter(discord.ui.Select):
 
 class WalletView(discord.ui.View):
     def __init__(self, user, guild_id):
-        super().__init__(timeout=600)
+        super().__init__(timeout=900, disable_on_timeout=True)
         self.user, self.guild_id = user, guild_id
         self.mode, self.page = 'overview', 0
         self.lock = asyncio.Lock()
