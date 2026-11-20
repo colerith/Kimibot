@@ -9,6 +9,8 @@ class MakeupTests(StorageFixture, unittest.TestCase):
         super().setUp()
         self.clock=patch.object(p,'_today',return_value='2026-10-27')
         self.today_mock=self.clock.start(); self.addCleanup(self.clock.stop)
+        timestamp=patch.object(p,'_now_iso',side_effect=lambda: p._today()+'T12:00:00+08:00')
+        timestamp.start(); self.addCleanup(timestamp.stop)
         p.modify_user_points(7,180,9)
     def buy(self,kind='week',i='buy'):
         return makeup.purchase(7,9,kind,i)
@@ -101,10 +103,36 @@ class MakeupTests(StorageFixture, unittest.TestCase):
 
     def test_invalid_multi_selection_no_consumption(self):
         self.buy('month')
-        for dates in [['2026-10-20'],['2026-10-20']*3,['2026-10-20','2026-10-21','2026-10-27']]:
+        for dates in [[],['2026-10-19','2026-10-20','2026-10-21','2026-10-22'],['2026-10-20']*3,['2026-10-20','2026-10-21','2026-10-27']]:
             with self.assertRaises(ValueError): makeup.use(7,9,'month',dates,'invalid')
         self.assertEqual(makeup.snapshot(7,9)['inventory']['month'],1)
         self.assertEqual(makeup.snapshot(7,9)['used'],0)
+
+    def test_partial_card_survives_rollover_and_ledger_recovery(self):
+        self.buy('previous')
+        first=makeup.use(7,9,'previous',['2026-10-20','2026-10-21'],'partial')
+        self.assertEqual(first['remaining'],5)
+        self.assertEqual(makeup.use(7,9,'previous',['2026-10-20','2026-10-21'],'partial'),first)
+        with p._points_connection() as con:
+            con.execute("DELETE FROM point_sections WHERE namespace IN ('makeup_cards','makeup_receipts')")
+        state=makeup.snapshot(7,9)
+        self.assertEqual(state['remaining']['previous'],5)
+        self.assertEqual(state['inventory']['previous'],0)
+        self.assertEqual(state['used'],1)
+        self.today_mock.return_value='2026-11-05'
+        result=makeup.use(7,9,'previous',['2026-10-22'],'rest')
+        self.assertEqual(result['remaining'],4)
+        self.assertEqual(makeup.snapshot(7,9)['used'],1)
+
+    def test_partial_capacity_and_new_card_are_separate(self):
+        self.buy('month')
+        makeup.use(7,9,'month',['2026-10-20'],'partial')
+        self.buy('month','second')
+        with self.assertRaises(ValueError):
+            makeup.use(7,9,'month',['2026-10-21','2026-10-22','2026-10-23'],'too_many')
+        result=makeup.use(7,9,'month',['2026-10-21','2026-10-22'],'finish')
+        self.assertEqual(result['remaining'],0)
+        self.assertEqual(makeup.snapshot(7,9)['inventory']['month'],1)
 
 
 class MakeupPickerTests(unittest.IsolatedAsyncioTestCase):
@@ -123,6 +151,7 @@ class MakeupPickerTests(unittest.IsolatedAsyncioTestCase):
         selector._selected_values=dates[:2]
         await selector.callback(interaction)
         self.assertEqual(view.selected,set(dates[:2]))
+        self.assertFalse(next(c for c in view.children if getattr(c,'label',None)=='确认补签并领取奖励').disabled)
         await next(c for c in view.children if getattr(c,'label',None)=='下一页').callback(interaction)
         selector=view.children[0]
         selector._interaction=interaction
@@ -138,3 +167,22 @@ class MakeupPickerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(use.call_args.args[3],sorted(dates[:2]+[dates[25]]))
         self.assertIsNone(interaction.edit_original_response.call_args.kwargs['view'])
         parent.edit.assert_awaited_once()
+
+    async def test_missing_dates_pagination_and_shop_summary(self):
+        from datetime import date, timedelta
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from cogs.points.makeup_views import MissingDatesView, MakeupView
+        dates=[(date(2026,10,26)-timedelta(days=i)).isoformat() for i in range(40)]
+        view=MissingDatesView(7,dates)
+        self.assertIn('40 天',view.embed().description)
+        self.assertTrue(view.previous.disabled)
+        interaction=SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()))
+        await view.next_page.callback(interaction)
+        self.assertIn(dates[25],view.embed().description)
+        self.assertTrue(view.next_page.disabled)
+        state={'dates':[], 'inventory':{}, 'remaining':{'previous':5}, 'balance':20,'used':1}
+        with patch.object(makeup,'snapshot',return_value=state), patch.object(makeup,'missing_dates',return_value=dates):
+            embed=await MakeupView(7,'2026-09-01').embed(9)
+        self.assertIn('40 天',embed.description)
+        self.assertIn('已开卡余量 5 天',embed.description)

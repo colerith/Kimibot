@@ -1710,7 +1710,7 @@ def build_redeem_shop_embed(guild: discord.Guild, user_id: int) -> discord.Embed
             f"售价 **{format_shells(monthly['price'])}** 蛋壳，购买后立即启用 **{monthly['duration_days']}** 天。\n"
             f"每日固定 +**{format_shells(monthly['daily_reward'])}** 蛋壳，活动收益 **{monthly['reward_multiplier']} 倍**。\n"
             f"{sale_state} · {monthly_state} · {gift_state}\n\n"
-            "### 常驻补签卡\n一天卡 5 蛋壳 · 三天卡 10 蛋壳 · 七天卡 15 蛋壳，可跨月补签并补发基础奖励。\n所有卡种合计每月最多使用 3 次，点击【补签卡】购买或使用。\n\n"
+            "### 常驻补签卡\n一天卡 5 蛋壳 · 三天卡 10 蛋壳 · 七天卡 15 蛋壳，可跨月补签并补发基础奖励，支持少于卡片天数使用，余量留到下次。\n所有卡种合计每月最多使用 3 次，点击【补签卡】购买或使用。\n\n"
             "### 身份兑换\n"
             + ("\n".join(lines) if lines else "*当前暂无可兑换身份组。*")
         ),

@@ -147,3 +147,8 @@ class WalletView(discord.ui.View):
     async def refresh(self, button, interaction):
         await interaction.response.defer()
         await self.render(interaction)
+
+    @discord.ui.button(label='查看漏签日期', emoji='📅', style=discord.ButtonStyle.secondary, row=2)
+    async def missing_dates(self, button, interaction):
+        from cogs.points.makeup_views import show_missing_dates
+        await show_missing_dates(interaction)

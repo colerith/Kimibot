@@ -14,8 +14,9 @@ CARDS = {
 def _state(con, key):
     state = p._db_get_section(con, 'makeup_cards', key, None)
     if state is not None:
+        state.setdefault('remaining', {})
         return state
-    state = {'inventory': {}, 'dates': [], 'usage': {}}
+    state = {'inventory': {}, 'dates': [], 'usage': {}, 'remaining': {}}
     gid, uid = key.split(':', 1)
     # Older snapshot saves erased sections but retained the accounting ledger.
     for row in con.execute("SELECT * FROM point_transactions WHERE guild_id=? AND user_id=? AND source IN ('makeup_card_purchase','makeup_sign_reward') ORDER BY id", (gid, uid)):
@@ -28,9 +29,12 @@ def _state(con, key):
             if ' 至 ' in row['reason'] and len(days) == 2:
                 start, end = map(date.fromisoformat, days)
                 days = [(start + timedelta(days=i)).isoformat() for i in range((end-start).days+1)]
-            kind = next((k for k,v in CARDS.items() if v['days'] == len(days)), None)
+            marker = re.search(r'card=(week|month|previous);remaining=(\d+)', row['reason'])
+            kind = marker.group(1) if marker else next((k for k,v in CARDS.items() if v['days'] == len(days)), None)
             if kind:
-                state['inventory'][kind] = state['inventory'].get(kind, 0) - 1
+                if not state['remaining'].get(kind, 0):
+                    state['inventory'][kind] = state['inventory'].get(kind, 0) - 1
+                state['remaining'][kind] = int(marker.group(2)) if marker else 0
                 state['dates'].extend(days)
                 month = row['time'][:7]
                 state['usage'][month] = state['usage'].get(month, 0) + 1
@@ -83,8 +87,8 @@ def use(uid,gid,kind,target,operation_id,joined_date=None):
         targets=[(day+timedelta(days=n)).isoformat() for n in range(CARDS[kind]['days'])]
     else:
         targets=sorted(target)
-    if len(targets)!=CARDS[kind]['days'] or len(set(targets))!=len(targets):
-        raise ValueError(f"请恰好选择 {CARDS[kind]['days']} 个不同的漏签日期。")
+    if not 1 <= len(targets) <= CARDS[kind]['days'] or len(set(targets))!=len(targets):
+        raise ValueError(f"请选择 1 至 {CARDS[kind]['days']} 个不同的漏签日期。")
     try:
         parsed=[date.fromisoformat(value) for value in targets]
     except (ValueError, TypeError): raise ValueError('日期格式应为 YYYY-MM-DD。')
@@ -103,7 +107,9 @@ def use(uid,gid,kind,target,operation_id,joined_date=None):
         state=_state(con,key)
         month=today.strftime('%Y-%m')
         if state['usage'].get(month,0)>=3: raise ValueError('本月已使用 3 次补签卡，请下个北京时间自然月再使用。')
-        if state['inventory'].get(kind,0)<1: raise ValueError('该补签卡库存不足，请先购买。')
+        capacity = available_days(state, kind)
+        if not capacity: raise ValueError('该补签卡库存不足，请先购买。')
+        if len(targets) > capacity: raise ValueError(f'当前卡片仅剩 {capacity} 天，请减少选择后再试。')
         dates=_signed_dates(con, uid, gid, record, state)
         if dates.intersection(targets): raise ValueError('所选日期包含已签到或已补签日期，请重新选择；未扣卡。')
         dates.update(targets)
@@ -112,15 +118,17 @@ def use(uid,gid,kind,target,operation_id,joined_date=None):
         while cursor.isoformat() in dates:
             streak+=1; cursor-=timedelta(days=1)
         record.update(last_sign_date=latest,streak_days=streak)
-        state['inventory'][kind]-=1
+        if not state['remaining'].get(kind, 0):
+            state['inventory'][kind]-=1
+        state['remaining'][kind] = capacity - len(targets)
         state['dates'].extend(targets)
         state['usage'][month]=state['usage'].get(month,0)+1
         reward=p._round_shells(float(getattr(config,'POINTS_SIGN_REWARD',1.0))*len(targets))
         record['shells']=record['points']=p._round_shells(record.get('shells',0)+reward)
-        p._db_append_transaction(con,record,user_id=uid,guild_id=gid,amount=reward,source='makeup_sign_reward',reason='、'.join(targets)+' 基础签到奖励',idempotency_key=receipt_key)
+        p._db_append_transaction(con,record,user_id=uid,guild_id=gid,amount=reward,source='makeup_sign_reward',reason='、'.join(targets)+f' 基础签到奖励 card={kind};remaining={state["remaining"][kind]}',idempotency_key=receipt_key)
         p._db_put_user(con,key,record)
         p._db_put_section(con,'makeup_cards',key,state)
-        result={'reward': reward, 'dates': targets, 'message':f'已补签 {chr(12289).join(targets)}（{len(targets)}天），当前最近一段连续签到 {streak} 天；本月已使用 {state["usage"][month]}/3 次。已补发基础签到奖励 {reward:g} 蛋壳。'}
+        result={'reward': reward, 'dates': targets, 'remaining': state['remaining'][kind], 'message':f'已补签 {chr(12289).join(targets)}（{len(targets)}天），当前最近一段连续签到 {streak} 天；本月已使用 {state["usage"][month]}/3 次。已补发基础签到奖励 {reward:g} 蛋壳。当前卡片剩余 {state["remaining"][kind]} 天，可留待下次使用。'}
         p._db_put_section(con,'makeup_receipts',receipt_key,result)
         return result
 
@@ -151,3 +159,8 @@ def missing_dates(uid, gid, joined_date):
     end=date.fromisoformat(p._today())
     return [value for i in range(1,max(0,(end-start).days)+1)
             if (value := (end-timedelta(days=i)).isoformat()) not in signed]
+
+
+def available_days(state, kind):
+    """Finish an opened card before opening the next full card."""
+    return state.get('remaining', {}).get(kind, 0) or (CARDS[kind]['days'] if state['inventory'].get(kind, 0) > 0 else 0)
