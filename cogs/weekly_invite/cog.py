@@ -19,7 +19,7 @@ def public_panel(state):
         embed.add_field(name='本周邀请', value=f"{invite['url']}\n**截止：{expiry} 北京时间**", inline=False)
         view.add_item(discord.ui.Button(label='加入社区', style=discord.ButtonStyle.link, url=invite['url']))
     else:
-        embed.add_field(name='当前状态', value='暂未开放，开放时会自动更新本面板。', inline=False)
+        embed.add_field(name='当前状态', value='社区邀请码暂时停止新建，恢复时间另行通知。' if store.CREATION_PAUSED else '暂未开放，开放时会自动更新本面板。', inline=False)
     embed.set_footer(text=PANEL_FOOTER)
     return embed, view
 

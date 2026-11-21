@@ -18,6 +18,11 @@ def state():
 
 
 class CalendarTests(unittest.TestCase):
+    def setUp(self):
+        pause = patch.object(store, "CREATION_PAUSED", False)
+        pause.start()
+        self.addCleanup(pause.stop)
+
     def test_boundaries(self):
         for date, allowed in [('2026-10-26T00:00', True), ('2026-10-30T23:59', True),
                               ('2026-10-31T00:00', False), ('2026-11-01T23:59', False)]:
@@ -56,7 +61,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def api(fn, *args, **kwargs):
             return await fn(*args, **kwargs)
         self.cog.api = api
-        self.patches = [patch.object(store, 'now', return_value=at('2026-10-28T12:00')),
+        self.patches = [patch.object(store, 'CREATION_PAUSED', False), patch.object(store, 'now', return_value=at('2026-10-28T12:00')),
                         patch.object(store, 'load', side_effect=lambda: self.value), patch.object(store, 'save')]
         for p in self.patches:
             p.start()
@@ -130,3 +135,16 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(panel.to_components())
         self.assertTrue(InviteCopyModal(panel).to_dict())
         self.assertTrue(PausesModal(panel).to_dict())
+
+    async def test_operational_pause_blocks_manual_and_worker_creation(self):
+        from cogs.weekly_invite.cog import public_panel
+        with patch.object(store,'CREATION_PAUSED',True):
+            await self.cog.manage(send=True)
+            await self.cog.worker.coro(self.cog)
+            self.channel.create_invite.assert_not_awaited()
+            self.assertIn('暂时停止新建',public_panel(self.value)[0].fields[0].value)
+            self.value['invite']=dict(code='existing',url='https://discord.gg/existing',expires=at('2026-10-31T00:00').isoformat())
+            await self.cog.manage(send=True)
+            self.assertIn('existing',public_panel(self.value)[0].fields[0].value)
+            self.remote.delete.assert_not_awaited()
+            self.channel.create_invite.assert_not_awaited()

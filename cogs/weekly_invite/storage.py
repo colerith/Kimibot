@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 from cogs.shared.sqlite_store import load_json_namespace, save_json_namespace
 
 CHANNEL_ID = 1563535291850170389
+# Temporary operational pause: keep existing invites until their normal expiry.
+CREATION_PAUSED = True
 TZ = timezone(timedelta(hours=8))
 DEFAULT_COPY = ('本周邀请链接有效至周六 00:00（北京时间），不限使用次数。'
                 '有效期内显示无效，可先检查网络；仍无法加入请联系管理员。\n\n'
@@ -49,7 +51,7 @@ def parse_pauses(text):
 def creation_allowed(state, at=None):
     at = (at or now()).astimezone(TZ)
     _, end = window(at)
-    return (state['enabled'] and at < end and
+    return (not CREATION_PAUSED and state['enabled'] and at < end and
             not any(start <= at.date().isoformat() <= finish for start, finish in state['pauses']))
 
 
